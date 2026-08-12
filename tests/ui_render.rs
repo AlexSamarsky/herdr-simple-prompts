@@ -538,3 +538,39 @@ fn composer_shows_large_paste_marker_instead_of_log_body() {
     assert!(rendered.contains('<'));
     assert!(!rendered.contains("private-log-line"));
 }
+
+#[test]
+fn markdown_fallback_body_styles_flow_into_rendered_visual_rows() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "show markdown",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "plain **Ω** and `λ`",
+        Some(2),
+    )));
+
+    let document = HistoryDocument::from_app(&app, 50);
+    let omega = document
+        .rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .find(|span| span.text.contains('Ω'))
+        .expect("strong Markdown contents should reach visual rows");
+    assert!(omega.style.modifiers.bold);
+    let lambda = document
+        .rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .find(|span| span.text.contains('λ'))
+        .expect("inline code Markdown contents should reach visual rows");
+    assert_eq!(lambda.style.foreground, Some(AnsiColor::White));
+    assert_eq!(lambda.style.background, Some(AnsiColor::BrightBlack));
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::MarkdownFallback
+    );
+}

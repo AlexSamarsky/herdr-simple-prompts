@@ -384,7 +384,8 @@ fn answer_lines(message: &Message) -> Vec<StyledText> {
             text: message.text.clone(),
             runs: runs.clone(),
         },
-        MessagePresentation::Plain | MessagePresentation::MarkdownFallback => StyledText {
+        MessagePresentation::MarkdownFallback => crate::markdown::style_markdown(&message.text),
+        MessagePresentation::Plain => StyledText {
             text: message.text.clone(),
             runs: Vec::new(),
         },
