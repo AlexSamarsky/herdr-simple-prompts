@@ -88,6 +88,39 @@ The composer is always anchored at the bottom. New prompts and final answers
 auto-scroll into view. Manual scrolling upward suspends auto-scroll until the
 user returns to the bottom.
 
+### Message hierarchy and sticky prompt context
+
+User prompts use a full-width, neutral raised band with a compact `YOU` label.
+Final agent answers remain unboxed and start with a compact green `ANSWER`
+label. The distinction therefore does not depend on color alone: role labels,
+surface treatment, and spacing all identify message ownership. The palette uses
+the terminal theme's existing colors and avoids fixed RGB backgrounds that
+could become unreadable in light or customized terminal themes.
+
+While history scrolls through a turn, the start of that turn's user prompt acts
+as a sticky section header:
+
+- At most the first two visual rows remain at the top of the history viewport.
+  A visual row is measured after Unicode-aware wrapping to the current history
+  width, not by newline-delimited source lines.
+- A one-row prompt pins only one row. An empty-text image prompt uses its first
+  attachment placeholder as context.
+- The sticky copy appears only after those rows would otherwise leave the
+  viewport; it never duplicates a prompt that is still visible in its natural
+  position.
+- The following user prompt is the section boundary. As its first visual row
+  reaches the top boundary, it pushes the previous sticky prompt upward one row
+  at a time. Once the new prompt occupies the boundary, the old prompt is gone
+  and the new one becomes eligible to stick.
+- The header never overlaps the following prompt, agent answer, error row,
+  working indicator, composer, or footer. If the history viewport is too short,
+  it pins only the rows that fit while preserving at least one row for scrolling
+  history.
+
+Sticky context follows the same manual scroll offset as the history. Returning
+to the bottom restores normal auto-scroll behavior without changing which turn
+owns the header.
+
 ### Composer behavior
 
 - `Enter` submits the current prompt.
@@ -344,6 +377,11 @@ scope.
 - Reducer state transitions for working, done, interruption, disconnect,
   session replacement, and send failure.
 - Status extraction fixtures for supported Codex and Claude layouts.
+- Message-role hierarchy remains visible without relying on color alone.
+- Sticky prompt rows for short, long, wrapped, Unicode, image-only, and
+  constrained-height histories.
+- The next prompt pushes the previous sticky context out one visual row at a
+  time without overlap or duplication.
 
 Fixtures are synthetic and contain no real user transcript data.
 
@@ -392,4 +430,3 @@ The initial public-facing documentation will explain the source-only trust
 model, Rust prerequisite, Herdr/Codex/Claude prerequisites, `prefix+m` setup,
 installation, local development with `herdr plugin link`, privacy guarantees,
 limitations, and troubleshooting.
-
