@@ -15,6 +15,49 @@ pub struct FakeHerdr {
     worker: Option<JoinHandle<()>>,
 }
 
+pub struct GrowingFile {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl GrowingFile {
+    pub fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-simple-prompts-growing-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("session.jsonl");
+        std::fs::write(&path, []).unwrap();
+        Self { directory, path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn append(&self, content: &str) {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+    }
+
+    pub fn replace(&self, content: &str) {
+        let replacement = self.directory.join("replacement.jsonl");
+        std::fs::write(&replacement, content).unwrap();
+        std::fs::rename(replacement, &self.path).unwrap();
+    }
+}
+
+impl Drop for GrowingFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
 impl FakeHerdr {
     pub fn start(handler: impl FnOnce(Value) -> Value + Send + 'static) -> Self {
         Self::start_raw(move |request, stream| {

@@ -45,9 +45,9 @@ fn accepts_partial_response_writes_and_unknown_fields() {
         let id = request["id"].as_str().unwrap();
         write!(stream, "{{\"id\":\"{id}\",").unwrap();
         stream.flush().unwrap();
-        write!(
+        writeln!(
             stream,
-            "\"result\":{{\"type\":\"pong\",\"future_field\":42}}}}\n"
+            "\"result\":{{\"type\":\"pong\",\"future_field\":42}}}}"
         )
         .unwrap();
     });

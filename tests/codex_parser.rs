@@ -2,7 +2,7 @@ use herdr_simple_prompts::agent::codex::CodexAdapter;
 use herdr_simple_prompts::model::ConversationEvent;
 
 fn parse_fixture(path: &str) -> Vec<ConversationEvent> {
-    let mut adapter = CodexAdapter::default();
+    let mut adapter = CodexAdapter;
     std::fs::read_to_string(path)
         .unwrap()
         .lines()

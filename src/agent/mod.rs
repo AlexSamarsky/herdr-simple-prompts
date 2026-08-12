@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod follower;
 mod resolve;
 
 pub use resolve::{AgentPaths, resolve_transcript};
@@ -9,6 +10,43 @@ use crate::{AppError, AppResult};
 use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
+
+pub trait TranscriptAdapter: Send {
+    fn ingest_line(
+        &mut self,
+        line_number: u64,
+        line: &str,
+    ) -> AppResult<Vec<crate::model::ConversationEvent>>;
+    fn reset(&mut self);
+}
+
+impl TranscriptAdapter for codex::CodexAdapter {
+    fn ingest_line(
+        &mut self,
+        line_number: u64,
+        line: &str,
+    ) -> AppResult<Vec<crate::model::ConversationEvent>> {
+        Ok(codex::CodexAdapter::ingest_line(self, line_number, line)?
+            .into_iter()
+            .collect())
+    }
+
+    fn reset(&mut self) {}
+}
+
+impl TranscriptAdapter for claude::ClaudeAdapter {
+    fn ingest_line(
+        &mut self,
+        line_number: u64,
+        line: &str,
+    ) -> AppResult<Vec<crate::model::ConversationEvent>> {
+        claude::ClaudeAdapter::ingest_line(self, line_number, line)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentKind {
