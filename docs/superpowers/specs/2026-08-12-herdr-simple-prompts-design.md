@@ -103,6 +103,12 @@ as a sticky section header:
 - At most the first two visual rows remain at the top of the history viewport.
   A visual row is measured after Unicode-aware wrapping to the current history
   width, not by newline-delimited source lines.
+- The two-row limit applies only to the sticky copy. Ordinary prompt text in
+  the natural history entry remains complete and scrollable. When Codex or
+  Claude represents a large paste with its native compact marker (for example,
+  a marker containing `1000 chars`), the plugin preserves that marker exactly
+  and does not reconstruct or reveal the hidden pasted body. This keeps pasted
+  logs compact in both the natural history entry and sticky context.
 - A one-row prompt pins only one row. An empty-text image prompt uses its first
   attachment placeholder as context.
 - The sticky copy appears only after those rows would otherwise leave the
@@ -127,11 +133,21 @@ owns the header.
 - `Shift+Enter` inserts a newline when the terminal reports the modifier.
 - `Ctrl+J` is the portable newline fallback.
 - `Esc` interrupts the source agent only while it is working.
-- Pasted text is inserted atomically and preserves all newlines.
+- A paste for which Rust `text.chars().count()` is below 1,000 is inserted
+  normally and preserves all newlines.
+- A paste for which `text.chars().count()` is 1,000 or more is shown
+  immediately as one compact atomic token: `[Pasted Content · N chars]`. `N`
+  is the actual `chars()` count. Multiple large pastes produce separate tokens.
+- The compact token is only a display projection. The editor retains the exact
+  original paste and sends its full text, including every newline, to the
+  source agent. The cursor skips over the token; `Backspace` or `Delete` at its
+  edge removes the whole pasted segment instead of revealing or partially
+  editing the log body.
 - The plugin imposes no arbitrary prompt-length truncation. Herdr or agent-side
   limits are surfaced as explicit send errors.
 - Resize reflows the screen without losing the composer buffer or cursor.
-- A draft is stored in plugin state and survives a temporary overlay close.
+- A draft is stored as chunked editor state, including the full source text
+  behind compact paste tokens, and survives a temporary overlay close.
 
 ### Image paste
 
@@ -237,7 +253,10 @@ are respected before conventional user paths.
 Turn {
   prompt: Message,
   final_answer: Option<Message>,
-  submission: Native | Optimistic,
+  submission: Native | Optimistic {
+    complete_text: String,
+    editor_snapshot: EditorBuffer,
+  },
 }
 
 Message {
@@ -249,7 +268,35 @@ Message {
 ```
 
 The UI renders only `Turn`. Raw transcript event variants do not reach the view
-layer.
+layer. `Message.text` is always the display-safe representation. The complete
+text and editor snapshot exist only on a local optimistic delivery so they can
+support transport reconciliation and lossless failure recovery.
+
+### Editor and compact-paste model
+
+The editor models input as ordered chunks rather than replacing a large paste
+with its label:
+
+```text
+EditorChunk = Text(String) | LargePaste {
+  source_text: String,
+  character_count: usize,
+}
+```
+
+The rendering projection flattens `Text` chunks verbatim and renders each
+`LargePaste` as `[Pasted Content · N chars]`. The submission projection flattens
+both chunk types to their original text. Cursor movement and deletion treat a
+`LargePaste` as one atomic editor item, while adjacent ordinary text remains
+editable.
+
+Submission produces both projections in one operation. The runtime transport
+receives only the complete submission projection. The optimistic turn receives
+the compact rendering projection and temporarily retains the complete text for
+native-event reconciliation and send-failure restoration; the complete copy is
+discarded after successful reconciliation. Draft persistence serializes the
+chunk kinds, not just the flattened source text, so reopening the overlay does
+not expand a compact token.
 
 ### Codex adapter
 
@@ -284,13 +331,18 @@ remains a turn with `final_answer = None`.
 
 Submitting a prompt appends an optimistic turn before sending input to Herdr.
 When the corresponding native user event arrives, the reducer reconciles it by
-submission order, normalized text, attachment count, and a bounded time window.
-The native stable id replaces the optimistic id. It never appends a second copy.
+submission order, attachment count, a bounded time window, and either normalized
+complete-text equality or equality of the compact paste-count signature. The
+native stable id replaces the optimistic id. It never appends a second copy. If
+the provider's native event contains the full large paste, the reducer keeps the
+already compact local rendering; if the provider emits a native compact marker,
+that marker is preserved.
 
 Prompts submitted while the agent is working are kept in source submission
 order. Final answers attach in native transcript order. If a request is rejected,
-the optimistic entry is marked locally as unsent and the composer is restored;
-it is not silently presented as native history.
+the optimistic entry is marked locally as unsent and the chunked composer,
+including full large-paste source text, is restored; it is not silently
+presented as native history.
 
 ## Working and status state
 
@@ -329,11 +381,22 @@ The plugin state directory stores only:
 
 - source-to-overlay registry data,
 - the active draft and attachment placeholders,
+- compact-paste display metadata for prompts submitted through the plugin, and
 - small UI preferences such as scroll position if needed.
 
-It does not copy full conversation transcripts into its own database. State
-files use user-only permissions and atomic replacement. The plugin has no
-telemetry, analytics, update checker, HTTP client, or runtime network access.
+Compact-paste history metadata is scoped by native session and message id and
+contains only paste ranges, character counts, and a deterministic integrity
+fingerprint; it never contains the pasted body. This lets the plugin retain the
+compact rendering after reopening even when a provider transcript stores the
+full prompt. It does not copy full conversation transcripts into its own
+database. The unsent draft is the only persisted state that can contain the
+original pasted text. State files use user-only permissions and atomic
+replacement. The plugin has no telemetry, analytics, update checker, HTTP
+client, or runtime network access.
+
+For prompts that predate the plugin metadata, the plugin preserves any compact
+marker already recorded by Codex or Claude but does not guess that arbitrary
+historical text originated from a paste.
 
 ## Source-only distribution
 
@@ -371,6 +434,13 @@ scope.
   interruption, attachments, and subagent exclusion.
 - Claude fixtures: simple answer, thinking, tool cycle, tool results, sidechain,
   interruption, and attachments.
+- Native compact large-paste markers remain unchanged and are never expanded
+  into the hidden pasted body.
+- Pasted input below 1,000 characters remains directly editable; input at or
+  above the threshold renders one atomic `[Pasted Content · N chars]` token
+  while submission receives the byte-for-byte original text.
+- Multiple compact paste tokens preserve ordering, cursor movement, whole-token
+  deletion, draft restoration, send-failure restoration, and Unicode counts.
 - Optimistic/native reconciliation and duplicate prevention.
 - Editor operations, Unicode widths, multiline paste, large paste, cursor
   movement, and draft restoration.
@@ -392,7 +462,8 @@ Fixtures are synthetic and contain no real user transcript data.
 - Temporary transcript files for initial load, append, partial JSON line,
   truncation, and replacement.
 - Pseudo-terminal harness for raw-mode restoration, bracketed paste, resize,
-  large multiline input, image-path forwarding, and interrupt forwarding.
+  compact large multiline input with full-payload submission, image-path
+  forwarding, and interrupt forwarding.
 - Toggle lifecycle: open, focus existing, close, stale-state cleanup, and source
   focus restoration.
 
