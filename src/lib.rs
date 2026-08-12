@@ -4,6 +4,11 @@ pub mod editor;
 mod error;
 pub mod herdr;
 pub mod model;
+pub mod state;
+pub mod status;
+pub mod toggle;
+pub mod transport;
+pub mod ui;
 
 pub use error::AppError;
 
@@ -29,15 +34,9 @@ impl Mode {
 }
 
 pub fn run_toggle() -> AppResult<()> {
-    Err(AppError::new(
-        "toggle",
-        "the controller is not available in this build stage",
-    ))
+    toggle::run_from_env()
 }
 
 pub fn run_ui() -> AppResult<()> {
-    Err(AppError::new(
-        "ui",
-        "the overlay is not available in this build stage",
-    ))
+    ui::run_from_env()
 }
