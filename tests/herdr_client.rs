@@ -40,6 +40,28 @@ fn call_preserves_structured_api_error() {
 }
 
 #[test]
+fn overlay_open_uses_active_pane_and_passes_source_only_to_child() {
+    let fake = support::FakeHerdr::start(|request| {
+        assert_eq!(request["method"], "plugin.pane.open");
+        assert_eq!(request["params"]["placement"], "overlay");
+        assert!(request["params"].get("target_pane_id").is_none());
+        assert_eq!(
+            request["params"]["env"]["HERDR_SIMPLE_PROMPTS_SOURCE_PANE"],
+            "w1:p1"
+        );
+        serde_json::json!({
+            "id": request["id"],
+            "result": {"plugin_pane":{"pane":{"pane_id":"w1:p9"}}}
+        })
+    });
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let overlay = client.plugin_pane_open("w1:p1").unwrap();
+
+    assert_eq!(overlay, "w1:p9");
+}
+
+#[test]
 fn accepts_partial_response_writes_and_unknown_fields() {
     let fake = support::FakeHerdr::start_raw(|request, stream| {
         let id = request["id"].as_str().unwrap();

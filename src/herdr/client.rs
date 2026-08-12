@@ -183,7 +183,6 @@ impl HerdrClient {
                 "plugin_id": "herdr.simple-prompts",
                 "entrypoint": "simple-prompts",
                 "placement": "overlay",
-                "target_pane_id": source,
                 "env": {"HERDR_SIMPLE_PROMPTS_SOURCE_PANE": source},
                 "focus": true
             }),
