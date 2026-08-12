@@ -1,0 +1,451 @@
+use crate::app::AppState;
+use crate::model::{Delivery, Message};
+use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
+use unicode_width::UnicodeWidthChar;
+
+pub const PROMPT_PREFIX: &str = "YOU  ";
+pub const ANSWER_PREFIX: &str = "ANSWER  ";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CellStyle {
+    pub foreground: Option<AnsiColor>,
+    pub background: Option<AnsiColor>,
+    pub modifiers: StyleModifiers,
+}
+
+impl From<&StyleRun> for CellStyle {
+    fn from(run: &StyleRun) -> Self {
+        Self {
+            foreground: run.foreground,
+            background: run.background,
+            modifiers: run.modifiers,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisualSpan {
+    pub text: String,
+    pub style: CellStyle,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisualRow {
+    pub spans: Vec<VisualSpan>,
+    pub fill: Option<CellStyle>,
+}
+
+impl VisualRow {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            spans: vec![VisualSpan {
+                text: text.into(),
+                style: CellStyle::default(),
+            }],
+            fill: None,
+        }
+    }
+
+    pub fn cell_width(&self) -> usize {
+        self.spans
+            .iter()
+            .flat_map(|span| span.text.chars())
+            .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+            .sum()
+    }
+
+    pub fn plain_text(&self) -> String {
+        self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    fn push(&mut self, text: &str, style: CellStyle) {
+        if let Some(previous) = self.spans.last_mut()
+            && previous.style == style
+        {
+            previous.text.push_str(text);
+        } else {
+            self.spans.push(VisualSpan {
+                text: text.to_owned(),
+                style,
+            });
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PromptSection {
+    pub start_row: usize,
+    pub prompt_rows: usize,
+    pub end_row: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HistoryDocument {
+    pub rows: Vec<VisualRow>,
+    pub prompts: Vec<PromptSection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StickyRows {
+    pub source_start: usize,
+    pub screen_start: usize,
+    pub count: usize,
+}
+
+impl HistoryDocument {
+    pub fn from_app(app: &AppState, width: u16) -> Self {
+        let mut document = Self::default();
+        let width = usize::from(width.max(1));
+        for turn in &app.turns {
+            let start_row = document.rows.len();
+            let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
+            if prompt_lines.is_empty() {
+                prompt_lines.push(StyledText::default());
+            }
+            for (index, line) in prompt_lines.iter().enumerate() {
+                push_labeled_rows(
+                    &mut document.rows,
+                    line,
+                    if index == 0 { PROMPT_PREFIX } else { "     " },
+                    if index == 0 {
+                        prompt_prefix_style()
+                    } else {
+                        CellStyle::default()
+                    },
+                    prompt_fill(),
+                    width,
+                );
+            }
+            let prompt_rows = document.rows.len() - start_row;
+
+            if let Some(answer) = &turn.final_answer {
+                for (index, line) in answer_lines(answer).iter().enumerate() {
+                    push_labeled_rows(
+                        &mut document.rows,
+                        line,
+                        if index == 0 {
+                            ANSWER_PREFIX
+                        } else {
+                            "        "
+                        },
+                        if index == 0 {
+                            answer_prefix_style()
+                        } else {
+                            CellStyle::default()
+                        },
+                        None,
+                        width,
+                    );
+                }
+            }
+            document.rows.push(empty_row());
+            document.prompts.push(PromptSection {
+                start_row,
+                prompt_rows,
+                end_row: document.rows.len(),
+            });
+        }
+        document
+    }
+
+    pub fn viewport(&self, height: usize, scroll_from_bottom: usize) -> Vec<VisualRow> {
+        let visible_height = height.min(self.rows.len());
+        if visible_height == 0 {
+            return Vec::new();
+        }
+        let maximum_offset = self.rows.len().saturating_sub(visible_height);
+        let offset = scroll_from_bottom.min(maximum_offset);
+        let top = maximum_offset.saturating_sub(offset);
+        let sticky = sticky_overlay(&self.prompts, top, visible_height);
+        let mut visible = Vec::with_capacity(visible_height);
+        if let Some(sticky) = sticky {
+            visible.extend(
+                self.rows[sticky.source_start..sticky.source_start + sticky.count]
+                    .iter()
+                    .cloned(),
+            );
+            visible.extend(
+                self.rows[top + sticky.count..top + visible_height]
+                    .iter()
+                    .cloned(),
+            );
+        } else {
+            visible.extend(self.rows[top..top + visible_height].iter().cloned());
+        }
+        visible
+    }
+}
+
+pub fn sticky_overlay(sections: &[PromptSection], top: usize, height: usize) -> Option<StickyRows> {
+    let sticky_limit = 2.min(height.saturating_sub(1));
+    if sticky_limit == 0 {
+        return None;
+    }
+    let section_index = sections
+        .iter()
+        .rposition(|section| section.start_row < top && top < section.end_row)?;
+    let section = sections[section_index];
+    let mut count = sticky_limit.min(section.prompt_rows);
+    if let Some(next) = sections.get(section_index + 1) {
+        let distance = next.start_row.saturating_sub(top);
+        if distance < count {
+            count = distance;
+        }
+    }
+    (count > 0).then_some(StickyRows {
+        source_start: section.start_row + (sticky_limit.min(section.prompt_rows) - count),
+        screen_start: 0,
+        count,
+    })
+}
+
+pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
+    let width = width.max(1);
+    let runs = valid_runs(source);
+    let mut rows = Vec::new();
+    let mut row = empty_row();
+    let mut row_width = 0;
+    let mut token_start = 0;
+    while token_start < source.text.len() {
+        let rest = &source.text[token_start..];
+        let token_end = rest
+            .char_indices()
+            .find_map(|(index, character)| (character == '\n').then_some(token_start + index))
+            .unwrap_or(source.text.len());
+        let line = &source.text[token_start..token_end];
+        for (offset, word) in line.split_word_bound_indices() {
+            let word_width = word
+                .chars()
+                .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+                .sum::<usize>();
+            if word_width <= width && row_width > 0 && row_width + word_width > width {
+                rows.push(row);
+                row = empty_row();
+                row_width = 0;
+            }
+            for (word_offset, character) in word.char_indices() {
+                let byte = token_start + offset + word_offset;
+                let style = style_at(&runs, byte);
+                let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+                if character_width > 0 && row_width > 0 && row_width + character_width > width {
+                    rows.push(row);
+                    row = empty_row();
+                    row_width = 0;
+                }
+                row.push(&character.to_string(), style);
+                row_width += character_width;
+            }
+        }
+        if token_end == source.text.len() {
+            break;
+        }
+        rows.push(row);
+        row = empty_row();
+        row_width = 0;
+        token_start = token_end + 1;
+    }
+    rows.push(row);
+    rows
+}
+
+trait WordBoundaries {
+    fn split_word_bound_indices(&self) -> Vec<(usize, &str)>;
+}
+
+impl WordBoundaries for str {
+    fn split_word_bound_indices(&self) -> Vec<(usize, &str)> {
+        let mut parts = Vec::new();
+        let mut start = 0;
+        let mut was_space = None;
+        for (index, character) in self.char_indices() {
+            let is_space = character.is_whitespace();
+            if was_space.is_some_and(|previous| previous != is_space) {
+                parts.push((start, &self[start..index]));
+                start = index;
+            }
+            was_space = Some(is_space);
+        }
+        if start < self.len() {
+            parts.push((start, &self[start..]));
+        }
+        parts
+    }
+}
+
+fn valid_runs(source: &StyledText) -> Vec<StyleRun> {
+    let mut previous_end = 0;
+    source
+        .runs
+        .iter()
+        .filter(|run| {
+            let valid = run.start_byte < run.end_byte
+                && run.end_byte <= source.text.len()
+                && source.text.is_char_boundary(run.start_byte)
+                && source.text.is_char_boundary(run.end_byte)
+                && run.start_byte >= previous_end;
+            if valid {
+                previous_end = run.end_byte;
+            }
+            valid
+        })
+        .cloned()
+        .collect()
+}
+
+fn style_at(runs: &[StyleRun], byte: usize) -> CellStyle {
+    runs.iter()
+        .find(|run| run.start_byte <= byte && byte < run.end_byte)
+        .map(CellStyle::from)
+        .unwrap_or_default()
+}
+
+fn prompt_lines(message: &Message, delivery: &Delivery) -> Vec<StyledText> {
+    let mut lines = message
+        .text
+        .split('\n')
+        .map(|text| StyledText {
+            text: text.into(),
+            runs: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if message.text.is_empty()
+        && let Some(attachment) = message.attachments.first()
+    {
+        lines[0].text = format!("[Image #1] {}", attachment.display);
+    }
+    let skip = if message.text.is_empty() && !message.attachments.is_empty() {
+        1
+    } else {
+        0
+    };
+    lines.extend(
+        message
+            .attachments
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .map(|(index, attachment)| StyledText {
+                text: format!("[Image #{}] {}", index + 1, attachment.display),
+                runs: Vec::new(),
+            }),
+    );
+    if let Delivery::Failed { reason } = delivery {
+        lines.push(StyledText {
+            text: format!("not sent: {reason}"),
+            runs: Vec::new(),
+        });
+    }
+    lines
+}
+
+fn answer_lines(message: &Message) -> Vec<StyledText> {
+    let source = match &message.presentation {
+        MessagePresentation::NativeAnsi(runs) => StyledText {
+            text: message.text.clone(),
+            runs: runs.clone(),
+        },
+        MessagePresentation::Plain | MessagePresentation::MarkdownFallback => StyledText {
+            text: message.text.clone(),
+            runs: Vec::new(),
+        },
+    };
+    split_styled_lines(&source)
+}
+
+fn split_styled_lines(source: &StyledText) -> Vec<StyledText> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for end in source
+        .text
+        .match_indices('\n')
+        .map(|(index, _)| index)
+        .chain(std::iter::once(source.text.len()))
+    {
+        let text = source.text[start..end].to_owned();
+        let runs = source
+            .runs
+            .iter()
+            .filter_map(|run| {
+                let from = run.start_byte.max(start);
+                let to = run.end_byte.min(end);
+                (from < to).then_some(StyleRun {
+                    start_byte: from - start,
+                    end_byte: to - start,
+                    foreground: run.foreground,
+                    background: run.background,
+                    modifiers: run.modifiers,
+                })
+            })
+            .collect();
+        lines.push(StyledText { text, runs });
+        start = end.saturating_add(1);
+    }
+    lines
+}
+
+fn push_labeled_rows(
+    rows: &mut Vec<VisualRow>,
+    source: &StyledText,
+    prefix: &str,
+    prefix_style: CellStyle,
+    fill: Option<CellStyle>,
+    width: usize,
+) {
+    let prefix_width = prefix
+        .chars()
+        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+        .sum::<usize>();
+    for (index, body) in wrap_styled(source, width.saturating_sub(prefix_width).max(1))
+        .into_iter()
+        .enumerate()
+    {
+        let label = if index == 0 {
+            prefix.to_owned()
+        } else {
+            " ".repeat(prefix_width)
+        };
+        let mut row = empty_row();
+        row.push(&label, prefix_style);
+        for span in body.spans {
+            row.push(&span.text, span.style);
+        }
+        row.fill = fill;
+        rows.push(row);
+    }
+}
+
+fn prompt_fill() -> Option<CellStyle> {
+    Some(CellStyle {
+        foreground: Some(AnsiColor::White),
+        background: Some(AnsiColor::BrightBlack),
+        modifiers: StyleModifiers::default(),
+    })
+}
+
+fn prompt_prefix_style() -> CellStyle {
+    CellStyle {
+        modifiers: StyleModifiers {
+            bold: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn answer_prefix_style() -> CellStyle {
+    CellStyle {
+        foreground: Some(AnsiColor::Green),
+        modifiers: StyleModifiers {
+            bold: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn empty_row() -> VisualRow {
+    VisualRow {
+        spans: Vec::new(),
+        fill: None,
+    }
+}

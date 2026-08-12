@@ -40,7 +40,7 @@ pub struct AppState {
     pub transcript_error: Option<String>,
     pub send_error: Option<String>,
     pub input_enabled: bool,
-    pub scroll_from_bottom: u16,
+    pub scroll_from_bottom: usize,
     #[doc(hidden)]
     pub replay_insert_at: Option<usize>,
 }

@@ -1,6 +1,7 @@
 pub mod render;
 mod runtime;
 mod terminal;
+pub mod visual_rows;
 
 use crate::agent::follower::{FollowerEvent, TranscriptFollower};
 use crate::agent::{

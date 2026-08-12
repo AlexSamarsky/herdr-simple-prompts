@@ -4,6 +4,9 @@ use herdr_simple_prompts::editor::Editor;
 use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::model::Message;
 use herdr_simple_prompts::ui::render::{render_to_buffer, render_to_string};
+use herdr_simple_prompts::ui::visual_rows::{
+    CellStyle, HistoryDocument, PromptSection, StickyRows, VisualRow, sticky_overlay, wrap_styled,
+};
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use std::time::{Duration, Instant};
@@ -121,10 +124,243 @@ fn history_starts_at_the_bottom_and_page_up_moves_toward_older_turns() {
     assert!(newest.contains("prompt 19"));
     assert!(!newest.contains("prompt 0"));
 
-    app.scroll_from_bottom = u16::MAX;
+    app.scroll_from_bottom = usize::MAX;
     let oldest = render_to_string(&app, &Editor::default(), 50, 12);
     assert!(oldest.contains("prompt 0"));
     assert!(!oldest.contains("prompt 19"));
+}
+
+#[test]
+fn narrow_multiword_answer_scrolls_to_its_real_last_visual_row() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "question",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "one two three four five six seven eight nine ten eleven twelve",
+        Some(2),
+    )));
+
+    let rendered = render_to_string(&app, &Editor::default(), 18, 8);
+    assert!(rendered.contains("twelve"));
+}
+
+#[test]
+fn wrapped_prompt_rows_fill_the_full_band_background() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "a deliberately long prompt that wraps onto continuation rows",
+        Some(1),
+    )));
+
+    let width = 22;
+    let height = 12;
+    let buffer = rendered_buffer(&app, width, height);
+    let first = (0..height)
+        .find(|&row| buffer[(0, row)].symbol() == "Y")
+        .expect("prompt row should be visible");
+    assert_eq!(buffer[(width - 1, first)].style().bg, Some(Color::DarkGray));
+    assert_eq!(
+        buffer[(width - 1, first + 1)].style().bg,
+        Some(Color::DarkGray)
+    );
+}
+
+#[test]
+fn wrapped_prompt_continuations_keep_the_prefix_width_indent() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "one two three four five six",
+        Some(1),
+    )));
+
+    let document = HistoryDocument::from_app(&app, 14);
+    assert!(document.rows[0].plain_text().starts_with("YOU  "));
+    assert_eq!(&document.rows[1].plain_text()[..5], "     ");
+}
+
+#[test]
+fn visual_rows_preserve_unicode_width_and_style_runs() {
+    let bold = CellStyle {
+        modifiers: herdr_simple_prompts::style::StyleModifiers {
+            bold: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rows = wrap_styled(
+        &herdr_simple_prompts::style::StyledText {
+            text: "界界a\nnext".into(),
+            runs: vec![herdr_simple_prompts::style::StyleRun {
+                start_byte: 0,
+                end_byte: "界界".len(),
+                foreground: None,
+                background: None,
+                modifiers: bold.modifiers,
+            }],
+        },
+        4,
+    );
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].plain_text(), "界界");
+    assert_eq!(rows[0].cell_width(), 4);
+    assert_eq!(rows[0].spans[0].style, bold);
+    assert_eq!(rows[1].plain_text(), "a");
+    assert_eq!(rows[2].plain_text(), "next");
+}
+
+#[test]
+fn sticky_overlay_only_pins_after_prompt_leaves_natural_view() {
+    let sections = [PromptSection {
+        start_row: 0,
+        prompt_rows: 2,
+        end_row: 8,
+    }];
+    assert_eq!(sticky_overlay(&sections, 0, 4), None);
+    assert_eq!(
+        sticky_overlay(&sections, 1, 4),
+        Some(StickyRows {
+            source_start: 0,
+            screen_start: 0,
+            count: 2,
+        })
+    );
+}
+
+#[test]
+fn later_prompt_pushes_sticky_copy_off_one_row_at_a_time() {
+    let sections = [
+        PromptSection {
+            start_row: 0,
+            prompt_rows: 4,
+            end_row: 10,
+        },
+        PromptSection {
+            start_row: 10,
+            prompt_rows: 1,
+            end_row: 14,
+        },
+    ];
+    assert_eq!(
+        sticky_overlay(&sections, 8, 4),
+        Some(StickyRows {
+            source_start: 0,
+            screen_start: 0,
+            count: 2,
+        })
+    );
+    assert_eq!(
+        sticky_overlay(&sections, 9, 4),
+        Some(StickyRows {
+            source_start: 1,
+            screen_start: 0,
+            count: 1,
+        })
+    );
+    assert_eq!(sticky_overlay(&sections, 10, 4), None);
+}
+
+#[test]
+fn visual_row_indices_do_not_saturate_at_u16_max() {
+    let section = PromptSection {
+        start_row: 70_000,
+        prompt_rows: 2,
+        end_row: 70_004,
+    };
+    assert_eq!(section.start_row, 70_000);
+}
+
+#[test]
+fn sticky_one_row_prompt_pins_one_row_and_short_viewports_keep_natural_content() {
+    let sections = [PromptSection {
+        start_row: 0,
+        prompt_rows: 1,
+        end_row: 5,
+    }];
+    assert_eq!(sticky_overlay(&sections, 1, 3).unwrap().count, 1);
+    assert_eq!(sticky_overlay(&sections, 1, 1), None);
+    assert!(sticky_overlay(&sections, 1, 2).unwrap().count < 2);
+
+    let document = HistoryDocument {
+        rows: (0..5)
+            .map(|index| VisualRow::plain(format!("row {index}")))
+            .collect(),
+        prompts: sections.to_vec(),
+    };
+    for height in 1..=3 {
+        let viewport = document.viewport(height, 3);
+        assert_eq!(viewport.len(), height.min(document.rows.len()));
+        assert!(
+            viewport
+                .iter()
+                .any(|row| row.plain_text().starts_with("row"))
+        );
+    }
+}
+
+#[test]
+fn wrapper_handles_cjk_and_combining_marks() {
+    let rows = wrap_styled(
+        &herdr_simple_prompts::style::StyledText {
+            text: "界e\u{301}界".into(),
+            ..Default::default()
+        },
+        3,
+    );
+    assert_eq!(
+        rows.iter().map(VisualRow::plain_text).collect::<Vec<_>>(),
+        ["界e\u{301}", "界"]
+    );
+}
+
+#[test]
+fn image_only_prompt_is_available_as_sticky_context() {
+    let mut app = AppState::default();
+    let mut image = Message::text("u1", "", Some(1));
+    image.attachments.push(Attachment {
+        id: "image-1".into(),
+        display: "diagram.png".into(),
+        native_path: None,
+    });
+    app.apply(AppEvent::NativeUser(image));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "one two three four five six seven eight nine ten eleven twelve",
+        Some(2),
+    )));
+
+    let rendered = render_to_string(&app, &Editor::default(), 20, 9);
+    assert!(rendered.contains("[Image #1]"));
+}
+
+#[test]
+fn compact_paste_marker_is_not_reconstructed_in_history() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "[Pasted Content · 1000 chars]",
+        Some(1),
+    )));
+    let rendered = render_to_string(&app, &Editor::default(), 50, 10);
+    assert!(rendered.contains("[Pasted Content · 1000 chars]"));
+}
+
+#[test]
+fn bottom_offset_uses_document_rows_without_second_wrapping() {
+    let document = HistoryDocument {
+        rows: (0..8)
+            .map(|index| VisualRow::plain(format!("row {index}")))
+            .collect(),
+        prompts: Vec::new(),
+    };
+    assert_eq!(document.viewport(3, 0)[0].plain_text(), "row 5");
+    assert_eq!(document.viewport(3, 2)[0].plain_text(), "row 3");
 }
 
 #[test]

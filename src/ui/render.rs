@@ -1,7 +1,8 @@
 use crate::agent::AgentStatus;
 use crate::app::AppState;
 use crate::editor::Editor;
-use crate::model::Delivery;
+use crate::style::AnsiColor;
+use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -11,46 +12,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::time::Instant;
-
-const PROMPT_BG: Color = Color::DarkGray;
-const PROMPT_FG: Color = Color::White;
-const ANSWER_FG: Color = Color::Green;
-const PROMPT_PREFIX: &str = "YOU  ";
-const ANSWER_PREFIX: &str = "ANSWER  ";
-
-#[derive(Clone, Debug)]
-struct HistoryRow {
-    line: Line<'static>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PromptSection {
-    start_row: u16,
-    prompt_rows: u16,
-    end_row: u16,
-}
-
-#[derive(Clone, Debug, Default)]
-struct HistoryDocument {
-    rows: Vec<HistoryRow>,
-    prompts: Vec<PromptSection>,
-}
-
-impl HistoryDocument {
-    fn text(&self) -> Text<'static> {
-        debug_assert!(self.prompts.iter().all(|section| {
-            section.prompt_rows > 0
-                && section.start_row.saturating_add(section.prompt_rows) <= section.end_row
-                && usize::from(section.end_row) <= self.rows.len()
-        }));
-        Text::from(
-            self.rows
-                .iter()
-                .map(|row| row.line.clone())
-                .collect::<Vec<_>>(),
-        )
-    }
-}
 
 pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
     let area = frame.area();
@@ -72,17 +33,15 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
         ])
         .split(area);
 
-    let history = build_history_document(app).text();
-    let history_height = wrapped_history_height(&history, areas[0].width);
-    let top = history_height
-        .saturating_sub(areas[0].height)
-        .saturating_sub(app.scroll_from_bottom);
-    frame.render_widget(
-        Paragraph::new(history)
-            .wrap(Wrap { trim: false })
-            .scroll((top, 0)),
-        areas[0],
+    let document = HistoryDocument::from_app(app, areas[0].width);
+    let history = Text::from(
+        document
+            .viewport(usize::from(areas[0].height), app.scroll_from_bottom)
+            .iter()
+            .map(|row| visual_row_line(row, areas[0].width))
+            .collect::<Vec<_>>(),
     );
+    frame.render_widget(Paragraph::new(history), areas[0]);
     if let Some(error) = app.visible_error() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -165,94 +124,82 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
     frame.set_cursor_position((cursor_column, cursor_row));
 }
 
-fn build_history_document(app: &AppState) -> HistoryDocument {
-    let mut document = HistoryDocument::default();
-    for turn in &app.turns {
-        let start_row = document_row_count(&document);
-        let mut prompt_lines = turn
-            .prompt
-            .text
-            .split('\n')
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let first_attachment_on_prompt_row = turn.prompt.text.is_empty()
-            && turn.prompt.attachments.first().is_some_and(|attachment| {
-                prompt_lines[0] = format!("[Image #1] {}", attachment.display);
-                true
-            });
-        prompt_lines.extend(
-            turn.prompt
-                .attachments
-                .iter()
-                .enumerate()
-                .skip(usize::from(first_attachment_on_prompt_row))
-                .map(|(index, attachment)| {
-                    format!("[Image #{}] {}", index + 1, attachment.display)
-                }),
-        );
-        if let Delivery::Failed { reason } = &turn.delivery {
-            prompt_lines.push(format!("not sent: {reason}"));
-        }
-
-        let prompt_style = Style::default().fg(PROMPT_FG).bg(PROMPT_BG);
-        for (index, content) in prompt_lines.into_iter().enumerate() {
-            let prefix = if index == 0 {
-                Span::styled(PROMPT_PREFIX, Style::default().add_modifier(Modifier::BOLD))
-            } else {
-                Span::raw(" ".repeat(PROMPT_PREFIX.len()))
-            };
-            document.rows.push(HistoryRow {
-                line: Line::from(vec![prefix, Span::raw(content)]).style(prompt_style),
-            });
-        }
-        let prompt_rows = document_row_count(&document).saturating_sub(start_row);
-
-        if let Some(answer) = &turn.final_answer {
-            push_answer(&mut document.rows, &answer.text);
-        }
-        document.rows.push(HistoryRow {
-            line: Line::default(),
-        });
-        document.prompts.push(PromptSection {
-            start_row,
-            prompt_rows,
-            end_row: document_row_count(&document),
-        });
-    }
-    document
-}
-
-fn push_answer(rows: &mut Vec<HistoryRow>, text: &str) {
-    for (index, text_line) in text.split('\n').enumerate() {
-        let prefix = if index == 0 {
+fn visual_row_line(row: &VisualRow, width: u16) -> Line<'static> {
+    let fill = row.fill.unwrap_or_default();
+    let mut spans = row
+        .spans
+        .iter()
+        .map(|span| {
             Span::styled(
-                ANSWER_PREFIX,
-                Style::default().fg(ANSWER_FG).add_modifier(Modifier::BOLD),
+                span.text.clone(),
+                ratatui_style(merge_styles(fill, span.style)),
             )
-        } else {
-            Span::raw(" ".repeat(ANSWER_PREFIX.len()))
-        };
-        rows.push(HistoryRow {
-            line: Line::from(vec![prefix, Span::raw(text_line.to_owned())]),
-        });
+        })
+        .collect::<Vec<_>>();
+    let padding = usize::from(width).saturating_sub(row.cell_width());
+    if padding > 0 && row.fill.is_some() {
+        spans.push(Span::styled(" ".repeat(padding), ratatui_style(fill)));
+    }
+    Line::from(spans)
+}
+
+fn merge_styles(base: CellStyle, overlay: CellStyle) -> CellStyle {
+    CellStyle {
+        foreground: overlay.foreground.or(base.foreground),
+        background: overlay.background.or(base.background),
+        modifiers: crate::style::StyleModifiers {
+            bold: base.modifiers.bold || overlay.modifiers.bold,
+            dim: base.modifiers.dim || overlay.modifiers.dim,
+            italic: base.modifiers.italic || overlay.modifiers.italic,
+            underline: base.modifiers.underline || overlay.modifiers.underline,
+        },
     }
 }
 
-fn document_row_count(document: &HistoryDocument) -> u16 {
-    u16::try_from(document.rows.len()).unwrap_or(u16::MAX)
+fn ratatui_style(style: CellStyle) -> Style {
+    let mut rendered = Style::default();
+    if let Some(foreground) = style.foreground {
+        rendered = rendered.fg(ratatui_color(foreground));
+    }
+    if let Some(background) = style.background {
+        rendered = rendered.bg(ratatui_color(background));
+    }
+    if style.modifiers.bold {
+        rendered = rendered.add_modifier(Modifier::BOLD);
+    }
+    if style.modifiers.dim {
+        rendered = rendered.add_modifier(Modifier::DIM);
+    }
+    if style.modifiers.italic {
+        rendered = rendered.add_modifier(Modifier::ITALIC);
+    }
+    if style.modifiers.underline {
+        rendered = rendered.add_modifier(Modifier::UNDERLINED);
+    }
+    rendered
 }
 
-fn wrapped_history_height(history: &Text<'_>, width: u16) -> u16 {
-    let width = usize::from(width.max(1));
-    history.lines.iter().fold(0_u16, |height, line| {
-        let line_width = line
-            .spans
-            .iter()
-            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
-            .sum::<usize>();
-        let wrapped = line_width.max(1).div_ceil(width);
-        height.saturating_add(u16::try_from(wrapped).unwrap_or(u16::MAX))
-    })
+fn ratatui_color(color: AnsiColor) -> Color {
+    match color {
+        AnsiColor::Black => Color::Black,
+        AnsiColor::Red => Color::Red,
+        AnsiColor::Green => Color::Green,
+        AnsiColor::Yellow => Color::Yellow,
+        AnsiColor::Blue => Color::Blue,
+        AnsiColor::Magenta => Color::Magenta,
+        AnsiColor::Cyan => Color::Cyan,
+        AnsiColor::White => Color::White,
+        AnsiColor::BrightBlack => Color::DarkGray,
+        AnsiColor::BrightRed => Color::LightRed,
+        AnsiColor::BrightGreen => Color::LightGreen,
+        AnsiColor::BrightYellow => Color::LightYellow,
+        AnsiColor::BrightBlue => Color::LightBlue,
+        AnsiColor::BrightMagenta => Color::LightMagenta,
+        AnsiColor::BrightCyan => Color::LightCyan,
+        AnsiColor::BrightWhite => Color::Gray,
+        AnsiColor::Indexed(index) => Color::Indexed(index),
+        AnsiColor::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
+    }
 }
 
 fn wrapped_text_height(text: &str, width: u16) -> u16 {
