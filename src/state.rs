@@ -1,4 +1,6 @@
+use crate::editor::EditorSnapshot;
 use crate::model::Attachment;
+use crate::paste::CompactPromptOverride;
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,16 +16,32 @@ struct OverlayRegistry {
     overlays: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DraftState {
     pub text: String,
+    pub editor: EditorSnapshot,
     pub attachments: Vec<Attachment>,
+    pub prompt_displays: Vec<CompactPromptOverride>,
 }
 
 #[derive(Deserialize, Serialize)]
 struct PersistedDraft {
+    version: u8,
+    editor: EditorSnapshot,
+    attachments: Vec<PersistedAttachment>,
+    #[serde(default)]
+    prompt_displays: Vec<CompactPromptOverride>,
+}
+
+#[derive(Deserialize)]
+struct LegacyDraft {
     text: String,
     attachments: Vec<PersistedAttachment>,
+}
+
+enum ReadDraft {
+    Current(PersistedDraft),
+    Legacy(LegacyDraft),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -38,8 +56,9 @@ pub struct StateStore {
 }
 
 struct DraftSnapshot {
-    text: String,
+    editor: EditorSnapshot,
     attachments: Vec<Attachment>,
+    prompt_displays: Vec<CompactPromptOverride>,
 }
 
 #[derive(Default)]
@@ -76,9 +95,12 @@ impl DraftWriter {
                         None => continue,
                     }
                 };
-                if let Err(save_error) =
-                    store.save_draft(&pane_id, &snapshot.text, &snapshot.attachments)
-                {
+                if let Err(save_error) = store.save_editor_draft(
+                    &pane_id,
+                    &snapshot.editor,
+                    &snapshot.attachments,
+                    &snapshot.prompt_displays,
+                ) {
                     *worker_error
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) =
@@ -93,11 +115,24 @@ impl DraftWriter {
         }
     }
 
-    pub fn queue(&self, text: String, attachments: Vec<Attachment>) {
+    pub fn queue_editor(
+        &self,
+        editor: EditorSnapshot,
+        attachments: Vec<Attachment>,
+        prompt_displays: Vec<CompactPromptOverride>,
+    ) {
         let (lock, ready) = &*self.slot;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.pending = Some(DraftSnapshot { text, attachments });
+        state.pending = Some(DraftSnapshot {
+            editor,
+            attachments,
+            prompt_displays,
+        });
         ready.notify_one();
+    }
+
+    pub fn queue(&self, text: String, attachments: Vec<Attachment>) {
+        self.queue_editor(EditorSnapshot::plain(text), attachments, Vec::new());
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -160,6 +195,16 @@ impl StateStore {
         text: &str,
         attachments: &[Attachment],
     ) -> AppResult<()> {
+        self.save_editor_draft(pane_id, &EditorSnapshot::plain(text), attachments, &[])
+    }
+
+    pub fn save_editor_draft(
+        &self,
+        pane_id: &str,
+        editor: &EditorSnapshot,
+        attachments: &[Attachment],
+        prompt_displays: &[CompactPromptOverride],
+    ) -> AppResult<()> {
         let file = self
             .root
             .join(format!("draft-{}.json", safe_pane_id(pane_id)));
@@ -167,7 +212,8 @@ impl StateStore {
             &self.root,
             &file,
             serde_json::to_vec(&PersistedDraft {
-                text: text.to_owned(),
+                version: 2,
+                editor: editor.clone(),
                 attachments: attachments
                     .iter()
                     .map(|attachment| PersistedAttachment {
@@ -175,6 +221,7 @@ impl StateStore {
                         display: attachment.display.clone(),
                     })
                     .collect(),
+                prompt_displays: prompt_displays.to_vec(),
             })?,
         )
     }
@@ -187,28 +234,52 @@ impl StateStore {
             return Ok(DraftState::default());
         }
         let bytes = std::fs::read(&file)?;
-        match serde_json::from_slice::<PersistedDraft>(&bytes) {
-            Ok(draft) => Ok(DraftState {
-                text: draft.text,
-                attachments: draft
-                    .attachments
-                    .into_iter()
-                    .map(|attachment| Attachment {
-                        id: attachment.id,
-                        display: attachment.display,
-                        native_path: None,
-                    })
-                    .collect(),
-            }),
-            Err(error) => {
-                let invalid = file.with_extension("json.invalid");
-                std::fs::rename(&file, &invalid)?;
-                Err(AppError::new(
-                    "plugin state",
-                    format!("invalid draft moved to {}: {error}", invalid.display()),
-                ))
+        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => value,
+            Err(error) => return quarantine_draft(&file, error),
+        };
+        let versioned = value
+            .as_object()
+            .is_some_and(|object| object.contains_key("version"));
+        let draft = if versioned {
+            serde_json::from_value(value).map(ReadDraft::Current)
+        } else {
+            serde_json::from_value(value).map(ReadDraft::Legacy)
+        };
+        let draft = match draft {
+            Ok(draft) => draft,
+            Err(error) => return quarantine_draft(&file, error),
+        };
+        let (editor, attachments, prompt_displays) = match draft {
+            ReadDraft::Current(draft) if draft.version == 2 => {
+                (draft.editor, draft.attachments, draft.prompt_displays)
             }
-        }
+            ReadDraft::Current(draft) => {
+                return quarantine_draft(
+                    &file,
+                    format!("unsupported draft version {}", draft.version),
+                );
+            }
+            ReadDraft::Legacy(draft) => (
+                EditorSnapshot::plain(draft.text),
+                draft.attachments,
+                Vec::new(),
+            ),
+        };
+        let text = editor.submission_text();
+        Ok(DraftState {
+            text,
+            editor,
+            attachments: attachments
+                .into_iter()
+                .map(|attachment| Attachment {
+                    id: attachment.id,
+                    display: attachment.display,
+                    native_path: None,
+                })
+                .collect(),
+            prompt_displays,
+        })
     }
 
     fn registry_path(&self) -> PathBuf {
@@ -240,6 +311,15 @@ impl StateStore {
             serde_json::to_vec(registry)?,
         )
     }
+}
+
+fn quarantine_draft(file: &Path, error: impl std::fmt::Display) -> AppResult<DraftState> {
+    let invalid = file.with_extension("json.invalid");
+    std::fs::rename(file, &invalid)?;
+    Err(AppError::new(
+        "plugin state",
+        format!("invalid draft moved to {}: {error}", invalid.display()),
+    ))
 }
 
 fn atomic_write(root: &Path, destination: &Path, bytes: Vec<u8>) -> AppResult<()> {
