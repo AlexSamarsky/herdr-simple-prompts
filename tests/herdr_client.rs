@@ -185,3 +185,31 @@ fn typed_read_reports_structured_protocol_error_when_text_is_absent() {
     ));
     assert!(error.to_string().contains("read text"));
 }
+
+#[test]
+fn pane_input_uses_exact_text_and_key_contracts() {
+    let fake = support::ScriptedHerdr::start(vec![
+        serde_json::json!({"type": "pane_input_sent"}),
+        serde_json::json!({"type": "pane_input_sent"}),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    client
+        .pane_send_input("w1:p1", Some("full\npaste"), &[])
+        .unwrap();
+    client
+        .pane_send_input("w1:p1", None, &["shift+tab"])
+        .unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests[0]["method"], "pane.send_input");
+    assert_eq!(
+        requests[0]["params"],
+        serde_json::json!({"pane_id":"w1:p1","text":"full\npaste","keys":[]})
+    );
+    assert_eq!(requests[1]["method"], "pane.send_input");
+    assert_eq!(
+        requests[1]["params"],
+        serde_json::json!({"pane_id":"w1:p1","keys":["shift+tab"]})
+    );
+}

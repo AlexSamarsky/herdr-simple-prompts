@@ -1,4 +1,4 @@
-use crate::agent::{AgentIdentity, agent_identity};
+use crate::agent::{AgentIdentity, AgentStatus, agent_identity};
 use crate::herdr::HerdrClient;
 use crate::{AppError, AppResult};
 use std::path::Path;
@@ -35,6 +35,22 @@ impl AgentTransport {
         self.client
             .agent_send_keys(&self.original.pane_id, &["esc"])
             .map_err(|error| AppError::new("interrupt", error.to_string()))?;
+        Ok(())
+    }
+
+    pub fn forward_interaction_text(&self, text: &str) -> AppResult<()> {
+        self.validate_blocked_source()?;
+        self.client
+            .pane_send_input(&self.original.pane_id, Some(text), &[])
+            .map_err(|error| AppError::new("native interaction", error.to_string()))?;
+        Ok(())
+    }
+
+    pub fn forward_interaction_key(&self, key: &str) -> AppResult<()> {
+        self.validate_blocked_source()?;
+        self.client
+            .pane_send_input(&self.original.pane_id, None, &[key])
+            .map_err(|error| AppError::new("native interaction", error.to_string()))?;
         Ok(())
     }
 
@@ -90,6 +106,17 @@ impl AgentTransport {
             return Err(AppError::new(
                 "agent",
                 "source agent session changed; reopen Simple Prompts",
+            ));
+        }
+        Ok(current)
+    }
+
+    fn validate_blocked_source(&self) -> AppResult<AgentIdentity> {
+        let current = self.validate_source()?;
+        if current.status != AgentStatus::Blocked {
+            return Err(AppError::new(
+                "native interaction",
+                "source agent is no longer blocked",
             ));
         }
         Ok(current)

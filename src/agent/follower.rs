@@ -128,7 +128,7 @@ impl TranscriptFollower {
 
     pub fn poll_for_status(&mut self, status: AgentStatus) -> AppResult<Vec<FollowerEvent>> {
         let mut events = self.poll()?;
-        if !status.is_working() {
+        if !status.keeps_turn_open() {
             if let Some(final_answer) = self.finalize_pending() {
                 events.push(final_answer);
             }

@@ -3,6 +3,7 @@ use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::editor::Editor;
 use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::model::Message;
+use herdr_simple_prompts::style::StyledText;
 use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
 use herdr_simple_prompts::ui::render::{render_to_buffer, render_to_string};
 use herdr_simple_prompts::ui::visual_rows::{
@@ -573,4 +574,99 @@ fn markdown_fallback_body_styles_flow_into_rendered_visual_rows() {
         app.turns[0].final_answer.as_ref().unwrap().presentation,
         MessagePresentation::MarkdownFallback
     );
+}
+
+#[test]
+fn blocked_view_replaces_history_working_row_and_composer_with_native_surface() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "history must be hidden",
+        Some(1),
+    )));
+    app.agent_status = AgentStatus::Blocked;
+    app.working_since = Some(Instant::now() - Duration::from_secs(2));
+    app.blocked_surface = Some(Ok(StyledText {
+        text: "Allow command?\n  Yes\n  No".into(),
+        runs: Vec::new(),
+    }));
+    let mut editor = Editor::default();
+    editor.insert_char('d');
+    editor.insert_char('r');
+    editor.insert_char('a');
+    editor.insert_char('f');
+    editor.insert_char('t');
+
+    let rendered = render_to_string(&app, &editor, 80, 16);
+
+    assert!(rendered.contains("INTERACTION REQUIRED"));
+    assert!(rendered.contains("Allow command?"));
+    assert!(rendered.contains("Native Codex/Claude interaction · prefix+m to return"));
+    assert!(!rendered.contains("history must be hidden"));
+    assert!(!rendered.contains("Working ("));
+    assert!(!rendered.contains("draft"));
+}
+
+#[test]
+fn blocked_snapshot_styles_are_sanitized_and_confined_to_body() {
+    let mut app = AppState {
+        agent_status: AgentStatus::Blocked,
+        ..AppState::default()
+    };
+    app.blocked_surface = Some(Ok(herdr_simple_prompts::ansi::sanitize_ansi(
+        "\u{1b}]0;rewrite-title\u{7}\u{1b}[31;44mDANGER\u{1b}[0m",
+    )));
+
+    let buffer = render_to_buffer(&app, &Editor::default(), 72, 8);
+    let rendered = render_to_string(&app, &Editor::default(), 72, 8);
+    let header = find_cell(&buffer, 72, 8, "I");
+    let danger = (0, 1);
+    let footer = (0, 7);
+
+    assert!(!rendered.contains("rewrite-title"));
+    assert_eq!(buffer[header].style().fg, Some(Color::Yellow));
+    assert!(buffer[header].style().add_modifier.contains(Modifier::BOLD));
+    assert_eq!(buffer[danger].style().fg, Some(Color::Red));
+    assert_eq!(buffer[danger].style().bg, Some(Color::Blue));
+    assert_ne!(buffer[footer].style().bg, Some(Color::Blue));
+}
+
+#[test]
+fn blocked_snapshot_failure_shows_owned_fallback_and_return_hint() {
+    let app = AppState {
+        agent_status: AgentStatus::Blocked,
+        blocked_surface: Some(Err("socket unavailable".into())),
+        ..AppState::default()
+    };
+
+    let rendered = render_to_string(&app, &Editor::default(), 80, 8);
+
+    assert!(rendered.contains("Unable to read native interaction"));
+    assert!(rendered.contains("prefix+m"));
+    assert!(!rendered.contains("socket unavailable"));
+}
+
+#[test]
+fn leaving_blocked_view_restores_the_exact_ordinary_content() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "ordinary history",
+        Some(1),
+    )));
+    let mut editor = Editor::default();
+    editor.insert_paste("unchanged draft");
+    let ordinary = render_to_string(&app, &editor, 80, 14);
+
+    app.agent_status = AgentStatus::Blocked;
+    app.blocked_surface = Some(Ok(StyledText {
+        text: "Choose one".into(),
+        runs: Vec::new(),
+    }));
+    let blocked = render_to_string(&app, &editor, 80, 14);
+    app.update_blocked_surface(AgentStatus::Done, None);
+    let restored = render_to_string(&app, &editor, 80, 14);
+
+    assert!(blocked.contains("Choose one"));
+    assert_eq!(restored, ordinary);
 }

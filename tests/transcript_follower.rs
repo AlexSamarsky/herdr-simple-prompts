@@ -4,6 +4,8 @@ use herdr_simple_prompts::agent::AgentStatus;
 use herdr_simple_prompts::agent::claude::ClaudeAdapter;
 use herdr_simple_prompts::agent::codex::CodexAdapter;
 use herdr_simple_prompts::agent::follower::{FollowerEvent, TranscriptFollower};
+use herdr_simple_prompts::app::{AppEvent, AppState};
+use herdr_simple_prompts::history::VisibleRole;
 
 #[test]
 fn waits_for_complete_json_line_then_emits_once() {
@@ -87,6 +89,40 @@ fn initial_idle_claude_session_includes_its_pending_final_answer() {
     assert_eq!(events.len(), 2);
     assert!(matches!(events[0], FollowerEvent::Conversation(_)));
     assert!(matches!(events[1], FollowerEvent::Conversation(_)));
+}
+
+#[test]
+fn initial_blocked_claude_session_keeps_its_pending_answer_unfinalized() {
+    let file = support::GrowingFile::new();
+    file.append(&std::fs::read_to_string("tests/fixtures/claude/simple.jsonl").unwrap());
+    let mut follower =
+        TranscriptFollower::new(file.path(), Box::new(ClaudeAdapter::default())).unwrap();
+
+    let events = follower.poll_initial(AgentStatus::Blocked).unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        FollowerEvent::Conversation(herdr_simple_prompts::model::ConversationEvent::User(_))
+    ));
+    let mut app = AppState::default();
+    for event in events {
+        if let FollowerEvent::Conversation(conversation) = event {
+            match conversation {
+                herdr_simple_prompts::model::ConversationEvent::User(message) => {
+                    app.apply(AppEvent::NativeUser(message));
+                }
+                herdr_simple_prompts::model::ConversationEvent::Final(message) => {
+                    app.apply(AppEvent::NativeFinal(message));
+                }
+            }
+        }
+    }
+    assert!(
+        app.drain_history_upserts()
+            .iter()
+            .all(|record| record.role != VisibleRole::Final)
+    );
 }
 
 #[test]

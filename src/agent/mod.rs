@@ -84,6 +84,10 @@ impl AgentStatus {
     pub fn is_working(self) -> bool {
         self == Self::Working
     }
+
+    pub fn keeps_turn_open(self) -> bool {
+        matches!(self, Self::Working | Self::Blocked)
+    }
 }
 
 impl From<Option<&str>> for AgentStatus {

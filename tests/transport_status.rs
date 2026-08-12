@@ -18,12 +18,16 @@ fn identity(session: &str) -> AgentIdentity {
 }
 
 fn agent_result(session: &str) -> serde_json::Value {
+    agent_result_with_status(session, "working")
+}
+
+fn agent_result_with_status(session: &str, status: &str) -> serde_json::Value {
     json!({
         "type": "agent_info",
         "agent": {
             "pane_id": "w1:p1",
             "agent": "codex",
-            "agent_status": "working",
+            "agent_status": status,
             "foreground_cwd": "/repo",
             "agent_session": {"source":"herdr:codex","agent":"codex","kind":"id","value":session}
         }
@@ -133,4 +137,86 @@ fn ansi_reads_do_not_read_after_native_session_changes() {
 
     assert!(error.to_string().contains("session changed"));
     assert_eq!(fake.requests().len(), 1);
+}
+
+#[test]
+fn interaction_text_revalidates_then_forwards_exactly_once_to_source_pane() {
+    let fake = support::ScriptedHerdr::start(vec![
+        agent_result_with_status("s1", "blocked"),
+        json!({"type": "pane_input_sent"}),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    transport.forward_interaction_text("yes\nkeep all").unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "agent.get");
+    assert_eq!(requests[1]["method"], "pane.send_input");
+    assert_eq!(
+        requests[1]["params"],
+        json!({"pane_id":"w1:p1","text":"yes\nkeep all","keys":[]})
+    );
+}
+
+#[test]
+fn interaction_key_revalidates_then_forwards_exactly_once_to_source_pane() {
+    let fake = support::ScriptedHerdr::start(vec![
+        agent_result_with_status("s1", "blocked"),
+        json!({"type": "pane_input_sent"}),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    transport.forward_interaction_key("down").unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "agent.get");
+    assert_eq!(requests[1]["method"], "pane.send_input");
+    assert_eq!(
+        requests[1]["params"],
+        json!({"pane_id":"w1:p1","keys":["down"]})
+    );
+}
+
+#[test]
+fn interaction_is_not_forwarded_after_native_session_changes() {
+    let fake = support::ScriptedHerdr::start(vec![agent_result("s2")]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    let error = transport.forward_interaction_key("enter").unwrap_err();
+
+    assert!(error.to_string().contains("session changed"));
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[test]
+fn interaction_text_is_not_forwarded_after_agent_leaves_blocked() {
+    let fake = support::ScriptedHerdr::start(vec![agent_result_with_status("s1", "working")]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    let error = transport.forward_interaction_text("late text").unwrap_err();
+
+    assert!(error.to_string().contains("no longer blocked"));
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "agent.get");
+}
+
+#[test]
+fn interaction_key_is_not_forwarded_after_agent_leaves_blocked() {
+    let fake = support::ScriptedHerdr::start(vec![agent_result_with_status("s1", "done")]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    let error = transport.forward_interaction_key("enter").unwrap_err();
+
+    assert!(error.to_string().contains("no longer blocked"));
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "agent.get");
 }

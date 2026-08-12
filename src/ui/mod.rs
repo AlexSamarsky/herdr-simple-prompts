@@ -1,3 +1,4 @@
+pub mod interaction;
 pub mod render;
 mod runtime;
 mod terminal;
@@ -18,6 +19,7 @@ use crate::{AppError, AppResult};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
+use interaction::{map_interaction_key, map_interaction_paste};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use runtime::{RuntimeEvent, UiRuntime};
@@ -162,6 +164,9 @@ pub fn run_from_env() -> AppResult<()> {
                 );
             }
             Event::Paste(content) => {
+                if handle_blocked_paste(&content, &mut app, &runtime) {
+                    continue;
+                }
                 if !app.input_enabled {
                     continue;
                 }
@@ -193,6 +198,7 @@ pub fn run_from_env() -> AppResult<()> {
             }
             Event::Resize(_, _) => {}
             Event::Mouse(mouse) => match mouse.kind {
+                _ if app.agent_status == AgentStatus::Blocked => {}
                 MouseEventKind::ScrollUp => {
                     app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(3)
                 }
@@ -206,6 +212,16 @@ pub fn run_from_env() -> AppResult<()> {
     }
 }
 
+fn handle_blocked_paste(content: &str, app: &mut AppState, runtime: &UiRuntime) -> bool {
+    if app.agent_status != AgentStatus::Blocked {
+        return false;
+    }
+    if let Err(error) = runtime.forward_interaction(map_interaction_paste(content)) {
+        app.interaction_error = Some(error.to_string());
+    }
+    true
+}
+
 fn handle_key(
     key: KeyEvent,
     app: &mut AppState,
@@ -214,6 +230,14 @@ fn handle_key(
     local_sequence: &mut u64,
     history_cache: &mut render::HistoryRenderCache,
 ) -> AppResult<DraftChange> {
+    if app.agent_status == AgentStatus::Blocked {
+        if let Some(input) = map_interaction_key(key)
+            && let Err(error) = runtime.forward_interaction(input)
+        {
+            app.interaction_error = Some(error.to_string());
+        }
+        return Ok(DraftChange::None);
+    }
     if !app.input_enabled && !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
         return Ok(DraftChange::None);
     }
@@ -354,17 +378,22 @@ fn apply_runtime_event(
             app.transcript_error = Some(error);
             DraftChange::None
         }
-        RuntimeEvent::Observation(Ok((current, screen))) => {
+        RuntimeEvent::Observation(Ok(observation)) => {
             app.connection_error = None;
             app.input_enabled = true;
+            let current = observation.identity;
             let was_working = app.agent_status.is_working();
-            app.agent_status = current.status;
             if !was_working && current.status.is_working() {
                 app.working_since = Some(Instant::now());
             } else if was_working && !current.status.is_working() {
                 app.working_since = None;
             }
-            app.status_line = Some(extract_status(original.kind, &screen, original.cwd.clone()));
+            app.update_blocked_surface(current.status, observation.blocked_surface);
+            app.status_line = Some(extract_status(
+                original.kind,
+                &observation.status_text,
+                original.cwd.clone(),
+            ));
             DraftChange::None
         }
         RuntimeEvent::Observation(Err(error)) => {
@@ -391,6 +420,10 @@ fn apply_runtime_event(
             DraftChange::None
         }
         RuntimeEvent::Interrupted(Ok(())) => DraftChange::None,
+        RuntimeEvent::InteractionForwarded(result) => {
+            app.apply_interaction_result(result);
+            DraftChange::None
+        }
         RuntimeEvent::ImageForwarded { attachment, result } => {
             app.pending_attachments
                 .retain(|candidate| candidate.id != attachment.id);
@@ -538,12 +571,19 @@ fn next_image_id(sequence: &mut u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CapturePolicy, apply_follower_events_with_policy, render, runtime};
+    use super::{
+        CapturePolicy, apply_follower_events_with_policy, handle_blocked_paste, handle_key, render,
+        runtime,
+    };
+    use crate::agent::AgentStatus;
     use crate::agent::follower::FollowerEvent;
     use crate::app::AppState;
+    use crate::editor::Editor;
     use crate::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
     use crate::model::{ConversationEvent, Message};
     use crate::paste::fingerprint;
+    use crate::ui::interaction::InteractionInput;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn final_event(index: usize) -> FollowerEvent {
         FollowerEvent::Conversation(ConversationEvent::Final(Message::final_text(
@@ -681,5 +721,58 @@ mod tests {
         );
         assert!(app.turns[2].final_answer.is_none());
         assert_eq!(app.replay_insert_at, None);
+    }
+
+    #[test]
+    fn blocked_key_routes_before_composer_and_preserves_editor_and_history_state() {
+        let (runtime, actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            agent_status: AgentStatus::Blocked,
+            scroll_from_bottom: 7,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("unchanged draft");
+        let before = editor.snapshot();
+        let mut sequence = 9;
+        let mut cache = render::HistoryRenderCache::default();
+
+        let change = handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(change, super::DraftChange::None);
+        assert_eq!(editor.snapshot(), before);
+        assert_eq!(app.scroll_from_bottom, 7);
+        assert_eq!(sequence, 9);
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::Interaction(InteractionInput::Key("down"))
+        ));
+        assert!(actions.try_recv().is_err());
+    }
+
+    #[test]
+    fn blocked_paste_routes_as_one_text_action_without_composer_work() {
+        let (runtime, actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            agent_status: AgentStatus::Blocked,
+            ..AppState::default()
+        };
+        let content = "large body\n".repeat(1_000);
+
+        assert!(handle_blocked_paste(&content, &mut app, &runtime));
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::Interaction(InteractionInput::Text(text)) if text == content
+        ));
+        assert!(app.pending_attachments.is_empty());
+        assert!(app.draft_attachments.is_empty());
     }
 }

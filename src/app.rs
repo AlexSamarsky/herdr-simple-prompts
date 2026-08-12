@@ -5,7 +5,7 @@ use crate::model::{Attachment, Delivery, Message, Turn};
 use crate::paste::fingerprint;
 use crate::paste::{CompactPromptOverride, canonicalize_compact_markers, marker_counts};
 use crate::status::StatusLine;
-use crate::style::{MessagePresentation, validate_style_runs};
+use crate::style::{MessagePresentation, StyledText, validate_style_runs};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -47,6 +47,8 @@ pub struct AppState {
     pub connection_error: Option<String>,
     pub transcript_error: Option<String>,
     pub send_error: Option<String>,
+    pub blocked_surface: Option<Result<StyledText, String>>,
+    pub interaction_error: Option<String>,
     pub input_enabled: bool,
     pub scroll_from_bottom: usize,
     #[doc(hidden)]
@@ -74,6 +76,8 @@ impl Default for AppState {
             connection_error: None,
             transcript_error: None,
             send_error: None,
+            blocked_surface: None,
+            interaction_error: None,
             input_enabled: true,
             scroll_from_bottom: 0,
             replay_insert_at: None,
@@ -85,6 +89,30 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn update_blocked_surface(
+        &mut self,
+        status: AgentStatus,
+        surface: Option<Result<StyledText, String>>,
+    ) {
+        self.agent_status = status;
+        if status == AgentStatus::Blocked {
+            self.blocked_surface = surface;
+        } else {
+            self.blocked_surface = None;
+            self.interaction_error = None;
+        }
+    }
+
+    pub fn apply_interaction_result(&mut self, result: Result<(), String>) {
+        if self.agent_status != AgentStatus::Blocked {
+            return;
+        }
+        match result {
+            Ok(()) => self.interaction_error = None,
+            Err(error) => self.interaction_error = Some(error),
+        }
+    }
+
     pub fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::PromptSubmitted {

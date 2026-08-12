@@ -2,7 +2,7 @@ use crate::agent::AgentStatus;
 use crate::app::AppState;
 use crate::editor::Editor;
 use crate::style::AnsiColor;
-use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow};
+use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow, wrap_styled};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -53,6 +53,10 @@ pub(crate) fn render(
     editor: &Editor,
     history_cache: &mut HistoryRenderCache,
 ) {
+    if app.agent_status == AgentStatus::Blocked {
+        render_blocked(frame, app);
+        return;
+    }
     let area = frame.area();
     let display_text = editor.display_text();
     let working_height = u16::from(app.agent_status == AgentStatus::Working);
@@ -161,6 +165,56 @@ pub(crate) fn render(
     let (cursor_row, cursor_column) =
         editor_cursor(areas[3], cursor_content_row, editor_column, composer_scroll);
     frame.set_cursor_position((cursor_column, cursor_row));
+}
+
+fn render_blocked(frame: &mut Frame<'_>, app: &AppState) {
+    let area = frame.area();
+    let error_height = u16::from(app.interaction_error.is_some());
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(error_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("INTERACTION REQUIRED").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[0],
+    );
+
+    let body = match app.blocked_surface.as_ref() {
+        Some(Ok(surface)) => {
+            let rows = wrap_styled(surface, usize::from(areas[1].width));
+            let start = rows.len().saturating_sub(usize::from(areas[1].height));
+            Text::from(
+                rows[start..]
+                    .iter()
+                    .map(|row| visual_row_line(row, areas[1].width))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        Some(Err(_)) | None => Text::from("Unable to read native interaction"),
+    };
+    frame.render_widget(Paragraph::new(body), areas[1]);
+    if let Some(error) = &app.interaction_error {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Error: ", Style::default().fg(Color::Red)),
+                Span::raw(error.clone()),
+            ])),
+            areas[2],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Native Codex/Claude interaction · prefix+m to return"),
+        areas[3],
+    );
 }
 
 fn visual_row_line(row: &VisualRow, width: u16) -> Line<'static> {

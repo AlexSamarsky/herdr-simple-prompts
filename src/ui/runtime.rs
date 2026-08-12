@@ -1,10 +1,11 @@
 use crate::agent::follower::{FollowerEvent, TranscriptFollower};
 use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
-use crate::ansi::extract_native_final;
+use crate::ansi::{extract_native_final, sanitize_ansi};
 use crate::herdr::HerdrClient;
 use crate::model::Attachment;
 use crate::paste::fingerprint;
 use crate::style::MessagePresentation;
+use crate::style::StyledText;
 use crate::transport::AgentTransport;
 use crate::{AppError, AppResult};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use super::interaction::InteractionInput;
+
 const EVENT_QUEUE_CAPACITY: usize = 64;
 const ACTION_QUEUE_CAPACITY: usize = 16;
 const CAPTURE_QUEUE_CAPACITY: usize = 8;
@@ -22,12 +25,13 @@ const CAPTURE_LINES: u32 = 240;
 const CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(75);
 
 #[derive(Debug)]
-enum ActionCommand {
+pub(super) enum ActionCommand {
     Submit {
         local_id: String,
         text: String,
     },
     Interrupt,
+    Interaction(InteractionInput),
     LocalImage {
         attachment: Attachment,
     },
@@ -35,6 +39,13 @@ enum ActionCommand {
         attachment: Attachment,
         path: PathBuf,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceObservation {
+    pub identity: AgentIdentity,
+    pub status_text: String,
+    pub blocked_surface: Option<Result<StyledText, String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,12 +58,13 @@ pub(super) struct CaptureCommand {
 pub enum RuntimeEvent {
     Transcript(Vec<FollowerEvent>),
     TranscriptError(String),
-    Observation(Result<(AgentIdentity, String), String>),
+    Observation(Result<SourceObservation, String>),
     Submitted {
         local_id: String,
         result: Result<(), String>,
     },
     Interrupted(Result<(), String>),
+    InteractionForwarded(Result<(), String>),
     ImageForwarded {
         attachment: Attachment,
         result: Result<(), String>,
@@ -83,7 +95,7 @@ impl UiRuntime {
         let (action_tx, action_rx) = sync_channel(ACTION_QUEUE_CAPACITY);
         let (capture_tx, capture_rx) = sync_channel(CAPTURE_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
-        let agent_working = Arc::new(AtomicBool::new(identity.status.is_working()));
+        let follower_active = Arc::new(AtomicBool::new(follower_is_active(identity.status)));
 
         let observer_transport = AgentTransport::new(
             HerdrClient::connect(socket).map_err(|error| AppError::new("ui", error.to_string()))?,
@@ -101,11 +113,16 @@ impl UiRuntime {
         let threads = vec![
             spawn_observer(
                 Arc::clone(&stop),
-                Arc::clone(&agent_working),
+                Arc::clone(&follower_active),
                 event_tx.clone(),
                 observer_transport,
             ),
-            spawn_follower(Arc::clone(&stop), agent_working, event_tx.clone(), follower),
+            spawn_follower(
+                Arc::clone(&stop),
+                follower_active,
+                event_tx.clone(),
+                follower,
+            ),
             spawn_actions(
                 Arc::clone(&stop),
                 event_tx.clone(),
@@ -140,6 +157,10 @@ impl UiRuntime {
 
     pub fn interrupt(&self) -> AppResult<()> {
         self.send_action(ActionCommand::Interrupt)
+    }
+
+    pub fn forward_interaction(&self, input: InteractionInput) -> AppResult<()> {
+        self.send_action(ActionCommand::Interaction(input))
     }
 
     pub fn forward_local_image(&self, attachment: Attachment) -> AppResult<()> {
@@ -199,9 +220,26 @@ pub(super) fn capture_test_runtime(capacity: usize) -> (UiRuntime, Receiver<Capt
     )
 }
 
+#[cfg(test)]
+pub(super) fn interaction_test_runtime(capacity: usize) -> (UiRuntime, Receiver<ActionCommand>) {
+    let (action_tx, action_rx) = sync_channel(capacity);
+    let (capture_tx, _capture_rx) = sync_channel(1);
+    let (_event_tx, events) = sync_channel(1);
+    (
+        UiRuntime {
+            action_tx,
+            capture_tx,
+            events,
+            stop: Arc::new(AtomicBool::new(false)),
+            _threads: Vec::new(),
+        },
+        action_rx,
+    )
+}
+
 fn spawn_observer(
     stop: Arc<AtomicBool>,
-    agent_working: Arc<AtomicBool>,
+    follower_active: Arc<AtomicBool>,
     events: SyncSender<RuntimeEvent>,
     transport: AgentTransport,
 ) -> JoinHandle<()> {
@@ -209,11 +247,12 @@ fn spawn_observer(
         while !stop.load(Ordering::Acquire) {
             let observation = match transport.refresh_identity() {
                 Ok(identity) => {
-                    agent_working.store(identity.status.is_working(), Ordering::Release);
-                    transport
-                        .visible_source(8)
-                        .map(|screen| (identity, screen))
-                        .map_err(|error| error.to_string())
+                    follower_active.store(follower_is_active(identity.status), Ordering::Release);
+                    complete_observation(
+                        identity,
+                        || transport.visible_source(8),
+                        || transport.visible_source_ansi(200),
+                    )
                 }
                 Err(error) => Err(error.to_string()),
             };
@@ -223,15 +262,37 @@ fn spawn_observer(
     })
 }
 
+fn follower_is_active(status: AgentStatus) -> bool {
+    status.keeps_turn_open()
+}
+
+fn complete_observation(
+    identity: AgentIdentity,
+    read_status: impl FnOnce() -> AppResult<String>,
+    read_blocked: impl FnOnce() -> AppResult<String>,
+) -> Result<SourceObservation, String> {
+    let status_text = read_status().map_err(|error| error.to_string())?;
+    let blocked_surface = (identity.status == AgentStatus::Blocked).then(|| {
+        read_blocked()
+            .map(|ansi| sanitize_ansi(&ansi))
+            .map_err(|error| error.to_string())
+    });
+    Ok(SourceObservation {
+        identity,
+        status_text,
+        blocked_surface,
+    })
+}
+
 fn spawn_follower(
     stop: Arc<AtomicBool>,
-    agent_working: Arc<AtomicBool>,
+    follower_active: Arc<AtomicBool>,
     events: SyncSender<RuntimeEvent>,
     mut follower: TranscriptFollower,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         while !stop.load(Ordering::Acquire) {
-            let status = if agent_working.load(Ordering::Acquire) {
+            let status = if follower_active.load(Ordering::Acquire) {
                 AgentStatus::Working
             } else {
                 AgentStatus::Done
@@ -271,6 +332,13 @@ fn spawn_actions(
                 ActionCommand::Interrupt => RuntimeEvent::Interrupted(
                     transport.interrupt().map_err(|error| error.to_string()),
                 ),
+                ActionCommand::Interaction(input) => {
+                    let result = match input {
+                        InteractionInput::Text(text) => transport.forward_interaction_text(&text),
+                        InteractionInput::Key(key) => transport.forward_interaction_key(key),
+                    };
+                    RuntimeEvent::InteractionForwarded(result.map_err(|error| error.to_string()))
+                }
                 ActionCommand::LocalImage { attachment } => RuntimeEvent::ImageForwarded {
                     attachment,
                     result: transport
@@ -365,14 +433,16 @@ fn resolve_capture(
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionCommand, CaptureCommand, RuntimeEvent, UiRuntime, resolve_capture,
-        resolve_capture_command, spawn_follower,
+        ActionCommand, CaptureCommand, RuntimeEvent, UiRuntime, complete_observation,
+        follower_is_active, resolve_capture, resolve_capture_command, spawn_follower,
     };
-    use crate::agent::AgentKind;
     use crate::agent::claude::ClaudeAdapter;
-    use crate::agent::follower::TranscriptFollower;
+    use crate::agent::follower::{FollowerEvent, TranscriptFollower};
+    use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
     use crate::style::{AnsiColor, MessagePresentation};
     use crate::{AppError, AppResult};
+    use std::cell::Cell;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::sync_channel;
@@ -547,6 +617,95 @@ mod tests {
         assert!(matches!(
             events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             RuntimeEvent::Transcript(events) if events.len() == 1
+        ));
+
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        worker.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn identity(status: AgentStatus) -> AgentIdentity {
+        AgentIdentity {
+            pane_id: "w1:p1".into(),
+            kind: AgentKind::Codex,
+            session_id: "session-1".into(),
+            cwd: PathBuf::from("/repo"),
+            status,
+        }
+    }
+
+    #[test]
+    fn observation_always_reads_plain_status_and_reads_ansi_only_while_blocked() {
+        for (status, expected_ansi_reads) in [
+            (AgentStatus::Working, 0),
+            (AgentStatus::Done, 0),
+            (AgentStatus::Blocked, 1),
+        ] {
+            let status_reads = Cell::new(0);
+            let ansi_reads = Cell::new(0);
+            let observation = complete_observation(
+                identity(status),
+                || {
+                    status_reads.set(status_reads.get() + 1);
+                    Ok("plain status".into())
+                },
+                || {
+                    ansi_reads.set(ansi_reads.get() + 1);
+                    Ok("\u{1b}]0;secret\u{7}\u{1b}[32mquestion\u{1b}[0m".into())
+                },
+            )
+            .unwrap();
+
+            assert_eq!(status_reads.get(), 1);
+            assert_eq!(ansi_reads.get(), expected_ansi_reads);
+            assert_eq!(observation.status_text, "plain status");
+            if status == AgentStatus::Blocked {
+                let styled = observation.blocked_surface.unwrap().unwrap();
+                assert_eq!(styled.text, "question");
+                assert!(!styled.runs.is_empty());
+            } else {
+                assert!(observation.blocked_surface.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_initializes_blocked_status_as_active_for_the_follower() {
+        assert!(follower_is_active(AgentStatus::Working));
+        assert!(follower_is_active(AgentStatus::Blocked));
+        assert!(!follower_is_active(AgentStatus::Done));
+
+        let path = std::env::temp_dir().join(format!(
+            "herdr-simple-prompts-runtime-blocked-{}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            std::fs::read("tests/fixtures/claude/simple.jsonl").unwrap(),
+        )
+        .unwrap();
+        let follower = TranscriptFollower::new(&path, Box::new(ClaudeAdapter::default())).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicBool::new(follower_is_active(AgentStatus::Blocked)));
+        let (events_tx, events_rx) = sync_channel(8);
+        let worker = spawn_follower(Arc::clone(&stop), Arc::clone(&active), events_tx, follower);
+
+        assert!(matches!(
+            events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            RuntimeEvent::Transcript(events) if events.len() == 1
+                && matches!(
+                    events.as_slice(),
+                    [FollowerEvent::Conversation(crate::model::ConversationEvent::User(_))]
+                )
+        ));
+        assert!(events_rx.recv_timeout(Duration::from_millis(250)).is_err());
+        active.store(false, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            RuntimeEvent::Transcript(events) if matches!(
+                events.as_slice(),
+                [FollowerEvent::Conversation(crate::model::ConversationEvent::Final(_))]
+            )
         ));
 
         stop.store(true, std::sync::atomic::Ordering::Release);
