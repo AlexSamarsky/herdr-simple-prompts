@@ -1,10 +1,12 @@
 use crate::agent::AgentStatus;
 use crate::editor::{EditorSnapshot, EditorSubmission};
+use crate::history::{VisibleHistoryRecord, VisibleRole};
 use crate::model::{Attachment, Delivery, Message, Turn};
 use crate::paste::fingerprint;
-use crate::paste::{CompactPromptOverride, canonicalize_compact_markers};
+use crate::paste::{CompactPromptOverride, canonicalize_compact_markers, marker_counts};
 use crate::status::StatusLine;
 use crate::style::{MessagePresentation, validate_style_runs};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 const RECONCILE_WINDOW_MS: u64 = 30_000;
@@ -49,6 +51,12 @@ pub struct AppState {
     pub scroll_from_bottom: usize,
     #[doc(hidden)]
     pub replay_insert_at: Option<usize>,
+    #[doc(hidden)]
+    pub history_orders: BTreeMap<(VisibleRole, String), u64>,
+    #[doc(hidden)]
+    pub next_history_order: u64,
+    #[doc(hidden)]
+    pub pending_history_upserts: Vec<VisibleHistoryRecord>,
 }
 
 impl Default for AppState {
@@ -69,6 +77,9 @@ impl Default for AppState {
             input_enabled: true,
             scroll_from_bottom: 0,
             replay_insert_at: None,
+            history_orders: BTreeMap::new(),
+            next_history_order: 1,
+            pending_history_upserts: Vec::new(),
         }
     }
 }
@@ -108,22 +119,19 @@ impl AppState {
                     },
                 });
             }
-            AppEvent::NativeUser(message) => self.reconcile_user(message),
+            AppEvent::NativeUser(message) => {
+                let index = self.reconcile_user(message);
+                self.queue_prompt_upsert(index);
+            }
             AppEvent::NativeFinal(mut message) => {
                 if message.presentation == MessagePresentation::Plain {
                     message.presentation = MessagePresentation::MarkdownFallback;
                 }
-                if let Some(turn) =
-                    self.turns.iter_mut().rev().find(|turn| {
-                        turn.delivery == Delivery::Native && turn.final_answer.is_none()
-                    })
-                {
-                    turn.final_answer = Some(message);
+                if let Some(index) = self.reconcile_final(message) {
+                    self.queue_final_upsert(index);
                 }
             }
             AppEvent::TranscriptReloaded => {
-                self.turns
-                    .retain(|turn| !matches!(turn.delivery, Delivery::Native));
                 self.replay_insert_at = Some(0);
             }
             AppEvent::TranscriptReplayComplete => self.replay_insert_at = None,
@@ -147,15 +155,20 @@ impl AppState {
                 text_fingerprint,
                 presentation,
             } => {
-                if let Some(message) = self
-                    .turns
-                    .iter_mut()
-                    .filter_map(|turn| turn.final_answer.as_mut())
-                    .find(|message| {
-                        message.stable_id == stable_id
-                            && fingerprint(&message.text) == text_fingerprint
-                    })
-                {
+                let target = self.turns.iter().enumerate().find_map(|(index, turn)| {
+                    turn.final_answer
+                        .as_ref()
+                        .filter(|message| {
+                            message.stable_id == stable_id
+                                && fingerprint(&message.text) == text_fingerprint
+                        })
+                        .map(|_| index)
+                });
+                if let Some(index) = target {
+                    let message = self.turns[index]
+                        .final_answer
+                        .as_mut()
+                        .expect("target contains a final answer");
                     let valid = match &presentation {
                         MessagePresentation::NativeAnsi(runs) => {
                             validate_style_runs(&message.text, runs).is_ok()
@@ -167,10 +180,51 @@ impl AppState {
                     };
                     if valid {
                         message.presentation = presentation;
+                        self.queue_final_upsert(index);
                     }
                 }
             }
         }
+    }
+
+    pub fn hydrate_visible_history(&mut self, mut records: Vec<VisibleHistoryRecord>) {
+        records.retain(|record| record.validate().is_ok());
+        records.sort_by_key(|record| record.order);
+        self.turns.clear();
+        self.history_orders.clear();
+        self.pending_history_upserts.clear();
+        self.replay_insert_at = None;
+
+        let mut final_records = Vec::new();
+        let mut maximum_order = 0;
+        for record in records {
+            maximum_order = maximum_order.max(record.order);
+            self.history_orders
+                .insert((record.role, record.stable_id.clone()), record.order);
+            match record.role {
+                VisibleRole::Prompt => self.turns.push(Turn {
+                    prompt: record.into_message(),
+                    final_answer: None,
+                    delivery: Delivery::Native,
+                }),
+                VisibleRole::Final => final_records.push(record),
+            }
+        }
+        for record in final_records {
+            let turn_id = record.turn_id.clone();
+            if let Some(turn) = self
+                .turns
+                .iter_mut()
+                .find(|turn| turn.prompt.stable_id == turn_id)
+            {
+                turn.final_answer = Some(record.into_message());
+            }
+        }
+        self.next_history_order = maximum_order.saturating_add(1).max(1);
+    }
+
+    pub fn drain_history_upserts(&mut self) -> Vec<VisibleHistoryRecord> {
+        std::mem::take(&mut self.pending_history_upserts)
     }
 
     pub fn visible_error(&self) -> Option<&str> {
@@ -180,7 +234,7 @@ impl AppState {
             .or(self.transcript_error.as_deref())
     }
 
-    fn reconcile_user(&mut self, mut message: Message) {
+    fn reconcile_user(&mut self, mut message: Message) -> usize {
         let provider_text = message.text.clone();
         if let Some(compact_text) = self
             .prompt_displays
@@ -191,6 +245,17 @@ impl AppState {
             .and_then(|summary| summary.compact_text(&provider_text))
         {
             message.text = compact_text;
+        }
+
+        if let Some(index) = self.turns.iter().position(|turn| {
+            turn.delivery == Delivery::Native && turn.prompt.stable_id == message.stable_id
+        }) {
+            let mut turn = self.turns.remove(index);
+            if !marker_counts(&turn.prompt.text).is_empty() {
+                message.text.clone_from(&turn.prompt.text);
+            }
+            turn.prompt = message;
+            return self.place_replayed_turn(turn, index);
         }
 
         if let Some(index) = self.turns.iter().position(|turn| {
@@ -261,6 +326,12 @@ impl AppState {
                     self.prompt_displays.push(summary);
                 }
             }
+            if self.replay_insert_at.is_some() {
+                let turn = self.turns.remove(index);
+                self.place_replayed_turn(turn, index)
+            } else {
+                index
+            }
         } else {
             let turn = Turn {
                 prompt: message,
@@ -268,12 +339,107 @@ impl AppState {
                 delivery: Delivery::Native,
             };
             if let Some(index) = self.replay_insert_at.as_mut() {
-                self.turns.insert(*index, turn);
+                let inserted = *index;
+                self.turns.insert(inserted, turn);
                 *index += 1;
+                inserted
             } else {
                 self.turns.push(turn);
+                self.turns.len() - 1
             }
         }
+    }
+
+    fn reconcile_final(&mut self, mut message: Message) -> Option<usize> {
+        let existing = self
+            .turns
+            .iter()
+            .enumerate()
+            .find_map(|(turn_index, turn)| {
+                turn.final_answer
+                    .as_ref()
+                    .filter(|final_answer| final_answer.stable_id == message.stable_id)
+                    .map(|_| turn_index)
+            });
+        if let Some(index) = existing {
+            let saved = self.turns[index]
+                .final_answer
+                .take()
+                .expect("existing final answer was located");
+            if fingerprint(&saved.text) == fingerprint(&message.text)
+                && matches!(saved.presentation, MessagePresentation::NativeAnsi(_))
+            {
+                message.presentation = saved.presentation;
+            }
+            self.turns[index].final_answer = Some(message);
+            return Some(index);
+        }
+
+        let replay_target = self
+            .replay_insert_at
+            .and_then(|insert_at| insert_at.checked_sub(1))
+            .filter(|index| {
+                self.turns.get(*index).is_some_and(|turn| {
+                    turn.delivery == Delivery::Native && turn.final_answer.is_none()
+                })
+            });
+        let target = replay_target.or_else(|| {
+            self.turns
+                .iter()
+                .rposition(|turn| turn.delivery == Delivery::Native && turn.final_answer.is_none())
+        });
+        if let Some(index) = target {
+            self.turns[index].final_answer = Some(message);
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    fn place_replayed_turn(&mut self, turn: Turn, original_index: usize) -> usize {
+        if let Some(insert_at) = self.replay_insert_at.as_mut() {
+            let target = if original_index < *insert_at {
+                insert_at.saturating_sub(1)
+            } else {
+                *insert_at
+            };
+            self.turns.insert(target, turn);
+            *insert_at = target.saturating_add(1);
+            target
+        } else {
+            self.turns.insert(original_index, turn);
+            original_index
+        }
+    }
+
+    fn queue_prompt_upsert(&mut self, turn_index: usize) {
+        let message = self.turns[turn_index].prompt.clone();
+        let order = self.order_for(VisibleRole::Prompt, &message.stable_id);
+        if let Ok(record) = VisibleHistoryRecord::prompt(&message, order) {
+            self.pending_history_upserts.push(record);
+        }
+    }
+
+    fn queue_final_upsert(&mut self, turn_index: usize) {
+        let turn_id = self.turns[turn_index].prompt.stable_id.clone();
+        let Some(message) = self.turns[turn_index].final_answer.clone() else {
+            return;
+        };
+        let order = self.order_for(VisibleRole::Final, &message.stable_id);
+        if let Ok(record) = VisibleHistoryRecord::final_answer(&message, turn_id, order) {
+            self.pending_history_upserts.push(record);
+        }
+    }
+
+    fn order_for(&mut self, role: VisibleRole, stable_id: &str) -> u64 {
+        let key = (role, stable_id.to_owned());
+        if let Some(order) = self.history_orders.get(&key) {
+            return *order;
+        }
+        let order = self.next_history_order;
+        self.next_history_order = self.next_history_order.saturating_add(1);
+        self.history_orders.insert(key, order);
+        order
     }
 }
 

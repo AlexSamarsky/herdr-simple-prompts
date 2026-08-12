@@ -44,6 +44,22 @@ impl Message {
             timestamp_ms,
         }
     }
+
+    pub(crate) fn restored(
+        stable_id: String,
+        text: String,
+        presentation: MessagePresentation,
+        attachments: Vec<Attachment>,
+        timestamp_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            stable_id,
+            text,
+            presentation,
+            attachments,
+            timestamp_ms,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

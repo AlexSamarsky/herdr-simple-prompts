@@ -10,6 +10,7 @@ use crate::agent::{
 use crate::app::{AppEvent, AppState};
 use crate::editor::{Editor, staged_image_path};
 use crate::herdr::HerdrClient;
+use crate::history::HistoryWriter;
 use crate::model::{Attachment, ConversationEvent};
 use crate::state::{DraftWriter, StateStore};
 use crate::status::extract_status;
@@ -58,6 +59,9 @@ pub fn run_from_env() -> AppResult<()> {
     };
     let mut follower = TranscriptFollower::new(transcript, adapter)?;
     let state_store = StateStore::at(state_root);
+    let history_journal = state_store.history_journal(&source_pane, &identity.session_id)?;
+    let saved_history = history_journal.load()?;
+    let history_writer = HistoryWriter::spawn(history_journal);
     let mut editor = Editor::default();
     let mut draft = state_store.load_draft(&source_pane)?;
     draft
@@ -73,6 +77,7 @@ pub fn run_from_env() -> AppResult<()> {
         prompt_displays: draft.prompt_displays,
         ..AppState::default()
     };
+    app.hydrate_visible_history(saved_history);
     let mut history_cache = render::HistoryRenderCache::default();
     let initial_events = follower.poll_initial(identity.status)?;
     let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
@@ -83,6 +88,7 @@ pub fn run_from_env() -> AppResult<()> {
         &runtime,
         CapturePolicy::NewestFinalOnly,
     );
+    queue_history_upserts(&mut app, &history_writer);
     draft_writer.queue_editor(
         editor.snapshot(),
         app.draft_attachments.clone(),
@@ -107,6 +113,7 @@ pub fn run_from_env() -> AppResult<()> {
                 &mut history_cache,
                 &runtime,
             );
+            queue_history_upserts(&mut app, &history_writer);
             apply_draft_change(
                 change,
                 &draft_writer,
@@ -125,6 +132,9 @@ pub fn run_from_env() -> AppResult<()> {
             draft_dirty = false;
         }
         if let Some(error) = draft_writer.take_error() {
+            app.send_error = Some(error);
+        }
+        if let Some(error) = history_writer.take_error() {
             app.send_error = Some(error);
         }
 
@@ -440,6 +450,12 @@ fn apply_draft_change(
     }
 }
 
+fn queue_history_upserts(app: &mut AppState, writer: &HistoryWriter) {
+    for record in app.drain_history_upserts() {
+        writer.queue(record);
+    }
+}
+
 fn apply_follower_events_with_policy(
     app: &mut AppState,
     events: Vec<FollowerEvent>,
@@ -450,7 +466,12 @@ fn apply_follower_events_with_policy(
     let prompt_displays_before = app.prompt_displays.clone();
     let replayed = events
         .iter()
-        .any(|event| matches!(event, FollowerEvent::Reloaded));
+        .any(|event| matches!(event, FollowerEvent::Reloaded))
+        || capture_policy == CapturePolicy::NewestFinalOnly;
+    if replayed {
+        app.apply(AppEvent::TranscriptReloaded);
+        history_cache.invalidate();
+    }
     let newest_final = (capture_policy == CapturePolicy::NewestFinalOnly)
         .then(|| {
             events.iter().rposition(|event| {
@@ -480,10 +501,7 @@ fn apply_follower_events_with_policy(
                     app.transcript_error = Some(error.to_string());
                 }
             }
-            FollowerEvent::Reloaded => {
-                app.apply(AppEvent::TranscriptReloaded);
-                history_cache.invalidate();
-            }
+            FollowerEvent::Reloaded => {}
             FollowerEvent::ParseError { line, message } => {
                 app.transcript_error = Some(format!("transcript line {line}: {message}"))
             }
@@ -523,7 +541,9 @@ mod tests {
     use super::{CapturePolicy, apply_follower_events_with_policy, render, runtime};
     use crate::agent::follower::FollowerEvent;
     use crate::app::AppState;
+    use crate::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
     use crate::model::{ConversationEvent, Message};
+    use crate::paste::fingerprint;
 
     fn final_event(index: usize) -> FollowerEvent {
         FollowerEvent::Conversation(ConversationEvent::Final(Message::final_text(
@@ -588,5 +608,78 @@ mod tests {
         assert_eq!(captured.len(), 2);
         assert_eq!(captured[0].stable_id, "final-1");
         assert_eq!(captured[1].stable_id, "final-2");
+    }
+
+    #[test]
+    fn initial_batch_reconciles_hydrated_history_in_native_replay_order() {
+        let (runtime, _captures) = runtime::capture_test_runtime(8);
+        let mut app = AppState::default();
+        app.hydrate_visible_history(vec![
+            VisibleHistoryRecord {
+                version: 1,
+                role: VisibleRole::Prompt,
+                stable_id: "prompt-2".into(),
+                turn_id: "prompt-2".into(),
+                order: 1,
+                text: "saved prompt 2".into(),
+                attachments: Vec::new(),
+                timestamp_ms: Some(1),
+                text_fingerprint: fingerprint("saved prompt 2"),
+                presentation: PersistedPresentation::Plain,
+            },
+            VisibleHistoryRecord {
+                version: 1,
+                role: VisibleRole::Prompt,
+                stable_id: "saved-missing".into(),
+                turn_id: "saved-missing".into(),
+                order: 2,
+                text: "retain me".into(),
+                attachments: Vec::new(),
+                timestamp_ms: Some(2),
+                text_fingerprint: fingerprint("retain me"),
+                presentation: PersistedPresentation::Plain,
+            },
+        ]);
+        let mut cache = render::HistoryRenderCache::default();
+        let events = vec![
+            FollowerEvent::Conversation(ConversationEvent::User(Message::text(
+                "prompt-1",
+                "native prompt 1",
+                Some(10),
+            ))),
+            final_event(1),
+            FollowerEvent::Conversation(ConversationEvent::User(Message::text(
+                "prompt-2",
+                "native prompt 2",
+                Some(20),
+            ))),
+            final_event(2),
+        ];
+
+        apply_follower_events_with_policy(
+            &mut app,
+            events,
+            &mut cache,
+            &runtime,
+            CapturePolicy::NewestFinalOnly,
+        );
+
+        assert_eq!(
+            app.turns
+                .iter()
+                .map(|turn| turn.prompt.stable_id.as_str())
+                .collect::<Vec<_>>(),
+            ["prompt-1", "prompt-2", "saved-missing"]
+        );
+        assert_eq!(
+            app.turns[0].final_answer.as_ref().unwrap().stable_id,
+            "final-1"
+        );
+        assert_eq!(
+            app.turns[1].final_answer.as_ref().unwrap().stable_id,
+            "final-2"
+        );
+        assert!(app.turns[2].final_answer.is_none());
+        assert_eq!(app.replay_insert_at, None);
     }
 }

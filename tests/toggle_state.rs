@@ -116,6 +116,12 @@ fn state_is_private_and_supports_reverse_overlay_lookup() {
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
 
+    let journal = store.history_journal("w1:p1", "session-1").unwrap();
+    assert_eq!(
+        journal.path(),
+        directory.join("history/w1_p1/session-1.jsonl")
+    );
+
     store.save_overlay("w1:p1", "w1:p9").unwrap();
 
     assert_eq!(

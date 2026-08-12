@@ -1,4 +1,5 @@
 use crate::editor::EditorSnapshot;
+use crate::history::HistoryJournal;
 use crate::model::Attachment;
 use crate::paste::CompactPromptOverride;
 use crate::{AppError, AppResult};
@@ -171,6 +172,14 @@ impl StateStore {
         self.save_registry(&registry)
     }
 
+    pub fn history_journal(
+        &self,
+        source_pane: &str,
+        session_id: &str,
+    ) -> AppResult<HistoryJournal> {
+        HistoryJournal::at(&self.root, source_pane, session_id)
+    }
+
     pub fn remove_source(&self, source: &str) -> AppResult<()> {
         let mut registry = self.load_registry()?;
         registry.overlays.remove(source);
@@ -207,7 +216,7 @@ impl StateStore {
     ) -> AppResult<()> {
         let file = self
             .root
-            .join(format!("draft-{}.json", safe_pane_id(pane_id)));
+            .join(format!("draft-{}.json", safe_state_component(pane_id)));
         atomic_write(
             &self.root,
             &file,
@@ -229,7 +238,7 @@ impl StateStore {
     pub fn load_draft(&self, pane_id: &str) -> AppResult<DraftState> {
         let file = self
             .root
-            .join(format!("draft-{}.json", safe_pane_id(pane_id)));
+            .join(format!("draft-{}.json", safe_state_component(pane_id)));
         if !file.exists() {
             return Ok(DraftState::default());
         }
@@ -339,8 +348,8 @@ fn atomic_write(root: &Path, destination: &Path, bytes: Vec<u8>) -> AppResult<()
     Ok(())
 }
 
-fn safe_pane_id(pane_id: &str) -> String {
-    pane_id
+pub(crate) fn safe_state_component(value: &str) -> String {
+    value
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {

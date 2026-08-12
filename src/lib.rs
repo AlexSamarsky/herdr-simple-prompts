@@ -4,6 +4,7 @@ pub mod app;
 pub mod editor;
 mod error;
 pub mod herdr;
+pub mod history;
 pub mod markdown;
 pub mod model;
 pub mod paste;

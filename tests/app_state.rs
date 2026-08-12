@@ -1,5 +1,6 @@
 use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::editor::{Editor, EditorSnapshot, EditorSubmission};
+use herdr_simple_prompts::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
 use herdr_simple_prompts::model::{Delivery, Message};
 use herdr_simple_prompts::paste::CompactPromptOverride;
 use herdr_simple_prompts::paste::fingerprint;
@@ -149,7 +150,7 @@ fn queued_prompts_and_final_answers_keep_native_order() {
 }
 
 #[test]
-fn transcript_reload_replaces_native_history_but_keeps_unsent_work() {
+fn transcript_reload_reconciles_unsent_work_and_retains_missing_native_history() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "old",
@@ -176,9 +177,10 @@ fn transcript_reload_replaces_native_history_but_keeps_unsent_work() {
     )));
     app.apply(AppEvent::TranscriptReplayComplete);
 
-    assert_eq!(app.turns.len(), 1);
+    assert_eq!(app.turns.len(), 2);
     assert_eq!(app.turns[0].prompt.stable_id, "native-local");
     assert_eq!(app.turns[0].delivery, Delivery::Native);
+    assert_eq!(app.turns[1].prompt.stable_id, "old");
 }
 
 #[test]
@@ -484,4 +486,323 @@ fn capture_fallback_never_downgrades_an_existing_native_presentation() {
         app.turns[0].final_answer.as_ref().unwrap().presentation,
         native
     );
+}
+
+fn hydrated_record(
+    role: VisibleRole,
+    stable_id: &str,
+    turn_id: &str,
+    order: u64,
+    text: &str,
+    presentation: PersistedPresentation,
+) -> VisibleHistoryRecord {
+    VisibleHistoryRecord {
+        version: 1,
+        role,
+        stable_id: stable_id.into(),
+        turn_id: turn_id.into(),
+        order,
+        text: text.into(),
+        attachments: Vec::new(),
+        timestamp_ms: Some(order),
+        text_fingerprint: fingerprint(text),
+        presentation,
+    }
+}
+
+#[test]
+fn hydration_restores_ordered_native_turns_and_saved_presentation() {
+    let native = vec![StyleRun {
+        start_byte: 0,
+        end_byte: 6,
+        foreground: Some(AnsiColor::Green),
+        background: None,
+        modifiers: StyleModifiers::default(),
+    }];
+    let records = vec![
+        hydrated_record(
+            VisibleRole::Final,
+            "a1",
+            "u1",
+            2,
+            "answer",
+            PersistedPresentation::NativeAnsi(native.clone()),
+        ),
+        hydrated_record(
+            VisibleRole::Prompt,
+            "u1",
+            "u1",
+            1,
+            "question",
+            PersistedPresentation::Plain,
+        ),
+        hydrated_record(
+            VisibleRole::Prompt,
+            "u2",
+            "u2",
+            3,
+            "later",
+            PersistedPresentation::Plain,
+        ),
+    ];
+    let mut app = AppState::default();
+
+    app.hydrate_visible_history(records);
+
+    assert_eq!(app.turns.len(), 2);
+    assert_eq!(app.turns[0].prompt.stable_id, "u1");
+    assert_eq!(app.turns[0].delivery, Delivery::Native);
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::NativeAnsi(native)
+    );
+    assert_eq!(app.turns[1].prompt.stable_id, "u2");
+    assert!(app.drain_history_upserts().is_empty());
+}
+
+#[test]
+fn replay_moves_existing_ids_in_native_order_and_retains_missing_saved_turns() {
+    let mut app = AppState::default();
+    app.hydrate_visible_history(vec![
+        hydrated_record(
+            VisibleRole::Prompt,
+            "saved-missing",
+            "saved-missing",
+            1,
+            "temporarily unreadable",
+            PersistedPresentation::Plain,
+        ),
+        hydrated_record(
+            VisibleRole::Prompt,
+            "u2",
+            "u2",
+            2,
+            "old second",
+            PersistedPresentation::Plain,
+        ),
+    ]);
+
+    app.apply(AppEvent::TranscriptReloaded);
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u2",
+        "updated second",
+        Some(20),
+    )));
+    app.apply(AppEvent::NativeUser(Message::text("u3", "third", Some(30))));
+    app.apply(AppEvent::TranscriptReplayComplete);
+
+    assert_eq!(
+        app.turns
+            .iter()
+            .map(|turn| turn.prompt.stable_id.as_str())
+            .collect::<Vec<_>>(),
+        ["u2", "u3", "saved-missing"]
+    );
+    assert_eq!(app.turns[0].prompt.text, "updated second");
+}
+
+#[test]
+fn replayed_final_preserves_matching_saved_native_style_but_not_stale_style() {
+    let native = vec![StyleRun {
+        start_byte: 0,
+        end_byte: 6,
+        foreground: Some(AnsiColor::Cyan),
+        background: None,
+        modifiers: StyleModifiers::default(),
+    }];
+    let mut app = AppState::default();
+    app.hydrate_visible_history(vec![
+        hydrated_record(
+            VisibleRole::Prompt,
+            "u1",
+            "u1",
+            1,
+            "question",
+            PersistedPresentation::Plain,
+        ),
+        hydrated_record(
+            VisibleRole::Final,
+            "a1",
+            "u1",
+            2,
+            "answer",
+            PersistedPresentation::NativeAnsi(native.clone()),
+        ),
+    ]);
+
+    app.apply(AppEvent::TranscriptReloaded);
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "question",
+        Some(10),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "answer",
+        Some(11),
+    )));
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::NativeAnsi(native)
+    );
+
+    app.apply(AppEvent::TranscriptReloaded);
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "question",
+        Some(20),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "changed",
+        Some(21),
+    )));
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::MarkdownFallback
+    );
+}
+
+#[test]
+fn native_events_queue_monotonic_upserts_and_style_refresh_reuses_order() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::PromptSubmitted {
+        local_id: "local-1".into(),
+        submission: plain_submission("question"),
+        attachments: vec![],
+        at_ms: 1,
+    });
+    assert!(app.drain_history_upserts().is_empty());
+
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "question",
+        Some(2),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "answer",
+        Some(3),
+    )));
+    let first = app.drain_history_upserts();
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[0].order, 1);
+    assert_eq!(first[1].order, 2);
+    assert_eq!(first[1].turn_id, "u1");
+
+    app.apply(AppEvent::FinalPresentation {
+        stable_id: "a1".into(),
+        text_fingerprint: fingerprint("answer"),
+        presentation: MessagePresentation::NativeAnsi(vec![StyleRun {
+            start_byte: 0,
+            end_byte: 6,
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }]),
+    });
+    let styled = app.drain_history_upserts();
+    assert_eq!(styled.len(), 1);
+    assert_eq!(styled[0].order, 2);
+    assert!(matches!(
+        styled[0].presentation,
+        PersistedPresentation::NativeAnsi(_)
+    ));
+}
+
+#[test]
+fn replay_preserves_hydrated_compact_text_without_sidecar_metadata() {
+    let hidden = format!(
+        "private-log-line\n[Pasted Content · 7 chars]\n{}",
+        "more-private-log\n".repeat(100)
+    );
+    let compact = format!(
+        "before\n[Pasted Content · {} chars]\nafter",
+        hidden.chars().count()
+    );
+    let native_text = format!("before\n{hidden}after");
+    let mut app = AppState::default();
+    app.hydrate_visible_history(vec![hydrated_record(
+        VisibleRole::Prompt,
+        "u1",
+        "u1",
+        1,
+        &compact,
+        PersistedPresentation::Plain,
+    )]);
+
+    app.apply(AppEvent::TranscriptReloaded);
+    let mut replayed = Message::text("u1", native_text.clone(), Some(99));
+    replayed
+        .attachments
+        .push(herdr_simple_prompts::model::Attachment {
+            id: "i1".into(),
+            display: "updated.png".into(),
+            native_path: None,
+        });
+    app.apply(AppEvent::NativeUser(replayed));
+    app.apply(AppEvent::TranscriptReplayComplete);
+
+    assert_eq!(app.turns[0].prompt.text, compact);
+    assert_eq!(app.turns[0].prompt.timestamp_ms, Some(99));
+    assert_eq!(app.turns[0].prompt.attachments[0].display, "updated.png");
+    let queued = app.drain_history_upserts();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, compact);
+    assert!(
+        !serde_json::to_string(&queued)
+            .unwrap()
+            .contains("private-log-line")
+    );
+    assert!(!queued[0].text.contains(&native_text));
+}
+
+#[test]
+fn partial_replay_keeps_existing_final_with_its_saved_owner() {
+    let mut app = AppState::default();
+    app.hydrate_visible_history(vec![
+        hydrated_record(
+            VisibleRole::Prompt,
+            "u1",
+            "u1",
+            1,
+            "saved owner",
+            PersistedPresentation::Plain,
+        ),
+        hydrated_record(
+            VisibleRole::Final,
+            "a1",
+            "u1",
+            2,
+            "saved answer",
+            PersistedPresentation::Fallback,
+        ),
+    ]);
+
+    app.apply(AppEvent::TranscriptReloaded);
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u2",
+        "unrelated open turn",
+        Some(10),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "updated answer",
+        Some(11),
+    )));
+    app.apply(AppEvent::TranscriptReplayComplete);
+
+    let unrelated = app
+        .turns
+        .iter()
+        .find(|turn| turn.prompt.stable_id == "u2")
+        .unwrap();
+    assert!(unrelated.final_answer.is_none());
+    let owner = app
+        .turns
+        .iter()
+        .find(|turn| turn.prompt.stable_id == "u1")
+        .unwrap();
+    assert_eq!(owner.final_answer.as_ref().unwrap().stable_id, "a1");
+    assert_eq!(owner.final_answer.as_ref().unwrap().text, "updated answer");
 }
