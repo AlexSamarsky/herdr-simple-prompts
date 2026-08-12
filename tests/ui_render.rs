@@ -53,3 +53,43 @@ fn only_normalized_messages_reach_the_view() {
     assert!(!rendered.contains("tool_call"));
     assert!(!rendered.contains("reasoning"));
 }
+
+#[test]
+fn history_starts_at_the_bottom_and_page_up_moves_toward_older_turns() {
+    let mut app = AppState::default();
+    for index in 0..20 {
+        app.apply(AppEvent::NativeUser(Message::text(
+            format!("u{index}"),
+            format!("prompt {index}"),
+            Some(index),
+        )));
+        app.apply(AppEvent::NativeFinal(Message::text(
+            format!("a{index}"),
+            format!("answer {index}"),
+            Some(index),
+        )));
+    }
+
+    let newest = render_to_string(&app, &Editor::default(), 50, 12);
+    assert!(newest.contains("prompt 19"));
+    assert!(!newest.contains("prompt 0"));
+
+    app.scroll_from_bottom = u16::MAX;
+    let oldest = render_to_string(&app, &Editor::default(), 50, 12);
+    assert!(oldest.contains("prompt 0"));
+    assert!(!oldest.contains("prompt 19"));
+}
+
+#[test]
+fn disabled_composer_explains_that_the_source_must_be_reopened() {
+    let app = AppState {
+        input_enabled: false,
+        connection_error: Some("source agent session changed".into()),
+        ..AppState::default()
+    };
+
+    let rendered = render_to_string(&app, &Editor::default(), 80, 24);
+
+    assert!(rendered.contains("Input disabled"));
+    assert!(rendered.contains("source agent session changed"));
+}

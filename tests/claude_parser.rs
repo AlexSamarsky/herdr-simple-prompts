@@ -51,3 +51,25 @@ fn excludes_meta_thinking_progress_and_sidechains_but_keeps_images() {
     assert_eq!(message.attachments.len(), 1);
     assert!(adapter.finalize_pending().is_none());
 }
+
+#[test]
+fn keeps_visible_text_from_a_mixed_thinking_response() {
+    let mut adapter = ClaudeAdapter::default();
+    adapter
+        .ingest_line(
+            1,
+            r#"{"type":"user","uuid":"u1","message":{"content":"question"}}"#,
+        )
+        .unwrap();
+    adapter
+        .ingest_line(
+            2,
+            r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"Visible answer."}]}}"#,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        adapter.finalize_pending(),
+        Some(ConversationEvent::Final(message)) if message.text == "Visible answer."
+    ));
+}

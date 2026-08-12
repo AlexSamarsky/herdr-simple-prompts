@@ -1,3 +1,4 @@
+use crate::model::Attachment;
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -9,6 +10,12 @@ use std::path::{Path, PathBuf};
 #[derive(Default, Deserialize, Serialize)]
 struct OverlayRegistry {
     overlays: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DraftState {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
 }
 
 pub struct StateStore {
@@ -48,19 +55,31 @@ impl StateStore {
             .find_map(|(source, candidate)| (candidate == overlay).then_some(source)))
     }
 
-    pub fn save_draft(&self, pane_id: &str, text: &str) -> AppResult<()> {
+    pub fn save_draft(
+        &self,
+        pane_id: &str,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> AppResult<()> {
         let file = self
             .root
             .join(format!("draft-{}.json", safe_pane_id(pane_id)));
-        atomic_write(&self.root, &file, serde_json::to_vec(&text)?)
+        atomic_write(
+            &self.root,
+            &file,
+            serde_json::to_vec(&DraftState {
+                text: text.to_owned(),
+                attachments: attachments.to_vec(),
+            })?,
+        )
     }
 
-    pub fn load_draft(&self, pane_id: &str) -> AppResult<String> {
+    pub fn load_draft(&self, pane_id: &str) -> AppResult<DraftState> {
         let file = self
             .root
             .join(format!("draft-{}.json", safe_pane_id(pane_id)));
         if !file.exists() {
-            return Ok(String::new());
+            return Ok(DraftState::default());
         }
         serde_json::from_slice(&std::fs::read(&file)?).map_err(|error| {
             AppError::new(

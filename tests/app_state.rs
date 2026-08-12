@@ -66,3 +66,35 @@ fn queued_prompts_and_final_answers_keep_native_order() {
     assert_eq!(app.turns[0].final_answer.as_ref().unwrap().text, "one");
     assert_eq!(app.turns[1].final_answer.as_ref().unwrap().text, "two");
 }
+
+#[test]
+fn transcript_reload_replaces_native_history_but_keeps_unsent_work() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "old",
+        "old prompt",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::text(
+        "old-final",
+        "old answer",
+        Some(2),
+    )));
+    app.apply(AppEvent::PromptSubmitted {
+        local_id: "local-1".into(),
+        text: "still sending".into(),
+        attachments: vec![],
+        at_ms: 3,
+    });
+
+    app.apply(AppEvent::TranscriptReloaded);
+    app.apply(AppEvent::NativeUser(Message::text(
+        "native-local",
+        "still sending",
+        Some(4),
+    )));
+
+    assert_eq!(app.turns.len(), 1);
+    assert_eq!(app.turns[0].prompt.stable_id, "native-local");
+    assert_eq!(app.turns[0].delivery, Delivery::Native);
+}

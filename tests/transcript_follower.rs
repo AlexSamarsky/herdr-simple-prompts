@@ -1,5 +1,7 @@
 mod support;
 
+use herdr_simple_prompts::agent::AgentStatus;
+use herdr_simple_prompts::agent::claude::ClaudeAdapter;
 use herdr_simple_prompts::agent::codex::CodexAdapter;
 use herdr_simple_prompts::agent::follower::{FollowerEvent, TranscriptFollower};
 
@@ -50,4 +52,18 @@ fn large_complete_line_is_not_truncated() {
         panic!("expected user message");
     };
     assert_eq!(message.text, text);
+}
+
+#[test]
+fn initial_idle_claude_session_includes_its_pending_final_answer() {
+    let file = support::GrowingFile::new();
+    file.append(&std::fs::read_to_string("tests/fixtures/claude/simple.jsonl").unwrap());
+    let mut follower =
+        TranscriptFollower::new(file.path(), Box::new(ClaudeAdapter::default())).unwrap();
+
+    let events = follower.poll_initial(AgentStatus::Done).unwrap();
+
+    assert_eq!(events.len(), 2);
+    assert!(matches!(events[0], FollowerEvent::Conversation(_)));
+    assert!(matches!(events[1], FollowerEvent::Conversation(_)));
 }

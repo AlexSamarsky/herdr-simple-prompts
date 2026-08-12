@@ -80,7 +80,7 @@ impl ClaudeAdapter {
         let Some(content) = record.pointer("/message/content") else {
             return;
         };
-        if contains_block(content, "tool_use") || contains_block(content, "thinking") {
+        if contains_block(content, "tool_use") {
             return;
         }
         let text = visible_text(content);

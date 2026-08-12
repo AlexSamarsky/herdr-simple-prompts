@@ -17,7 +17,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
     let attachment_lines = app.draft_attachments.len() as u16;
     let composer_lines = editor.text().lines().count().max(1) as u16 + attachment_lines;
     let composer_height = (composer_lines + 2).clamp(3, (area.height * 2 / 5).max(3));
-    let error_height = u16::from(app.error.is_some());
+    let error_height = u16::from(app.visible_error().is_some());
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -29,13 +29,18 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
         ])
         .split(area);
 
+    let history = history_text(app);
+    let history_height = wrapped_history_height(&history, areas[0].width);
+    let top = history_height
+        .saturating_sub(areas[0].height)
+        .saturating_sub(app.scroll_from_bottom);
     frame.render_widget(
-        Paragraph::new(history_text(app))
+        Paragraph::new(history)
             .wrap(Wrap { trim: false })
-            .scroll((app.scroll_from_bottom, 0)),
+            .scroll((top, 0)),
         areas[0],
     );
-    if let Some(error) = &app.error {
+    if let Some(error) = app.visible_error() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("Error: ", Style::default().fg(Color::Red)),
@@ -69,7 +74,12 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
             )
         })
         .collect::<Vec<_>>();
-    if editor.text().is_empty() {
+    if !app.input_enabled {
+        composer_lines.push(Line::from(Span::styled(
+            "Input disabled · reopen Simple Prompts",
+            Style::default().fg(Color::Red),
+        )));
+    } else if editor.text().is_empty() {
         composer_lines.push(Line::from(Span::styled(
             "Write a prompt",
             Style::default().fg(Color::DarkGray),
@@ -99,10 +109,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
 fn history_text(app: &AppState) -> Text<'static> {
     let mut lines = Vec::new();
     for turn in &app.turns {
-        lines.push(Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Cyan)),
-            Span::raw(turn.prompt.text.clone()),
-        ]));
+        push_prefixed_text(&mut lines, "› ", &turn.prompt.text, Color::Cyan);
         for (index, attachment) in turn.prompt.attachments.iter().enumerate() {
             lines.push(Line::from(format!(
                 "  [Image #{}] {}",
@@ -117,14 +124,40 @@ fn history_text(app: &AppState) -> Text<'static> {
             ));
         }
         if let Some(answer) = &turn.final_answer {
-            lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(Color::Green)),
-                Span::raw(answer.text.clone()),
-            ]));
+            push_prefixed_text(&mut lines, "• ", &answer.text, Color::Green);
         }
         lines.push(Line::default());
     }
     Text::from(lines)
+}
+
+fn push_prefixed_text(lines: &mut Vec<Line<'static>>, prefix: &str, text: &str, color: Color) {
+    for (index, text_line) in text.split('\n').enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if index == 0 {
+                    prefix.to_owned()
+                } else {
+                    "  ".to_owned()
+                },
+                Style::default().fg(color),
+            ),
+            Span::raw(text_line.to_owned()),
+        ]));
+    }
+}
+
+fn wrapped_history_height(history: &Text<'_>, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    history.lines.iter().fold(0_u16, |height, line| {
+        let line_width = line
+            .spans
+            .iter()
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+            .sum::<usize>();
+        let wrapped = line_width.max(1).div_ceil(width);
+        height.saturating_add(u16::try_from(wrapped).unwrap_or(u16::MAX))
+    })
 }
 
 fn footer(app: &AppState) -> String {

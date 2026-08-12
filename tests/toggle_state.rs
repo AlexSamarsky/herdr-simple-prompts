@@ -1,6 +1,7 @@
 mod support;
 
 use herdr_simple_prompts::herdr::HerdrClient;
+use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::state::StateStore;
 use herdr_simple_prompts::toggle::toggle;
 use serde_json::json;
@@ -29,6 +30,20 @@ fn state_is_private_and_supports_reverse_overlay_lookup() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
+    store
+        .save_draft(
+            "w1:p1",
+            "multiline\ndraft",
+            &[Attachment {
+                id: "i1".into(),
+                display: "screen.png".into(),
+                native_path: None,
+            }],
+        )
+        .unwrap();
+    let draft = store.load_draft("w1:p1").unwrap();
+    assert_eq!(draft.text, "multiline\ndraft");
+    assert_eq!(draft.attachments[0].display, "screen.png");
     std::fs::remove_dir_all(directory).unwrap();
 }
 

@@ -1,4 +1,4 @@
-use super::TranscriptAdapter;
+use super::{AgentStatus, TranscriptAdapter};
 use crate::model::ConversationEvent;
 use crate::{AppError, AppResult};
 use std::fs::File;
@@ -103,6 +103,16 @@ impl TranscriptFollower {
                     line: self.line_number,
                     message: error.to_string(),
                 }),
+            }
+        }
+        Ok(events)
+    }
+
+    pub fn poll_initial(&mut self, status: AgentStatus) -> AppResult<Vec<FollowerEvent>> {
+        let mut events = self.poll()?;
+        if !status.is_working() {
+            if let Some(final_answer) = self.finalize_pending() {
+                events.push(final_answer);
             }
         }
         Ok(events)

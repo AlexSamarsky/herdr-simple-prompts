@@ -1,4 +1,5 @@
 pub mod render;
+mod runtime;
 mod terminal;
 
 use crate::agent::follower::{FollowerEvent, TranscriptFollower};
@@ -11,13 +12,13 @@ use crate::herdr::HerdrClient;
 use crate::model::{Attachment, ConversationEvent};
 use crate::state::StateStore;
 use crate::status::extract_status;
-use crate::transport::AgentTransport;
 use crate::{AppError, AppResult};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use runtime::{RuntimeEvent, UiRuntime};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,60 +41,37 @@ pub fn run_from_env() -> AppResult<()> {
         AgentKind::Claude => Box::new(crate::agent::claude::ClaudeAdapter::default()),
     };
     let mut follower = TranscriptFollower::new(transcript, adapter)?;
-    let transport = AgentTransport::new(client, identity.clone());
     let state_store = StateStore::at(state_root);
     let mut editor = Editor::default();
-    editor.replace(state_store.load_draft(&source_pane)?);
+    let draft = state_store.load_draft(&source_pane)?;
+    editor.replace(draft.text);
     let mut app = AppState {
         agent_status: identity.status,
         working_since: identity.status.is_working().then(Instant::now),
+        draft_attachments: draft.attachments,
         ..AppState::default()
     };
-    apply_follower_events(&mut app, follower.poll()?);
+    apply_follower_events(&mut app, follower.poll_initial(identity.status)?);
+    let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
 
     let mut stdout = io::stdout();
     let _guard = TerminalGuard::enter(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
-    let mut next_transcript_poll = Instant::now();
-    let mut next_status_poll = Instant::now();
     let mut local_sequence = 1_u64;
 
     loop {
-        let now = Instant::now();
-        if now >= next_transcript_poll {
-            match follower.poll() {
-                Ok(events) => apply_follower_events(&mut app, events),
-                Err(error) => app.error = Some(error.to_string()),
-            }
-            next_transcript_poll = now + Duration::from_millis(100);
-        }
-        if now >= next_status_poll {
-            match transport.refresh_identity() {
-                Ok(current) => {
-                    let was_working = app.agent_status.is_working();
-                    app.agent_status = current.status;
-                    if !was_working && current.status.is_working() {
-                        app.working_since = Some(Instant::now());
-                    } else if was_working && !current.status.is_working() {
-                        app.working_since = None;
-                        if let Some(event) = follower.finalize_pending() {
-                            apply_follower_events(&mut app, vec![event]);
-                        }
-                    }
-                    match transport.visible_source(8) {
-                        Ok(screen) => {
-                            app.status_line =
-                                Some(extract_status(identity.kind, &screen, identity.cwd.clone()));
-                            app.error = None;
-                        }
-                        Err(error) => app.error = Some(error.to_string()),
-                    }
-                }
-                Err(error) => app.error = Some(error.to_string()),
-            }
-            next_status_poll = now + Duration::from_millis(200);
+        while let Some(event) = runtime.try_recv() {
+            apply_runtime_event(
+                event,
+                &runtime,
+                &identity,
+                &mut app,
+                &mut editor,
+                &state_store,
+                &source_pane,
+            )?;
         }
 
         terminal.draw(|frame| render::render(frame, &app, &editor))?;
@@ -106,30 +84,34 @@ pub fn run_from_env() -> AppResult<()> {
                     key,
                     &mut app,
                     &mut editor,
-                    &transport,
+                    &runtime,
                     &state_store,
                     &source_pane,
-                    &mut terminal,
                     &mut local_sequence,
                 )?;
             }
             Event::Paste(content) => {
+                if !app.input_enabled {
+                    continue;
+                }
                 if let Some(path) = staged_image_path(&content) {
-                    match transport.forward_staged_image(&path) {
-                        Ok(()) => app.draft_attachments.push(Attachment {
-                            id: format!("local-image-{}", app.draft_attachments.len() + 1),
-                            display: path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            native_path: Some(path),
-                        }),
-                        Err(error) => app.error = Some(error.to_string()),
+                    let attachment = Attachment {
+                        id: next_image_id(&mut local_sequence),
+                        display: path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        native_path: Some(path.clone()),
+                    };
+                    match runtime.forward_staged_image(attachment.clone(), path) {
+                        Ok(()) => app.draft_attachments.push(attachment),
+                        Err(error) => app.send_error = Some(error.to_string()),
                     }
+                    state_store.save_draft(&source_pane, editor.text(), &app.draft_attachments)?;
                 } else {
                     editor.insert_paste(&content);
-                    state_store.save_draft(&source_pane, editor.text())?;
+                    state_store.save_draft(&source_pane, editor.text(), &app.draft_attachments)?;
                 }
             }
             Event::Resize(_, _) => {}
@@ -152,12 +134,14 @@ fn handle_key(
     key: KeyEvent,
     app: &mut AppState,
     editor: &mut Editor,
-    transport: &AgentTransport,
+    runtime: &UiRuntime,
     state: &StateStore,
     source_pane: &str,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     local_sequence: &mut u64,
 ) -> AppResult<()> {
+    if !app.input_enabled && !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+        return Ok(());
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Enter, modifiers)
             if modifiers.contains(KeyModifiers::SHIFT)
@@ -173,6 +157,7 @@ fn handle_key(
                 return Ok(());
             }
             let text = editor.take_submission();
+            app.send_error = None;
             let attachments = app.draft_attachments.clone();
             let local_id = format!("local-{}", *local_sequence);
             *local_sequence += 1;
@@ -182,29 +167,29 @@ fn handle_key(
                 attachments,
                 at_ms: now_ms(),
             });
-            terminal.draw(|frame| render::render(frame, app, editor))?;
-            if let Err(error) = transport.submit(&text) {
+            if let Err(error) = runtime.submit(local_id.clone(), text) {
                 app.apply(AppEvent::SendFailed {
                     local_id,
                     reason: error.to_string(),
                 });
                 editor.replace(app.draft.clone());
-                app.error = Some(error.to_string());
+                app.send_error = Some(error.to_string());
             }
         }
         (KeyCode::Esc, _) if app.agent_status == AgentStatus::Working => {
-            if let Err(error) = transport.interrupt() {
-                app.error = Some(error.to_string());
+            if let Err(error) = runtime.interrupt() {
+                app.send_error = Some(error.to_string());
             }
         }
         (KeyCode::Char('v'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            match transport.forward_local_image_paste() {
-                Ok(()) => app.draft_attachments.push(Attachment {
-                    id: format!("local-image-{}", app.draft_attachments.len() + 1),
-                    display: format!("Image #{}", app.draft_attachments.len() + 1),
-                    native_path: None,
-                }),
-                Err(error) => app.error = Some(error.to_string()),
+            let attachment = Attachment {
+                id: next_image_id(local_sequence),
+                display: format!("Image #{}", app.draft_attachments.len() + 1),
+                native_path: None,
+            };
+            match runtime.forward_local_image(attachment.clone()) {
+                Ok(()) => app.draft_attachments.push(attachment),
+                Err(error) => app.send_error = Some(error.to_string()),
             }
         }
         (KeyCode::Backspace, _) => editor.backspace(),
@@ -220,11 +205,76 @@ fn handle_key(
         (KeyCode::Char(character), modifiers)
             if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
         {
+            app.send_error = None;
             editor.insert_char(character)
         }
         _ => return Ok(()),
     }
-    state.save_draft(source_pane, editor.text())?;
+    state.save_draft(source_pane, editor.text(), &app.draft_attachments)?;
+    Ok(())
+}
+
+fn apply_runtime_event(
+    event: RuntimeEvent,
+    runtime: &UiRuntime,
+    original: &crate::agent::AgentIdentity,
+    app: &mut AppState,
+    editor: &mut Editor,
+    state: &StateStore,
+    source_pane: &str,
+) -> AppResult<()> {
+    match event {
+        RuntimeEvent::Transcript(events) => {
+            app.transcript_error = None;
+            apply_follower_events(app, events);
+        }
+        RuntimeEvent::TranscriptError(error) => app.transcript_error = Some(error),
+        RuntimeEvent::Observation(Ok((current, screen))) => {
+            app.connection_error = None;
+            app.input_enabled = true;
+            let was_working = app.agent_status.is_working();
+            app.agent_status = current.status;
+            if !was_working && current.status.is_working() {
+                app.working_since = Some(Instant::now());
+            } else if was_working && !current.status.is_working() {
+                app.working_since = None;
+                runtime.finalize_pending();
+            }
+            app.status_line = Some(extract_status(original.kind, &screen, original.cwd.clone()));
+        }
+        RuntimeEvent::Observation(Err(error)) => {
+            app.connection_error = Some(error);
+            app.input_enabled = false;
+        }
+        RuntimeEvent::Submitted { local_id, result } => {
+            if let Err(reason) = result {
+                app.apply(AppEvent::SendFailed {
+                    local_id,
+                    reason: reason.clone(),
+                });
+                editor.replace(app.draft.clone());
+                app.send_error = Some(reason);
+                state.save_draft(source_pane, editor.text(), &app.draft_attachments)?;
+            }
+        }
+        RuntimeEvent::Interrupted(Err(error)) => app.send_error = Some(error),
+        RuntimeEvent::Interrupted(Ok(())) => {}
+        RuntimeEvent::ImageForwarded { attachment, result } => {
+            if let Err(error) = result {
+                app.draft_attachments
+                    .retain(|candidate| candidate.id != attachment.id);
+                for turn in &mut app.turns {
+                    if matches!(turn.delivery, crate::model::Delivery::Optimistic { .. }) {
+                        turn.prompt
+                            .attachments
+                            .retain(|candidate| candidate.id != attachment.id);
+                    }
+                }
+                app.send_error = Some(error);
+                state.save_draft(source_pane, editor.text(), &app.draft_attachments)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -237,9 +287,9 @@ fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) {
             FollowerEvent::Conversation(ConversationEvent::Final(message)) => {
                 app.apply(AppEvent::NativeFinal(message))
             }
-            FollowerEvent::Reloaded => {}
+            FollowerEvent::Reloaded => app.apply(AppEvent::TranscriptReloaded),
             FollowerEvent::ParseError { line, message } => {
-                app.error = Some(format!("transcript line {line}: {message}"))
+                app.transcript_error = Some(format!("transcript line {line}: {message}"))
             }
         }
     }
@@ -256,4 +306,10 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn next_image_id(sequence: &mut u64) -> String {
+    let id = format!("local-image-{}", *sequence);
+    *sequence += 1;
+    id
 }

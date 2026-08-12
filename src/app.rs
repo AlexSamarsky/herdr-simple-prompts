@@ -15,6 +15,7 @@ pub enum AppEvent {
     },
     NativeUser(Message),
     NativeFinal(Message),
+    TranscriptReloaded,
     SendFailed {
         local_id: String,
         reason: String,
@@ -28,7 +29,10 @@ pub struct AppState {
     pub agent_status: AgentStatus,
     pub working_since: Option<Instant>,
     pub status_line: Option<StatusLine>,
-    pub error: Option<String>,
+    pub connection_error: Option<String>,
+    pub transcript_error: Option<String>,
+    pub send_error: Option<String>,
+    pub input_enabled: bool,
     pub scroll_from_bottom: u16,
 }
 
@@ -41,7 +45,10 @@ impl Default for AppState {
             agent_status: AgentStatus::Unknown,
             working_since: None,
             status_line: None,
-            error: None,
+            connection_error: None,
+            transcript_error: None,
+            send_error: None,
+            input_enabled: true,
             scroll_from_bottom: 0,
         }
     }
@@ -82,6 +89,10 @@ impl AppState {
                     turn.final_answer = Some(message);
                 }
             }
+            AppEvent::TranscriptReloaded => {
+                self.turns
+                    .retain(|turn| !matches!(turn.delivery, Delivery::Native));
+            }
             AppEvent::SendFailed { local_id, reason } => {
                 if let Some(turn) = self.turns.iter_mut().find(|turn| {
                     matches!(
@@ -95,6 +106,13 @@ impl AppState {
                 }
             }
         }
+    }
+
+    pub fn visible_error(&self) -> Option<&str> {
+        self.send_error
+            .as_deref()
+            .or(self.connection_error.as_deref())
+            .or(self.transcript_error.as_deref())
     }
 
     fn reconcile_user(&mut self, message: Message) {
