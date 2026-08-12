@@ -18,9 +18,20 @@ shows only:
 5. a native-like multiline composer, and
 6. a truthful bottom status line.
 
+While Herdr reports the source agent as `blocked`, the source agent's live
+native interaction surface replaces that normal layout temporarily.
+
+Final answers retain the source agent's visible ANSI-derived styling. History
+uses one explicit Unicode-aware visual-row model, so styling, wrapping, scroll
+geometry, and sticky prompt geometry all operate on the same rows. When the
+source agent enters Herdr's `blocked` state, the normal history/composer view is
+temporarily replaced by a sanitized live view of the native interactive
+question or approval surface, and user input is passed through to the source
+pane.
+
 Reasoning, commentary, tool calls, tool results, system/developer messages, and
-subagent traffic remain in the native agent pane and are never rendered in the
-simple view.
+subagent traffic remain outside ordinary Simple Prompts history. A blocked
+interaction is a temporary live passthrough view, not a stored history entry.
 
 The mode is toggled with a user-configured `prefix+m` keybinding. This avoids
 Herdr's default `prefix+p` binding for the previous tab.
@@ -33,6 +44,12 @@ Herdr's default `prefix+p` binding for the previous tab.
 - Forward text, multiline paste, large paste, image paste, and interrupt actions
   to the native agent input path.
 - Resume existing session history when the overlay opens.
+- Preserve the visible styling of newly observed Codex and Claude final answers
+  and restore that styling when the overlay is reopened.
+- Keep visible prompt/final history in a pane-and-session-scoped private journal
+  whose lifecycle follows the source pane.
+- Let native questions, choices, and approval surfaces remain usable without
+  leaving the overlay.
 - Work locally and through Herdr remote attach on macOS and Linux.
 - Be publishable as a normal public Herdr plugin repository.
 - Build from inspectable source on the user's machine, with no downloaded
@@ -41,11 +58,15 @@ Herdr's default `prefix+p` binding for the previous tab.
 ## Non-goals
 
 - Replacing the native Codex or Claude TUI.
-- Rendering reasoning, progress commentary, tools, approvals, or tool output.
+- Adding reasoning, progress commentary, tools, approvals, questions, or tool
+  output to the conversation history. A live native question or approval may be
+  shown only while the agent is blocked and disappears after interaction.
 - Editing or rewriting native transcript files.
 - Rendering image pixels inside the terminal; images use compact attachment
   placeholders.
 - Browsing unrelated sessions or providing a global conversation index.
+- Retaining a pane's visible-history journal after the source pane/session has
+  been proven gone.
 - Supporting agents other than Codex and Claude in version 0.1.
 - Supporting Windows in version 0.1.
 - Providing a native, non-terminal Herdr pane; Herdr plugin API v1 exposes
@@ -88,6 +109,13 @@ The composer is always anchored at the bottom. New prompts and final answers
 auto-scroll into view. Manual scrolling upward suspends auto-scroll until the
 user returns to the bottom.
 
+History is laid out into final terminal rows before geometry is calculated.
+The renderer does not ask Ratatui to wrap the same content a second time. This
+single-row model is the source of truth for viewport height, bottom offset,
+manual scrolling, sticky selection, full-width prompt backgrounds, and final
+rendering. Consequently the newest lines remain reachable and every wrapped
+prompt row is filled to the right edge.
+
 ### Message hierarchy and sticky prompt context
 
 User prompts use a full-width, neutral raised band with a compact `YOU` label.
@@ -126,6 +154,61 @@ as a sticky section header:
 Sticky context follows the same manual scroll offset as the history. Returning
 to the bottom restores normal auto-scroll behavior without changing which turn
 owns the header.
+
+### Styled final answers
+
+Styled output is the primary final-answer representation, not an optional
+decoration over a plain renderer. After the transcript adapter emits a real
+final answer, the runtime asks Herdr for the source agent's recent unwrapped
+terminal output in ANSI format. It locates the final-answer block by comparing
+the ANSI-stripped candidate with the canonical transcript text, removes only
+known Codex/Claude presentation chrome around that block, and converts the
+remaining SGR state into styled message spans.
+
+Because transcript append and terminal paint can arrive in either order, ANSI
+capture retries for a short bounded window after the final event. It accepts a
+capture only after exact canonical-text matching; timing alone never selects a
+terminal block.
+
+The sanitizer accepts printable text plus a conservative SGR subset: named,
+indexed, and RGB foreground/background colors and the bold, dim, italic, and
+underline modifiers. Cursor movement, alternate-screen commands, OSC/title
+commands, hyperlinks, clipboard commands, and all other terminal controls are
+discarded. No ANSI command is ever replayed into the user's terminal.
+
+The green `ANSWER` role label remains plugin-owned. The answer body retains the
+source agent's colors and emphasis and is reflowed by the same visual-row engine
+as the rest of history. Style runs split safely at UTF-8 boundaries and survive
+Unicode-aware wrapping.
+
+If an old final answer is no longer present in Herdr's scrollback and has no
+saved styled record, the plugin renders the canonical transcript text with a
+small built-in styled-Markdown fallback. The fallback covers paragraphs,
+headings, lists, inline code, fenced code, emphasis, and links without adding a
+runtime dependency. It is deterministic fallback presentation and is never
+recorded as if it were native ANSI. Every newly observed answer is captured and
+persisted as the exact sanitized styled representation, so it is not
+reconstructed on a later overlay open.
+
+### Interactive blocked mode
+
+Herdr's source-agent status is authoritative. While it is `blocked`, Simple
+Prompts temporarily replaces the ordinary history/working/composer region with
+`INTERACTION REQUIRED` and a frequently refreshed, sanitized ANSI snapshot of
+the native agent's visible question, choice, permission, or approval surface.
+The existing history and editor draft remain in memory and persisted state but
+are hidden, not discarded.
+
+Text input and the native interaction keys (`Up`, `Down`, `Left`, `Right`,
+`Tab`, `BackTab`, `Space`, `Enter`, `Backspace`, `Delete`, and `Esc`) are sent
+to the source pane through Herdr input APIs. Mouse interaction is not
+translated in version 0.1. The overlay never parses a provider question into a
+plugin-owned form or invents answer semantics. When the source leaves
+`blocked`, the ordinary history and unchanged composer automatically return.
+
+If the live ANSI snapshot cannot be read or sanitized, the overlay does not
+guess. It displays the error and directs the user to `prefix+m` to answer in
+the unchanged native pane.
 
 ### Composer behavior
 
@@ -193,7 +276,7 @@ discarded after validation.
 
 ### Overlay process
 
-The overlay owns five cooperating components:
+The overlay owns eight cooperating components:
 
 1. **Herdr client** — request/response calls and event subscription over the
    injected local socket.
@@ -201,10 +284,16 @@ The overlay owns five cooperating components:
    source screen inspection, prompt submission, and interrupt forwarding.
 3. **Transcript follower** — initial parse plus incremental JSONL tailing with
    truncation/replacement detection.
-4. **Application reducer** — normalized turns, optimistic prompts, working state,
-   attachment state, draft, scrolling, and errors.
-5. **Terminal UI** — raw input, bracketed paste, Unicode-safe editor behavior,
-   resize handling, and rendering.
+4. **ANSI capture and sanitizer** — source-screen ANSI reads, exact final-block
+   matching, safe SGR decoding, and live blocked-surface snapshots.
+5. **Visible-history journal** — pane/session-scoped prompt and final-answer
+   records with sanitized style runs and lifecycle cleanup.
+6. **Application reducer** — normalized turns, optimistic prompts, working and
+   blocked state, attachment state, draft, scrolling, and errors.
+7. **Visual-row engine** — the only history wrapper and geometry owner for
+   Unicode cells, full-width styles, scrolling, and sticky sections.
+8. **Terminal UI** — raw input, bracketed paste, Unicode-safe editor behavior,
+   interaction passthrough, resize handling, and rendering.
 
 Components communicate through bounded standard-library channels. Filesystem
 following uses a small polling interval and file metadata instead of a platform
@@ -221,8 +310,10 @@ The direct dependency set is intentionally small and locked:
 
 The implementation uses standard threads, channels, sockets, filesystem APIs,
 and `Instant`; it does not require Tokio, an HTTP client, telemetry, or runtime
-network access. `Cargo.lock` is committed. Any dependency added later requires
-an explicit security and necessity review.
+network access. ANSI sanitization and the styled-Markdown fallback are
+implemented in visible Rust source without another dependency. `Cargo.lock` is
+committed. Any dependency added later requires an explicit security and
+necessity review.
 
 ## Herdr integration
 
@@ -233,7 +324,8 @@ surfaces:
 - managed overlay panes,
 - pane focus/close/read/input operations,
 - agent inspect/prompt/send-keys operations,
-- agent/pane lifecycle subscriptions.
+- ANSI `agent.read`/`pane.read` output,
+- `pane_closed` and agent-status lifecycle subscriptions.
 
 The source pane id is captured before opening the overlay. Calls never rely on
 the overlay becoming the globally focused pane. Before every mutating input
@@ -264,6 +356,15 @@ Message {
   text: String,
   attachments: Vec<Attachment>,
   timestamp: Option<Timestamp>,
+  presentation: NativeAnsi(Vec<StyleRun>) | MarkdownFallback,
+}
+
+StyleRun {
+  start_byte: usize,
+  end_byte: usize,
+  foreground: Option<AnsiColor>,
+  background: Option<AnsiColor>,
+  modifiers: StyleModifiers,
 }
 ```
 
@@ -271,6 +372,11 @@ The UI renders only `Turn`. Raw transcript event variants do not reach the view
 layer. `Message.text` is always the display-safe representation. The complete
 text and editor snapshot exist only on a local optimistic delivery so they can
 support transport reconciliation and lossless failure recovery.
+
+Transcript text remains the canonical semantic value. Style runs only annotate
+byte ranges in that exact text and are accepted only when their text
+fingerprint, UTF-8 boundaries, ordering, and bounds validate. Styled capture
+never changes message identity or reconciliation.
 
 ### Editor and compact-paste model
 
@@ -348,7 +454,9 @@ presented as native history.
 
 The source agent's lifecycle state comes from Herdr, not transcript timing.
 Elapsed working time starts on a Herdr working transition and stops on done,
-waiting, interruption, source close, or session replacement.
+blocked, waiting, interruption, source close, or session replacement. A blocked
+transition activates the native interaction surface; it is not interpreted as a
+final answer.
 
 The bottom status adapter reads the visible source screen and extracts only
 agent-specific, verified fields such as model, cwd, branch, and usage. When an
@@ -361,10 +469,18 @@ or quota values.
 - **Unsupported pane:** show that Simple Prompts requires a detected Codex or
   Claude agent and do not open a misleading empty view.
 - **Source pane closed:** disable submission and offer the toggle key to return.
+- **Source pane closed while the overlay is alive:** delete the source
+  pane/session history namespace after the authoritative `pane_closed` event,
+  then disable the overlay.
 - **Session changed:** stop following the old transcript and require reopening
   against the new session.
 - **Socket disconnected:** retain visible history and draft, retry read-only
   connection with bounded backoff, and disable sends until revalidated.
+- **ANSI capture mismatch:** retain the canonical final text, render the
+  styled-Markdown fallback, and never attach styles from a different terminal
+  block.
+- **Blocked snapshot unavailable:** keep the draft untouched, show a concise
+  error, and direct the user to the unchanged source pane with `prefix+m`.
 - **Transcript unavailable:** keep the composer usable only after native agent
   validation, show the resolution error, and never substitute pane screen text
   as conversation history.
@@ -377,22 +493,70 @@ or quota values.
 
 ## Persistence and privacy
 
-The plugin state directory stores only:
+The plugin state directory contains four deliberately separate classes of
+state:
 
 - source-to-overlay registry data,
 - the active draft and attachment placeholders,
 - compact-paste display metadata for prompts submitted through the plugin, and
-- small UI preferences such as scroll position if needed.
+- a visible-history journal scoped to one source pane and one native session.
+
+The journal is auditable JSON Lines under:
+
+```text
+history/<safe-source-pane-id>/<native-session-id>.jsonl
+```
+
+Each record is versioned and keyed by the native stable message id. It stores
+only the display-safe user prompt or visible final-answer text, sanitized
+attachment labels, timestamp/order data, a text fingerprint, and validated
+style ranges. Repeating a stable id appends an upsert whose latest valid record
+wins, allowing a Markdown fallback to be replaced by later native ANSI capture
+without rewriting earlier bytes. It never stores reasoning, commentary, tool
+traffic, tool results, system context, native interaction surfaces, or hidden
+large-paste bodies. A user prompt containing a large paste is journaled only
+with its compact marker.
+
+This journal is an intentional private copy of the visible conversation subset
+so the plugin can restore exactly what it previously showed instead of
+reconstructing presentation on every open. It is not a global conversation
+database and cannot be queried across panes from the UI.
+
+On reopen, journal records are loaded first and then reconciled with the native
+transcript by session and stable message id. A journal record supplies the exact
+previous display text and styles; transcript-only messages are added without
+duplicating recorded messages and use native capture when still available or
+the explicit Markdown fallback otherwise.
 
 Compact-paste history metadata is scoped by native session and message id and
 contains only paste ranges, character counts, and a deterministic integrity
 fingerprint; it never contains the pasted body. This lets the plugin retain the
 compact rendering after reopening even when a provider transcript stores the
-full prompt. It does not copy full conversation transcripts into its own
-database. The unsent draft is the only persisted state that can contain the
-original pasted text. State files use user-only permissions and atomic
-replacement. The plugin has no telemetry, analytics, update checker, HTTP
-client, or runtime network access.
+full prompt. The unsent draft is the only plugin state that can contain the
+original hidden pasted text.
+
+All directories use mode `0700`; journal, draft, and registry files use `0600`.
+New records are flushed without blocking the UI, tolerate an incomplete final
+line, and are size-bounded by the source pane's lifecycle rather than a global
+retention pool.
+
+Lifecycle cleanup follows the approved non-resident policy:
+
+1. While the overlay is running, it subscribes to Herdr `pane_closed`. Closing
+   the source pane deletes that pane/session journal, draft, compact metadata,
+   and overlay registry entry immediately.
+2. Closing only the overlay keeps the journal so reopening the same source
+   pane/session restores history.
+3. Every toggle and overlay startup compares saved namespaces with live Herdr
+   panes and detected native session ids. Proven-missing panes and replaced
+   sessions have all pane-scoped state deleted before normal use.
+4. If live validation is unavailable, state is not deleted merely because the
+   socket is temporarily down. Orphan namespaces that remain unverifiable for
+   seven days are removed on the next plugin invocation as crash/restart
+   cleanup. No detached watcher or permanent plugin daemon is created.
+
+The plugin has no telemetry, analytics, update checker, HTTP client, or runtime
+network access.
 
 For prompts that predate the plugin metadata, the plugin preserves any compact
 marker already recorded by Codex or Claude but does not guess that arbitrary
@@ -448,6 +612,18 @@ scope.
   session replacement, and send failure.
 - Status extraction fixtures for supported Codex and Claude layouts.
 - Message-role hierarchy remains visible without relying on color alone.
+- Visual rows preserve Unicode cell widths, span styles, explicit newlines, and
+  full-width prompt backgrounds; row count is identical for geometry and
+  rendering, including narrow multiword answers.
+- Safe ANSI fixtures cover named, indexed, and RGB colors plus supported text
+  modifiers; cursor/OSC/clipboard/title/control sequences are discarded.
+- Exact final-answer matching never borrows ANSI styles from commentary, a tool
+  result, a neighboring final answer, or the native composer.
+- Styled-Markdown fallback fixtures cover paragraphs, headings, lists, code,
+  emphasis, and links without claiming native provenance.
+- Journal reload reproduces the same styled spans, rejects invalid
+  fingerprints/ranges, never contains a hidden pasted body, and keeps no
+  reasoning or interaction snapshot.
 - Sticky prompt rows for short, long, wrapped, Unicode, image-only, and
   constrained-height histories.
 - The next prompt pushes the previous sticky context out one visual row at a
@@ -459,6 +635,8 @@ Fixtures are synthetic and contain no real user transcript data.
 
 - Fake Herdr Unix socket for request ordering, subscriptions, errors, and
   reconnection.
+- Fake Herdr ANSI reads for exact final capture, unavailable scrollback,
+  mismatch fallback, and blocked-surface refresh.
 - Temporary transcript files for initial load, append, partial JSON line,
   truncation, and replacement.
 - Pseudo-terminal harness for raw-mode restoration, bracketed paste, resize,
@@ -466,6 +644,12 @@ Fixtures are synthetic and contain no real user transcript data.
   forwarding, and interrupt forwarding.
 - Toggle lifecycle: open, focus existing, close, stale-state cleanup, and source
   focus restoration.
+- History lifecycle: overlay close retains the current namespace, live source
+  `pane_closed` deletes it, startup removes proven-stale pane/session state, and
+  temporary socket failure does not delete unverified state.
+- Blocked passthrough: text and every supported interaction key are forwarded
+  exactly once; unsupported mouse/control input is ignored; leaving `blocked`
+  restores the unchanged draft and normal history.
 
 ### Verification gates
 
@@ -478,7 +662,9 @@ cargo build --locked --release
 
 A manual smoke matrix then covers local and remote Herdr sessions with current
 Codex and Claude versions, including text, large paste, image paste, working
-state, interruption, overlay toggle, and returning to the unchanged native pane.
+state, interruption, styled final answers, long-answer bottom scrolling,
+full-width prompt bands, blocked questions/approvals, overlay toggle, source
+pane deletion cleanup, and returning to the unchanged native pane.
 
 ## Repository deliverables
 
