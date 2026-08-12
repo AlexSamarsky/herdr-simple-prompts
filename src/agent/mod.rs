@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod follower;
 mod resolve;
+mod time;
 
 pub use resolve::{AgentPaths, resolve_transcript};
 

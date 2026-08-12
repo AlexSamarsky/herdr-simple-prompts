@@ -51,6 +51,15 @@ impl GrowingFile {
         std::fs::write(&replacement, content).unwrap();
         std::fs::rename(replacement, &self.path).unwrap();
     }
+
+    pub fn truncate_and_regrow(&self, content: &str) {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+    }
 }
 
 impl Drop for GrowingFile {
@@ -68,6 +77,10 @@ pub struct ScriptedHerdr {
 
 impl ScriptedHerdr {
     pub fn start(results: Vec<Value>) -> Self {
+        Self::start_responses(results.into_iter().map(Ok).collect())
+    }
+
+    pub fn start_responses(results: Vec<Result<Value, Value>>) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "herdr-simple-prompts-scripted-{}-{}",
             std::process::id(),
@@ -87,7 +100,14 @@ impl ScriptedHerdr {
                     .unwrap();
                 let request: Value = serde_json::from_str(&request).unwrap();
                 worker_requests.lock().unwrap().push(request.clone());
-                let response = serde_json::json!({"id": request["id"], "result": result});
+                let response = match result {
+                    Ok(result) => {
+                        serde_json::json!({"id": request["id"], "result": result})
+                    }
+                    Err(error) => {
+                        serde_json::json!({"id": request["id"], "error": error})
+                    }
+                };
                 serde_json::to_writer(&mut stream, &response).unwrap();
                 stream.write_all(b"\n").unwrap();
             }

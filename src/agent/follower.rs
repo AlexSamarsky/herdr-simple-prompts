@@ -6,6 +6,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+const CHECKPOINT_BYTES: usize = 128;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FollowerEvent {
     Conversation(ConversationEvent),
@@ -25,6 +27,7 @@ pub struct TranscriptFollower {
     offset: u64,
     line_number: u64,
     partial: Vec<u8>,
+    checkpoint: Vec<u8>,
     adapter: Box<dyn TranscriptAdapter>,
 }
 
@@ -43,6 +46,7 @@ impl TranscriptFollower {
             offset: 0,
             line_number: 0,
             partial: Vec::new(),
+            checkpoint: Vec::new(),
             adapter,
         })
     }
@@ -51,12 +55,17 @@ impl TranscriptFollower {
         let metadata = std::fs::metadata(&self.path)
             .map_err(|error| AppError::new("transcript follower", error.to_string()))?;
         let current_identity = identity(&metadata);
-        let reloaded = current_identity != self.identity || metadata.len() < self.offset;
+        let checkpoint_changed = current_identity == self.identity
+            && metadata.len() >= self.offset
+            && !self.checkpoint_matches()?;
+        let reloaded =
+            current_identity != self.identity || metadata.len() < self.offset || checkpoint_changed;
         if reloaded {
             self.identity = current_identity;
             self.offset = 0;
             self.line_number = 0;
             self.partial.clear();
+            self.checkpoint.clear();
             self.adapter.reset();
         }
 
@@ -65,6 +74,11 @@ impl TranscriptFollower {
         let mut appended = Vec::new();
         file.read_to_end(&mut appended)?;
         self.offset += appended.len() as u64;
+        self.checkpoint.extend_from_slice(&appended);
+        if self.checkpoint.len() > CHECKPOINT_BYTES {
+            self.checkpoint
+                .drain(..self.checkpoint.len() - CHECKPOINT_BYTES);
+        }
         self.partial.extend_from_slice(&appended);
 
         let complete_end = self
@@ -109,6 +123,10 @@ impl TranscriptFollower {
     }
 
     pub fn poll_initial(&mut self, status: AgentStatus) -> AppResult<Vec<FollowerEvent>> {
+        self.poll_for_status(status)
+    }
+
+    pub fn poll_for_status(&mut self, status: AgentStatus) -> AppResult<Vec<FollowerEvent>> {
         let mut events = self.poll()?;
         if !status.is_working() {
             if let Some(final_answer) = self.finalize_pending() {
@@ -122,6 +140,19 @@ impl TranscriptFollower {
         self.adapter
             .finalize_pending()
             .map(FollowerEvent::Conversation)
+    }
+
+    fn checkpoint_matches(&self) -> AppResult<bool> {
+        if self.checkpoint.is_empty() {
+            return Ok(true);
+        }
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(
+            self.offset.saturating_sub(self.checkpoint.len() as u64),
+        ))?;
+        let mut current = vec![0; self.checkpoint.len()];
+        file.read_exact(&mut current)?;
+        Ok(current == self.checkpoint)
     }
 }
 

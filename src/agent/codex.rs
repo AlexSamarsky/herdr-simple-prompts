@@ -1,3 +1,4 @@
+use super::time::record_timestamp_ms;
 use crate::model::{Attachment, ConversationEvent, Message};
 use crate::{AppError, AppResult};
 use serde_json::Value;
@@ -33,18 +34,20 @@ impl CodexAdapter {
             return None;
         }
         match payload.get("type").and_then(Value::as_str) {
-            Some("user_message") => parse_user(line_number, payload).map(ConversationEvent::User),
+            Some("user_message") => {
+                parse_user(line_number, record, payload).map(ConversationEvent::User)
+            }
             Some("agent_message")
                 if payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
             {
-                parse_final(line_number, payload).map(ConversationEvent::Final)
+                parse_final(line_number, record, payload).map(ConversationEvent::Final)
             }
             _ => None,
         }
     }
 }
 
-fn parse_user(line_number: u64, payload: &Value) -> Option<Message> {
+fn parse_user(line_number: u64, record: &Value, payload: &Value) -> Option<Message> {
     let text = payload
         .get("message")
         .and_then(Value::as_str)
@@ -66,16 +69,20 @@ fn parse_user(line_number: u64, payload: &Value) -> Option<Message> {
         stable_id: stable_id(line_number, payload),
         text,
         attachments,
-        timestamp_ms: None,
+        timestamp_ms: record_timestamp_ms(record),
     })
 }
 
-fn parse_final(line_number: u64, payload: &Value) -> Option<Message> {
+fn parse_final(line_number: u64, record: &Value, payload: &Value) -> Option<Message> {
     let text = payload.get("message").and_then(Value::as_str)?.to_owned();
     if text.trim().is_empty() {
         return None;
     }
-    Some(Message::text(stable_id(line_number, payload), text, None))
+    Some(Message::text(
+        stable_id(line_number, payload),
+        text,
+        record_timestamp_ms(record),
+    ))
 }
 
 fn stable_id(line_number: u64, payload: &Value) -> String {

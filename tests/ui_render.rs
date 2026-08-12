@@ -41,6 +41,20 @@ fn composer_shows_attached_images_before_submission() {
 }
 
 #[test]
+fn composer_marks_images_as_pending_until_native_verification() {
+    let mut app = AppState::default();
+    app.pending_attachments.push(Attachment {
+        id: "pending-1".into(),
+        display: "screen.png".into(),
+        native_path: Some("/private/tmp/screen.png".into()),
+    });
+
+    let rendered = render_to_string(&app, &Editor::default(), 80, 24);
+
+    assert!(rendered.contains("screen.png (verifying…)"));
+}
+
+#[test]
 fn only_normalized_messages_reach_the_view() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text("u1", "hello", Some(1))));

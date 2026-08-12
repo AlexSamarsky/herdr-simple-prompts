@@ -93,8 +93,54 @@ fn transcript_reload_replaces_native_history_but_keeps_unsent_work() {
         "still sending",
         Some(4),
     )));
+    app.apply(AppEvent::TranscriptReplayComplete);
 
     assert_eq!(app.turns.len(), 1);
     assert_eq!(app.turns[0].prompt.stable_id, "native-local");
     assert_eq!(app.turns[0].delivery, Delivery::Native);
+}
+
+#[test]
+fn reload_does_not_reconcile_an_old_identical_prompt_with_current_submission() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::PromptSubmitted {
+        local_id: "local-current".into(),
+        text: "same prompt".into(),
+        attachments: vec![],
+        at_ms: 100_000,
+    });
+
+    app.apply(AppEvent::TranscriptReloaded);
+    app.apply(AppEvent::NativeUser(Message::text(
+        "native-old",
+        "same prompt",
+        Some(1_000),
+    )));
+    app.apply(AppEvent::NativeUser(Message::text(
+        "native-current",
+        "same prompt",
+        Some(100_100),
+    )));
+    app.apply(AppEvent::TranscriptReplayComplete);
+
+    assert_eq!(app.turns.len(), 2);
+    assert_eq!(app.turns[0].prompt.stable_id, "native-old");
+    assert_eq!(app.turns[1].prompt.stable_id, "native-current");
+    assert_eq!(app.turns[1].delivery, Delivery::Native);
+}
+
+#[test]
+fn final_answer_skips_an_older_interrupted_turn() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "interrupted",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeUser(Message::text("u2", "next", Some(2))));
+
+    app.apply(AppEvent::NativeFinal(Message::text("a2", "done", Some(3))));
+
+    assert!(app.turns[0].final_answer.is_none());
+    assert_eq!(app.turns[1].final_answer.as_ref().unwrap().text, "done");
 }

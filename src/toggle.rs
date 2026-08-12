@@ -38,7 +38,18 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
     let overlay = client
         .plugin_pane_open(current_pane)
         .map_err(|error| AppError::new("toggle", error.to_string()))?;
-    state.save_overlay(current_pane, &overlay)
+    if let Err(save_error) = state.save_overlay(current_pane, &overlay) {
+        if let Err(close_error) = client.plugin_pane_close(&overlay) {
+            return Err(AppError::new(
+                "toggle",
+                format!(
+                    "cannot persist overlay registry ({save_error}); cleanup also failed: {close_error}"
+                ),
+            ));
+        }
+        return Err(save_error);
+    }
+    Ok(())
 }
 
 pub fn run_from_env() -> AppResult<()> {

@@ -18,7 +18,8 @@ fn emits_only_user_and_final_answer() {
     assert_eq!(events.len(), 2);
     assert!(matches!(
         &events[0],
-        ConversationEvent::User(message) if message.text == "build it"
+        ConversationEvent::User(message)
+            if message.text == "build it" && message.timestamp_ms == Some(1_786_528_800_000)
     ));
     assert!(matches!(
         &events[1],

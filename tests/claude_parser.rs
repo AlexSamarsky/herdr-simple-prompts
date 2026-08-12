@@ -16,9 +16,9 @@ fn simple_answer_is_committed_only_when_the_turn_finishes() {
     let events = ingest_fixture(&mut adapter, "tests/fixtures/claude/simple.jsonl");
 
     assert_eq!(events.len(), 1);
-    assert!(
-        matches!(&events[0], ConversationEvent::User(message) if message.text == "hello claude")
-    );
+    assert!(matches!(&events[0], ConversationEvent::User(message)
+            if message.text == "hello claude"
+                && message.timestamp_ms == Some(1_786_528_800_000)));
     assert!(matches!(
         adapter.finalize_pending(),
         Some(ConversationEvent::Final(message)) if message.text == "Hello back."

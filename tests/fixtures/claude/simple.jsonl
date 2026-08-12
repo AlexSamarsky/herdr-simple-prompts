@@ -1,2 +1,2 @@
-{"type":"user","uuid":"u1","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello claude"}}
-{"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Hello back."}],"stop_reason":"end_turn"}}
+{"timestamp":"2026-08-12T10:00:00Z","type":"user","uuid":"u1","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello claude"}}
+{"timestamp":"2026-08-12T10:00:01Z","type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Hello back."}],"stop_reason":"end_turn"}}

@@ -35,6 +35,27 @@ fn replacement_reloads_without_reusing_partial_bytes() {
 }
 
 #[test]
+fn same_inode_truncate_and_regrow_reloads_from_the_beginning() {
+    let file = support::GrowingFile::new();
+    file.append("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"old\",\"images\":[]}}\n");
+    let mut follower = TranscriptFollower::new(file.path(), Box::new(CodexAdapter)).unwrap();
+    assert_eq!(follower.poll().unwrap().len(), 1);
+    file.truncate_and_regrow(
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"new and deliberately longer than the prior record\",\"images\":[]}}\n",
+    );
+
+    let events = follower.poll().unwrap();
+
+    assert!(matches!(events[0], FollowerEvent::Reloaded));
+    let FollowerEvent::Conversation(herdr_simple_prompts::model::ConversationEvent::User(message)) =
+        &events[1]
+    else {
+        panic!("expected reloaded user message");
+    };
+    assert!(message.text.starts_with("new and deliberately"));
+}
+
+#[test]
 fn large_complete_line_is_not_truncated() {
     let file = support::GrowingFile::new();
     let text = "я".repeat(1_000_000);
@@ -66,4 +87,40 @@ fn initial_idle_claude_session_includes_its_pending_final_answer() {
     assert_eq!(events.len(), 2);
     assert!(matches!(events[0], FollowerEvent::Conversation(_)));
     assert!(matches!(events[1], FollowerEvent::Conversation(_)));
+}
+
+#[test]
+fn claude_finalizes_when_done_arrives_after_the_assistant_line() {
+    let file = support::GrowingFile::new();
+    file.append(&std::fs::read_to_string("tests/fixtures/claude/simple.jsonl").unwrap());
+    let mut follower =
+        TranscriptFollower::new(file.path(), Box::new(ClaudeAdapter::default())).unwrap();
+
+    let working = follower.poll_for_status(AgentStatus::Working).unwrap();
+    let done = follower.poll_for_status(AgentStatus::Done).unwrap();
+
+    assert_eq!(working.len(), 1);
+    assert!(matches!(done.as_slice(), [FollowerEvent::Conversation(_)]));
+}
+
+#[test]
+fn claude_finalizes_when_done_arrives_before_the_assistant_line() {
+    let file = support::GrowingFile::new();
+    let fixture = std::fs::read_to_string("tests/fixtures/claude/simple.jsonl").unwrap();
+    let mut lines = fixture.lines();
+    file.append(&format!("{}\n", lines.next().unwrap()));
+    let mut follower =
+        TranscriptFollower::new(file.path(), Box::new(ClaudeAdapter::default())).unwrap();
+    assert_eq!(
+        follower
+            .poll_for_status(AgentStatus::Working)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    file.append(&format!("{}\n", lines.next().unwrap()));
+    let done = follower.poll_for_status(AgentStatus::Done).unwrap();
+
+    assert!(matches!(done.as_slice(), [FollowerEvent::Conversation(_)]));
 }

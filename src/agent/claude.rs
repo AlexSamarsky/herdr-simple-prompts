@@ -1,3 +1,4 @@
+use super::time::record_timestamp_ms;
 use crate::model::{Attachment, ConversationEvent, Message};
 use crate::{AppError, AppResult};
 use serde_json::Value;
@@ -68,7 +69,7 @@ impl ClaudeAdapter {
             stable_id: stable_id(line_number, record),
             text,
             attachments,
-            timestamp_ms: None,
+            timestamp_ms: record_timestamp_ms(record),
         }));
         events
     }
@@ -87,7 +88,11 @@ impl ClaudeAdapter {
         if text.trim().is_empty() {
             return;
         }
-        self.pending_final = Some(Message::text(stable_id(line_number, record), text, None));
+        self.pending_final = Some(Message::text(
+            stable_id(line_number, record),
+            text,
+            record_timestamp_ms(record),
+        ));
     }
 }
 

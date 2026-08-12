@@ -10,7 +10,7 @@ use crate::app::{AppEvent, AppState};
 use crate::editor::{Editor, staged_image_path};
 use crate::herdr::HerdrClient;
 use crate::model::{Attachment, ConversationEvent};
-use crate::state::StateStore;
+use crate::state::{DraftWriter, StateStore};
 use crate::status::extract_status;
 use crate::{AppError, AppResult};
 use crossterm::event::{
@@ -23,6 +23,15 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use terminal::TerminalGuard;
+
+const DRAFT_DEBOUNCE: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DraftChange {
+    None,
+    Debounced,
+    Immediate,
+}
 
 pub fn run_from_env() -> AppResult<()> {
     let source_pane = required_env("HERDR_SIMPLE_PROMPTS_SOURCE_PANE")?;
@@ -44,6 +53,7 @@ pub fn run_from_env() -> AppResult<()> {
     let state_store = StateStore::at(state_root);
     let mut editor = Editor::default();
     let draft = state_store.load_draft(&source_pane)?;
+    let draft_writer = DraftWriter::spawn(state_store.clone(), source_pane.clone());
     editor.replace(draft.text);
     let mut app = AppState {
         agent_status: identity.status,
@@ -60,18 +70,27 @@ pub fn run_from_env() -> AppResult<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     let mut local_sequence = 1_u64;
+    let mut draft_dirty = false;
+    let mut draft_save_at = Instant::now();
 
     loop {
         while let Some(event) = runtime.try_recv() {
-            apply_runtime_event(
-                event,
-                &runtime,
-                &identity,
-                &mut app,
-                &mut editor,
-                &state_store,
-                &source_pane,
-            )?;
+            let change = apply_runtime_event(event, &identity, &mut app, &mut editor);
+            apply_draft_change(
+                change,
+                &draft_writer,
+                &app,
+                &editor,
+                &mut draft_dirty,
+                &mut draft_save_at,
+            );
+        }
+        if draft_dirty && Instant::now() >= draft_save_at {
+            draft_writer.queue(editor.text().to_owned(), app.draft_attachments.clone());
+            draft_dirty = false;
+        }
+        if let Some(error) = draft_writer.take_error() {
+            app.send_error = Some(error);
         }
 
         terminal.draw(|frame| render::render(frame, &app, &editor))?;
@@ -80,15 +99,15 @@ pub fn run_from_env() -> AppResult<()> {
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                handle_key(
-                    key,
-                    &mut app,
-                    &mut editor,
-                    &runtime,
-                    &state_store,
-                    &source_pane,
-                    &mut local_sequence,
-                )?;
+                let change = handle_key(key, &mut app, &mut editor, &runtime, &mut local_sequence)?;
+                apply_draft_change(
+                    change,
+                    &draft_writer,
+                    &app,
+                    &editor,
+                    &mut draft_dirty,
+                    &mut draft_save_at,
+                );
             }
             Event::Paste(content) => {
                 if !app.input_enabled {
@@ -105,13 +124,19 @@ pub fn run_from_env() -> AppResult<()> {
                         native_path: Some(path.clone()),
                     };
                     match runtime.forward_staged_image(attachment.clone(), path) {
-                        Ok(()) => app.draft_attachments.push(attachment),
+                        Ok(()) => app.pending_attachments.push(attachment),
                         Err(error) => app.send_error = Some(error.to_string()),
                     }
-                    state_store.save_draft(&source_pane, editor.text(), &app.draft_attachments)?;
                 } else {
                     editor.insert_paste(&content);
-                    state_store.save_draft(&source_pane, editor.text(), &app.draft_attachments)?;
+                    apply_draft_change(
+                        DraftChange::Debounced,
+                        &draft_writer,
+                        &app,
+                        &editor,
+                        &mut draft_dirty,
+                        &mut draft_save_at,
+                    );
                 }
             }
             Event::Resize(_, _) => {}
@@ -129,32 +154,35 @@ pub fn run_from_env() -> AppResult<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_key(
     key: KeyEvent,
     app: &mut AppState,
     editor: &mut Editor,
     runtime: &UiRuntime,
-    state: &StateStore,
-    source_pane: &str,
     local_sequence: &mut u64,
-) -> AppResult<()> {
+) -> AppResult<DraftChange> {
     if !app.input_enabled && !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
-        return Ok(());
+        return Ok(DraftChange::None);
     }
-    match (key.code, key.modifiers) {
+    let change = match (key.code, key.modifiers) {
         (KeyCode::Enter, modifiers)
             if modifiers.contains(KeyModifiers::SHIFT)
                 || modifiers.contains(KeyModifiers::CONTROL) =>
         {
-            editor.newline()
+            editor.newline();
+            DraftChange::Debounced
         }
         (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            editor.newline()
+            editor.newline();
+            DraftChange::Debounced
         }
         (KeyCode::Enter, KeyModifiers::NONE) => {
+            if !app.pending_attachments.is_empty() {
+                app.send_error = Some("wait for image attachment verification".to_owned());
+                return Ok(DraftChange::None);
+            }
             if editor.text().trim().is_empty() && app.draft_attachments.is_empty() {
-                return Ok(());
+                return Ok(DraftChange::None);
             }
             let text = editor.take_submission();
             app.send_error = None;
@@ -175,11 +203,13 @@ fn handle_key(
                 editor.replace(app.draft.clone());
                 app.send_error = Some(error.to_string());
             }
+            DraftChange::Immediate
         }
         (KeyCode::Esc, _) if app.agent_status == AgentStatus::Working => {
             if let Err(error) = runtime.interrupt() {
                 app.send_error = Some(error.to_string());
             }
+            DraftChange::None
         }
         (KeyCode::Char('v'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             let attachment = Attachment {
@@ -188,47 +218,79 @@ fn handle_key(
                 native_path: None,
             };
             match runtime.forward_local_image(attachment.clone()) {
-                Ok(()) => app.draft_attachments.push(attachment),
+                Ok(()) => app.pending_attachments.push(attachment),
                 Err(error) => app.send_error = Some(error.to_string()),
             }
+            DraftChange::None
         }
-        (KeyCode::Backspace, _) => editor.backspace(),
-        (KeyCode::Delete, _) => editor.delete(),
-        (KeyCode::Left, _) => editor.move_left(),
-        (KeyCode::Right, _) => editor.move_right(),
-        (KeyCode::Up, _) => editor.move_up(),
-        (KeyCode::Down, _) => editor.move_down(),
-        (KeyCode::Home, _) => editor.move_home(),
-        (KeyCode::End, _) => editor.move_end(),
-        (KeyCode::PageUp, _) => app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(5),
-        (KeyCode::PageDown, _) => app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(5),
+        (KeyCode::Backspace, _) => {
+            editor.backspace();
+            DraftChange::Debounced
+        }
+        (KeyCode::Delete, _) => {
+            editor.delete();
+            DraftChange::Debounced
+        }
+        (KeyCode::Left, _) => {
+            editor.move_left();
+            DraftChange::None
+        }
+        (KeyCode::Right, _) => {
+            editor.move_right();
+            DraftChange::None
+        }
+        (KeyCode::Up, _) => {
+            editor.move_up();
+            DraftChange::None
+        }
+        (KeyCode::Down, _) => {
+            editor.move_down();
+            DraftChange::None
+        }
+        (KeyCode::Home, _) => {
+            editor.move_home();
+            DraftChange::None
+        }
+        (KeyCode::End, _) => {
+            editor.move_end();
+            DraftChange::None
+        }
+        (KeyCode::PageUp, _) => {
+            app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(5);
+            DraftChange::None
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(5);
+            DraftChange::None
+        }
         (KeyCode::Char(character), modifiers)
             if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
         {
             app.send_error = None;
-            editor.insert_char(character)
+            editor.insert_char(character);
+            DraftChange::Debounced
         }
-        _ => return Ok(()),
-    }
-    state.save_draft(source_pane, editor.text(), &app.draft_attachments)?;
-    Ok(())
+        _ => return Ok(DraftChange::None),
+    };
+    Ok(change)
 }
 
 fn apply_runtime_event(
     event: RuntimeEvent,
-    runtime: &UiRuntime,
     original: &crate::agent::AgentIdentity,
     app: &mut AppState,
     editor: &mut Editor,
-    state: &StateStore,
-    source_pane: &str,
-) -> AppResult<()> {
+) -> DraftChange {
     match event {
         RuntimeEvent::Transcript(events) => {
             app.transcript_error = None;
             apply_follower_events(app, events);
+            DraftChange::None
         }
-        RuntimeEvent::TranscriptError(error) => app.transcript_error = Some(error),
+        RuntimeEvent::TranscriptError(error) => {
+            app.transcript_error = Some(error);
+            DraftChange::None
+        }
         RuntimeEvent::Observation(Ok((current, screen))) => {
             app.connection_error = None;
             app.input_enabled = true;
@@ -238,13 +300,14 @@ fn apply_runtime_event(
                 app.working_since = Some(Instant::now());
             } else if was_working && !current.status.is_working() {
                 app.working_since = None;
-                runtime.finalize_pending();
             }
             app.status_line = Some(extract_status(original.kind, &screen, original.cwd.clone()));
+            DraftChange::None
         }
         RuntimeEvent::Observation(Err(error)) => {
             app.connection_error = Some(error);
             app.input_enabled = false;
+            DraftChange::None
         }
         RuntimeEvent::Submitted { local_id, result } => {
             if let Err(reason) = result {
@@ -254,31 +317,58 @@ fn apply_runtime_event(
                 });
                 editor.replace(app.draft.clone());
                 app.send_error = Some(reason);
-                state.save_draft(source_pane, editor.text(), &app.draft_attachments)?;
+                DraftChange::Immediate
+            } else {
+                DraftChange::None
             }
         }
-        RuntimeEvent::Interrupted(Err(error)) => app.send_error = Some(error),
-        RuntimeEvent::Interrupted(Ok(())) => {}
+        RuntimeEvent::Interrupted(Err(error)) => {
+            app.send_error = Some(error);
+            DraftChange::None
+        }
+        RuntimeEvent::Interrupted(Ok(())) => DraftChange::None,
         RuntimeEvent::ImageForwarded { attachment, result } => {
-            if let Err(error) = result {
-                app.draft_attachments
-                    .retain(|candidate| candidate.id != attachment.id);
-                for turn in &mut app.turns {
-                    if matches!(turn.delivery, crate::model::Delivery::Optimistic { .. }) {
-                        turn.prompt
-                            .attachments
-                            .retain(|candidate| candidate.id != attachment.id);
-                    }
+            app.pending_attachments
+                .retain(|candidate| candidate.id != attachment.id);
+            match result {
+                Ok(()) => {
+                    app.draft_attachments.push(attachment);
+                    DraftChange::Immediate
                 }
-                app.send_error = Some(error);
-                state.save_draft(source_pane, editor.text(), &app.draft_attachments)?;
+                Err(error) => {
+                    app.send_error = Some(error);
+                    DraftChange::None
+                }
             }
         }
     }
-    Ok(())
+}
+
+fn apply_draft_change(
+    change: DraftChange,
+    writer: &DraftWriter,
+    app: &AppState,
+    editor: &Editor,
+    dirty: &mut bool,
+    save_at: &mut Instant,
+) {
+    match change {
+        DraftChange::None => {}
+        DraftChange::Debounced => {
+            *dirty = true;
+            *save_at = Instant::now() + DRAFT_DEBOUNCE;
+        }
+        DraftChange::Immediate => {
+            writer.queue(editor.text().to_owned(), app.draft_attachments.clone());
+            *dirty = false;
+        }
+    }
 }
 
 fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) {
+    let replayed = events
+        .iter()
+        .any(|event| matches!(event, FollowerEvent::Reloaded));
     for event in events {
         match event {
             FollowerEvent::Conversation(ConversationEvent::User(message)) => {
@@ -292,6 +382,9 @@ fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) {
                 app.transcript_error = Some(format!("transcript line {line}: {message}"))
             }
         }
+    }
+    if replayed {
+        app.apply(AppEvent::TranscriptReplayComplete);
     }
 }
 
