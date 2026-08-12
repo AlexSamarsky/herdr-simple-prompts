@@ -3,12 +3,14 @@ use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::editor::Editor;
 use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::model::Message;
+use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
 use herdr_simple_prompts::ui::render::{render_to_buffer, render_to_string};
 use herdr_simple_prompts::ui::visual_rows::{
     CellStyle, HistoryDocument, PromptSection, StickyRows, VisualRow, sticky_overlay, wrap_styled,
 };
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 fn rendered_buffer(app: &AppState, width: u16, height: u16) -> Buffer {
@@ -102,6 +104,55 @@ fn only_normalized_messages_reach_the_view() {
     assert!(rendered.contains("done"));
     assert!(!rendered.contains("tool_call"));
     assert!(!rendered.contains("reasoning"));
+}
+
+#[test]
+fn native_ansi_white_brightness_matches_ratatui_cells() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text("u1", "colors", Some(1))));
+    app.apply(AppEvent::NativeFinal(Message {
+        stable_id: "a1".into(),
+        text: "ab".into(),
+        presentation: MessagePresentation::NativeAnsi(vec![
+            style_run(0..1, Some(AnsiColor::White), Some(AnsiColor::BrightWhite)),
+            style_run(1..2, Some(AnsiColor::BrightWhite), Some(AnsiColor::White)),
+        ]),
+        attachments: Vec::new(),
+        timestamp_ms: Some(2),
+    }));
+
+    let buffer = rendered_buffer(&app, 40, 14);
+    let a = find_cell(&buffer, 40, 14, "a");
+    let b = find_cell(&buffer, 40, 14, "b");
+    assert_eq!(buffer[a].style().fg, Some(Color::Gray));
+    assert_eq!(buffer[a].style().bg, Some(Color::White));
+    assert_eq!(buffer[b].style().fg, Some(Color::White));
+    assert_eq!(buffer[b].style().bg, Some(Color::Gray));
+}
+
+fn style_run(
+    range: Range<usize>,
+    foreground: Option<AnsiColor>,
+    background: Option<AnsiColor>,
+) -> StyleRun {
+    StyleRun {
+        start_byte: range.start,
+        end_byte: range.end,
+        foreground,
+        background,
+        modifiers: StyleModifiers::default(),
+    }
+}
+
+fn find_cell(buffer: &Buffer, width: u16, height: u16, symbol: &str) -> (u16, u16) {
+    for y in 0..height {
+        for x in 0..width {
+            if buffer[(x, y)].symbol() == symbol {
+                return (x, y);
+            }
+        }
+    }
+    panic!("expected {symbol:?} in rendered buffer");
 }
 
 #[test]
@@ -267,13 +318,106 @@ fn later_prompt_pushes_sticky_copy_off_one_row_at_a_time() {
 }
 
 #[test]
-fn visual_row_indices_do_not_saturate_at_u16_max() {
-    let section = PromptSection {
-        start_row: 70_000,
-        prompt_rows: 2,
-        end_row: 70_004,
+fn generated_document_rows_above_u16_max_keep_manual_viewport_and_sticky_rows() {
+    let mut document = HistoryDocument {
+        rows: (0..70_010)
+            .map(|index| VisualRow::plain(format!("row {index}")))
+            .collect(),
+        prompts: vec![PromptSection {
+            start_row: 70_000,
+            prompt_rows: 2,
+            end_row: 70_006,
+        }],
     };
-    assert_eq!(section.start_row, 70_000);
+    document.rows[70_000] = VisualRow::plain("prompt first");
+    document.rows[70_001] = VisualRow::plain("prompt second");
+
+    assert_eq!(document.viewport(3, 0)[0].plain_text(), "row 70007");
+    assert_eq!(
+        document
+            .viewport(3, 4)
+            .iter()
+            .map(VisualRow::plain_text)
+            .collect::<Vec<_>>(),
+        ["prompt first", "prompt second", "row 70005"]
+    );
+    assert_eq!(
+        sticky_overlay(&document.prompts, 70_003, 3),
+        Some(StickyRows {
+            source_start: 70_000,
+            screen_start: 0,
+            count: 2,
+        })
+    );
+}
+
+#[test]
+fn wrapper_preserves_many_adjacent_and_gapped_runs_across_wrapped_unicode() {
+    let rows = wrap_styled(
+        &herdr_simple_prompts::style::StyledText {
+            text: "界a\n b界c".into(),
+            runs: vec![
+                style_run(0..3, Some(AnsiColor::Red), None),
+                style_run(3..4, Some(AnsiColor::Green), None),
+                style_run(6..7, Some(AnsiColor::Blue), None),
+                style_run(7..10, Some(AnsiColor::Yellow), None),
+                style_run(10..11, Some(AnsiColor::Magenta), None),
+            ],
+        },
+        3,
+    );
+
+    let flattened = rows
+        .iter()
+        .flat_map(|row| {
+            row.spans.iter().flat_map(|span| {
+                span.text
+                    .chars()
+                    .map(move |character| (character, span.style))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        flattened,
+        vec![
+            (
+                '界',
+                CellStyle {
+                    foreground: Some(AnsiColor::Red),
+                    ..Default::default()
+                },
+            ),
+            (
+                'a',
+                CellStyle {
+                    foreground: Some(AnsiColor::Green),
+                    ..Default::default()
+                },
+            ),
+            (' ', CellStyle::default()),
+            (
+                'b',
+                CellStyle {
+                    foreground: Some(AnsiColor::Blue),
+                    ..Default::default()
+                },
+            ),
+            (
+                '界',
+                CellStyle {
+                    foreground: Some(AnsiColor::Yellow),
+                    ..Default::default()
+                },
+            ),
+            (
+                'c',
+                CellStyle {
+                    foreground: Some(AnsiColor::Magenta),
+                    ..Default::default()
+                },
+            ),
+        ]
+    );
 }
 
 #[test]

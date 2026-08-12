@@ -82,6 +82,7 @@ pub fn run_from_env() -> AppResult<()> {
     terminal.clear()?;
     let mut local_sequence = 1_u64;
     let mut draft_dirty = false;
+    let mut history_cache = render::HistoryRenderCache::default();
     let mut draft_save_at = Instant::now();
 
     loop {
@@ -108,7 +109,7 @@ pub fn run_from_env() -> AppResult<()> {
             app.send_error = Some(error);
         }
 
-        terminal.draw(|frame| render::render(frame, &app, &editor))?;
+        terminal.draw(|frame| render::render(frame, &app, &editor, &mut history_cache))?;
         if !event::poll(Duration::from_millis(50))? {
             continue;
         }

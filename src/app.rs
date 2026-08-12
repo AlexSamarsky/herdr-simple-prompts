@@ -41,6 +41,7 @@ pub struct AppState {
     pub send_error: Option<String>,
     pub input_enabled: bool,
     pub scroll_from_bottom: usize,
+    pub history_revision: u64,
     #[doc(hidden)]
     pub replay_insert_at: Option<usize>,
 }
@@ -62,6 +63,7 @@ impl Default for AppState {
             send_error: None,
             input_enabled: true,
             scroll_from_bottom: 0,
+            history_revision: 0,
             replay_insert_at: None,
         }
     }
@@ -101,6 +103,7 @@ impl AppState {
                         paste_ranges,
                     },
                 });
+                self.bump_history_revision();
             }
             AppEvent::NativeUser(message) => self.reconcile_user(message),
             AppEvent::NativeFinal(mut message) => {
@@ -113,11 +116,16 @@ impl AppState {
                     })
                 {
                     turn.final_answer = Some(message);
+                    self.bump_history_revision();
                 }
             }
             AppEvent::TranscriptReloaded => {
+                let history_len = self.turns.len();
                 self.turns
                     .retain(|turn| !matches!(turn.delivery, Delivery::Native));
+                if self.turns.len() != history_len {
+                    self.bump_history_revision();
+                }
                 self.replay_insert_at = Some(0);
             }
             AppEvent::TranscriptReplayComplete => self.replay_insert_at = None,
@@ -134,6 +142,7 @@ impl AppState {
                     self.draft.clone_from(recovery);
                     self.draft_attachments.clone_from(&turn.prompt.attachments);
                     turn.delivery = Delivery::Failed { reason };
+                    self.bump_history_revision();
                 }
             }
         }
@@ -227,6 +236,7 @@ impl AppState {
                     self.prompt_displays.push(summary);
                 }
             }
+            self.bump_history_revision();
         } else {
             let turn = Turn {
                 prompt: message,
@@ -239,7 +249,12 @@ impl AppState {
             } else {
                 self.turns.push(turn);
             }
+            self.bump_history_revision();
         }
+    }
+
+    fn bump_history_revision(&mut self) {
+        self.history_revision = self.history_revision.wrapping_add(1);
     }
 }
 

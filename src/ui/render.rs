@@ -13,7 +13,41 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::time::Instant;
 
-pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
+#[derive(Default)]
+pub(crate) struct HistoryRenderCache {
+    revision: Option<u64>,
+    width: Option<u16>,
+    document: HistoryDocument,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
+impl HistoryRenderCache {
+    fn document_for(&mut self, app: &AppState, width: u16) -> &HistoryDocument {
+        if self.revision != Some(app.history_revision) || self.width != Some(width) {
+            self.document = HistoryDocument::from_app(app, width);
+            self.revision = Some(app.history_revision);
+            self.width = Some(width);
+            #[cfg(test)]
+            {
+                self.rebuilds += 1;
+            }
+        }
+        &self.document
+    }
+
+    #[cfg(test)]
+    fn rebuild_count(&self) -> usize {
+        self.rebuilds
+    }
+}
+
+pub(crate) fn render(
+    frame: &mut Frame<'_>,
+    app: &AppState,
+    editor: &Editor,
+    history_cache: &mut HistoryRenderCache,
+) {
     let area = frame.area();
     let display_text = editor.display_text();
     let working_height = u16::from(app.agent_status == AgentStatus::Working);
@@ -33,9 +67,9 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
         ])
         .split(area);
 
-    let document = HistoryDocument::from_app(app, areas[0].width);
     let history = Text::from(
-        document
+        history_cache
+            .document_for(app, areas[0].width)
             .viewport(usize::from(areas[0].height), app.scroll_from_bottom)
             .iter()
             .map(|row| visual_row_line(row, areas[0].width))
@@ -188,7 +222,7 @@ fn ratatui_color(color: AnsiColor) -> Color {
         AnsiColor::Blue => Color::Blue,
         AnsiColor::Magenta => Color::Magenta,
         AnsiColor::Cyan => Color::Cyan,
-        AnsiColor::White => Color::White,
+        AnsiColor::White => Color::Gray,
         AnsiColor::BrightBlack => Color::DarkGray,
         AnsiColor::BrightRed => Color::LightRed,
         AnsiColor::BrightGreen => Color::LightGreen,
@@ -196,7 +230,7 @@ fn ratatui_color(color: AnsiColor) -> Color {
         AnsiColor::BrightBlue => Color::LightBlue,
         AnsiColor::BrightMagenta => Color::LightMagenta,
         AnsiColor::BrightCyan => Color::LightCyan,
-        AnsiColor::BrightWhite => Color::Gray,
+        AnsiColor::BrightWhite => Color::White,
         AnsiColor::Indexed(index) => Color::Indexed(index),
         AnsiColor::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
     }
@@ -280,7 +314,10 @@ fn editor_cursor(area: Rect, content_row: u16, column: u16, scroll: u16) -> (u16
 pub fn render_to_buffer(app: &AppState, editor: &Editor, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, app, editor)).unwrap();
+    let mut history_cache = HistoryRenderCache::default();
+    terminal
+        .draw(|frame| render(frame, app, editor, &mut history_cache))
+        .unwrap();
     terminal.backend().buffer().clone()
 }
 
@@ -298,12 +335,35 @@ pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16
 
 #[cfg(test)]
 mod tests {
-    use super::{editor_visual_cursor, wrapped_text_height};
+    use super::{HistoryRenderCache, editor_visual_cursor, wrapped_text_height};
+    use crate::app::{AppEvent, AppState};
+    use crate::model::Message;
 
     #[test]
     fn wrapped_cursor_uses_display_rows_and_columns() {
         assert_eq!(wrapped_text_height("abcdefghij", 4), 3);
         assert_eq!(editor_visual_cursor("abcdefghij", 10, 4), (2, 2));
         assert_eq!(editor_visual_cursor("abcd\n界界a", 12, 4), (2, 1));
+    }
+
+    #[test]
+    fn history_cache_reuses_matching_revision_and_width() {
+        let mut cache = HistoryRenderCache::default();
+        let mut app = AppState::default();
+
+        cache.document_for(&app, 20);
+        cache.document_for(&app, 20);
+        assert_eq!(cache.rebuild_count(), 1);
+
+        app.apply(AppEvent::NativeUser(Message::text(
+            "u1",
+            "changed",
+            Some(1),
+        )));
+        cache.document_for(&app, 20);
+        assert_eq!(cache.rebuild_count(), 2);
+
+        cache.document_for(&app, 21);
+        assert_eq!(cache.rebuild_count(), 3);
     }
 }

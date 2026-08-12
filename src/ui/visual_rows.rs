@@ -58,6 +58,18 @@ impl VisualRow {
         self.spans.iter().map(|span| span.text.as_str()).collect()
     }
 
+    fn push_char(&mut self, character: char, style: CellStyle) {
+        if let Some(previous) = self.spans.last_mut()
+            && previous.style == style
+        {
+            previous.text.push(character);
+        } else {
+            let mut text = String::with_capacity(character.len_utf8());
+            text.push(character);
+            self.spans.push(VisualSpan { text, style });
+        }
+    }
+
     fn push(&mut self, text: &str, style: CellStyle) {
         if let Some(previous) = self.spans.last_mut()
             && previous.style == style
@@ -203,6 +215,7 @@ pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
     let width = width.max(1);
     let runs = valid_runs(source);
     let mut rows = Vec::new();
+    let mut styles = StyleCursor::new(&runs);
     let mut row = empty_row();
     let mut row_width = 0;
     let mut token_start = 0;
@@ -213,7 +226,7 @@ pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
             .find_map(|(index, character)| (character == '\n').then_some(token_start + index))
             .unwrap_or(source.text.len());
         let line = &source.text[token_start..token_end];
-        for (offset, word) in line.split_word_bound_indices() {
+        for (offset, word) in WordBoundaries::new(line) {
             let word_width = word
                 .chars()
                 .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
@@ -225,14 +238,14 @@ pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
             }
             for (word_offset, character) in word.char_indices() {
                 let byte = token_start + offset + word_offset;
-                let style = style_at(&runs, byte);
+                let style = styles.style_at(byte);
                 let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
                 if character_width > 0 && row_width > 0 && row_width + character_width > width {
                     rows.push(row);
                     row = empty_row();
                     row_width = 0;
                 }
-                row.push(&character.to_string(), style);
+                row.push_char(character, style);
                 row_width += character_width;
             }
         }
@@ -248,27 +261,61 @@ pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
     rows
 }
 
-trait WordBoundaries {
-    fn split_word_bound_indices(&self) -> Vec<(usize, &str)>;
+struct WordBoundaries<'a> {
+    text: &'a str,
+    offset: usize,
 }
 
-impl WordBoundaries for str {
-    fn split_word_bound_indices(&self) -> Vec<(usize, &str)> {
-        let mut parts = Vec::new();
-        let mut start = 0;
-        let mut was_space = None;
-        for (index, character) in self.char_indices() {
-            let is_space = character.is_whitespace();
-            if was_space.is_some_and(|previous| previous != is_space) {
-                parts.push((start, &self[start..index]));
-                start = index;
+impl<'a> WordBoundaries<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, offset: 0 }
+    }
+}
+
+impl<'a> Iterator for WordBoundaries<'a> {
+    type Item = (usize, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == self.text.len() {
+            return None;
+        }
+        let start = self.offset;
+        let whitespace = self.text[start..].chars().next()?.is_whitespace();
+        let mut end = self.text.len();
+        for (offset, character) in self.text[start..].char_indices().skip(1) {
+            if character.is_whitespace() != whitespace {
+                end = start + offset;
+                break;
             }
-            was_space = Some(is_space);
         }
-        if start < self.len() {
-            parts.push((start, &self[start..]));
+        self.offset = end;
+        Some((start, &self.text[start..end]))
+    }
+}
+
+struct StyleCursor<'a> {
+    runs: &'a [StyleRun],
+    index: usize,
+}
+
+impl<'a> StyleCursor<'a> {
+    fn new(runs: &'a [StyleRun]) -> Self {
+        Self { runs, index: 0 }
+    }
+
+    fn style_at(&mut self, byte: usize) -> CellStyle {
+        while self
+            .runs
+            .get(self.index)
+            .is_some_and(|run| byte >= run.end_byte)
+        {
+            self.index += 1;
         }
-        parts
+        self.runs
+            .get(self.index)
+            .filter(|run| run.start_byte <= byte)
+            .map(CellStyle::from)
+            .unwrap_or_default()
     }
 }
 
@@ -290,13 +337,6 @@ fn valid_runs(source: &StyledText) -> Vec<StyleRun> {
         })
         .cloned()
         .collect()
-}
-
-fn style_at(runs: &[StyleRun], byte: usize) -> CellStyle {
-    runs.iter()
-        .find(|run| run.start_byte <= byte && byte < run.end_byte)
-        .map(CellStyle::from)
-        .unwrap_or_default()
 }
 
 fn prompt_lines(message: &Message, delivery: &Delivery) -> Vec<StyledText> {
