@@ -1,14 +1,220 @@
-use herdr_simple_prompts::editor::{Editor, EditorCommand, Key, map_key, staged_image_path};
+use herdr_simple_prompts::editor::{
+    Editor, EditorChunk, EditorCommand, EditorSnapshot, Key, map_key, staged_image_path,
+};
+use herdr_simple_prompts::paste::{LARGE_PASTE_CHARS, PasteRange, large_paste_marker};
 
 #[test]
-fn paste_preserves_two_megabytes_and_newlines() {
+fn editor_chunks_round_trip_through_the_tagged_serde_contract() {
+    let snapshot = EditorSnapshot {
+        chunks: vec![
+            EditorChunk::Text("before".to_owned()),
+            EditorChunk::LargePaste {
+                source_text: "界".repeat(LARGE_PASTE_CHARS),
+                character_count: LARGE_PASTE_CHARS,
+            },
+        ],
+    };
+
+    let serialized = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(
+        serialized,
+        serde_json::json!({
+            "chunks": [
+                {"kind": "text", "value": "before"},
+                {
+                    "kind": "large_paste",
+                    "value": {
+                        "source_text": "界".repeat(LARGE_PASTE_CHARS),
+                        "character_count": LARGE_PASTE_CHARS
+                    }
+                }
+            ]
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<EditorSnapshot>(serialized).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+fn below_threshold_paste_remains_plain_text() {
     let mut editor = Editor::default();
-    let pasted = format!("first\n{}\nlast", "я".repeat(1_000_000));
+    let pasted = "界".repeat(LARGE_PASTE_CHARS - 1);
 
     editor.insert_paste(&pasted);
 
+    assert_eq!(editor.display_text(), pasted);
+    assert_eq!(editor.submission_text(), pasted);
+    assert_eq!(
+        editor.snapshot(),
+        EditorSnapshot::plain(pasted),
+        "a small paste should remain ordinary text in recovery data"
+    );
+}
+
+#[test]
+fn very_large_paste_is_compact_for_display_and_lossless_for_submission() {
+    let mut editor = Editor::default();
+    let pasted = format!("first\n{}\nlast", "я".repeat(1_000_000));
+    let character_count = pasted.chars().count();
+    let marker = large_paste_marker(character_count);
+
+    editor.insert_paste(&pasted);
+
+    assert_eq!(editor.display_text(), marker);
+    assert!(!editor.display_text().contains(&"я".repeat(1_000_000)));
     assert_eq!(editor.text(), pasted);
-    assert!(editor.text().is_char_boundary(editor.cursor_byte()));
+    assert_eq!(editor.submission_text(), pasted);
+    assert_eq!(
+        editor.snapshot().chunks,
+        vec![EditorChunk::LargePaste {
+            source_text: pasted.clone(),
+            character_count,
+        }]
+    );
+
+    let submission = editor.take_editor_submission();
+    let expected_recovery = EditorSnapshot {
+        chunks: vec![EditorChunk::LargePaste {
+            source_text: pasted.clone(),
+            character_count,
+        }],
+    };
+
+    assert_eq!(submission.complete_text, pasted);
+    assert_eq!(submission.display_text, marker);
+    assert_eq!(submission.recovery, expected_recovery);
+    assert_eq!(
+        submission.paste_ranges,
+        vec![PasteRange {
+            start_byte: 0,
+            end_byte: submission.complete_text.len(),
+            character_count,
+        }]
+    );
+    assert_eq!(editor.text(), "");
+    assert_eq!(editor.display_text(), "");
+    assert_eq!(editor.cursor_byte(), 0);
+    assert_eq!(editor.display_cursor_byte(), 0);
+    assert!(editor.is_empty());
+
+    let mut legacy_editor = Editor::default();
+    legacy_editor.insert_paste(&pasted);
+    assert_eq!(legacy_editor.take_submission(), pasted);
+    assert!(legacy_editor.is_empty());
+}
+
+#[test]
+fn multiple_large_pastes_remain_ordered_separate_and_atomic() {
+    let mut editor = Editor::default();
+    let first = "a".repeat(1_000);
+    let second = "界".repeat(1_001);
+    editor.insert_char('>');
+    editor.insert_paste(&first);
+    editor.insert_char('|');
+    editor.insert_paste(&second);
+    editor.insert_char('<');
+
+    let expected_display = format!(
+        ">{}|{}<",
+        large_paste_marker(1_000),
+        large_paste_marker(1_001)
+    );
+    let expected_submission = format!(">{first}|{second}<");
+    assert_eq!(editor.display_text(), expected_display);
+    assert_eq!(editor.submission_text(), expected_submission);
+
+    let expected_ranges = vec![
+        PasteRange {
+            start_byte: 1,
+            end_byte: 1 + first.len(),
+            character_count: 1_000,
+        },
+        PasteRange {
+            start_byte: 1 + first.len() + 1,
+            end_byte: 1 + first.len() + 1 + second.len(),
+            character_count: 1_001,
+        },
+    ];
+    let snapshot = EditorSnapshot {
+        chunks: vec![
+            EditorChunk::Text(">".to_owned()),
+            EditorChunk::LargePaste {
+                source_text: first.clone(),
+                character_count: 1_000,
+            },
+            EditorChunk::Text("|".to_owned()),
+            EditorChunk::LargePaste {
+                source_text: second,
+                character_count: 1_001,
+            },
+            EditorChunk::Text("<".to_owned()),
+        ],
+    };
+    assert_eq!(editor.snapshot(), snapshot);
+    assert_eq!(
+        editor.take_editor_submission().paste_ranges,
+        expected_ranges
+    );
+
+    let mut restored = Editor::default();
+    restored.insert_char('x');
+    restored.replace_snapshot(snapshot.clone());
+
+    assert_eq!(restored.snapshot(), snapshot);
+    assert_eq!(restored.display_text(), expected_display);
+    assert_eq!(restored.submission_text(), expected_submission);
+
+    restored.move_left();
+    restored.backspace();
+
+    assert_eq!(restored.submission_text(), format!(">{first}|<"));
+    assert_eq!(
+        restored.display_text(),
+        format!(">{}|<", large_paste_marker(1_000))
+    );
+}
+
+#[test]
+fn cursor_crosses_a_large_paste_on_display_atom_boundaries() {
+    let mut editor = Editor::default();
+    let pasted = "界".repeat(LARGE_PASTE_CHARS);
+    editor.insert_paste(&pasted);
+    let source_after = editor.cursor_byte();
+    let display_after = editor.display_cursor_byte();
+
+    editor.move_left();
+
+    assert_eq!(editor.cursor_byte(), 0);
+    assert_eq!(source_after - editor.cursor_byte(), pasted.len());
+    assert_eq!(editor.display_cursor_byte(), 0);
+    assert_eq!(
+        display_after - editor.display_cursor_byte(),
+        large_paste_marker(LARGE_PASTE_CHARS).len()
+    );
+
+    editor.move_right();
+    editor.delete();
+    editor.move_left();
+    editor.delete();
+    assert_eq!(editor.submission_text(), "");
+}
+
+#[test]
+fn normal_editing_keeps_source_and_display_in_sync() {
+    let mut editor = Editor::default();
+    editor.insert_paste("abc");
+    editor.move_left();
+    editor.insert_char('X');
+    editor.delete();
+    editor.backspace();
+
+    assert_eq!(editor.text(), "ab");
+    assert_eq!(editor.display_text(), "ab");
+    assert_eq!(editor.cursor_byte(), 2);
+    assert_eq!(editor.display_cursor_byte(), 2);
 }
 
 #[test]
@@ -16,6 +222,8 @@ fn shift_enter_and_ctrl_j_insert_newline_while_enter_submits() {
     assert_eq!(map_key(Key::Enter), EditorCommand::Submit);
     assert_eq!(map_key(Key::ShiftEnter), EditorCommand::Newline);
     assert_eq!(map_key(Key::Ctrl('j')), EditorCommand::Newline);
+    assert_eq!(map_key(Key::Character('x')), EditorCommand::Insert('x'));
+    assert_eq!(map_key(Key::Ctrl('x')), EditorCommand::None);
 }
 
 #[test]
@@ -27,6 +235,50 @@ fn editing_never_splits_a_unicode_scalar() {
 
     assert_eq!(editor.text(), "aяz");
     assert!(editor.text().is_char_boundary(editor.cursor_byte()));
+    assert!(
+        editor
+            .display_text()
+            .is_char_boundary(editor.display_cursor_byte())
+    );
+}
+
+#[test]
+fn home_and_end_move_within_the_display_line() {
+    let mut editor = Editor::default();
+    editor.replace("alpha\nbeta\ngamma");
+
+    editor.move_home();
+    editor.insert_char('>');
+    editor.move_end();
+    editor.insert_char('<');
+
+    assert_eq!(editor.text(), "alpha\nbeta\n>gamma<");
+}
+
+#[test]
+fn vertical_movement_preserves_the_preferred_display_column() {
+    let mut editor = Editor::default();
+    editor.replace("abcd\nxy\n1234");
+
+    editor.move_up();
+    assert_eq!(editor.cursor_byte(), 7);
+    editor.move_up();
+    assert_eq!(editor.cursor_byte(), 4);
+    editor.move_down();
+    assert_eq!(editor.cursor_byte(), 7);
+}
+
+#[test]
+fn legacy_take_submission_is_lossless_and_clears_the_editor() {
+    let mut editor = Editor::default();
+    let source = format!("before{}after", "🙂".repeat(LARGE_PASTE_CHARS));
+    editor.insert_paste(&source);
+
+    assert_eq!(editor.take_submission(), source);
+    assert_eq!(editor.text(), "");
+    assert_eq!(editor.display_text(), "");
+    assert_eq!(editor.snapshot(), EditorSnapshot::default());
+    assert!(editor.is_empty());
 }
 
 #[test]

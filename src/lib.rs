@@ -4,6 +4,7 @@ pub mod editor;
 mod error;
 pub mod herdr;
 pub mod model;
+pub mod paste;
 pub mod state;
 pub mod status;
 pub mod toggle;
