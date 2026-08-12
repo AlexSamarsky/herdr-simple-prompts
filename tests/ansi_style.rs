@@ -1,4 +1,6 @@
 use herdr_simple_prompts::ansi::sanitize_ansi;
+use herdr_simple_prompts::app::{AppEvent, AppState};
+use herdr_simple_prompts::model::Message;
 use herdr_simple_prompts::style::{
     AnsiColor, MessagePresentation, StyleModifiers, StyleRun, validate_style_runs,
 };
@@ -35,6 +37,26 @@ fn fallback_and_native_provenance_are_not_confused() {
     assert_ne!(
         MessagePresentation::MarkdownFallback,
         MessagePresentation::NativeAnsi(vec![])
+    );
+}
+
+#[test]
+fn native_final_plain_messages_are_normalized_to_markdown_fallback() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "prompt",
+        "question",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::text(
+        "answer",
+        "answer",
+        Some(2),
+    )));
+
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::MarkdownFallback
     );
 }
 
@@ -93,6 +115,22 @@ fn sanitizer_normalizes_lines_discards_controls_and_coalesces_equal_styles() {
         &styled.text[styled.runs[0].start_byte..styled.runs[0].end_byte],
         "xy"
     );
+}
+
+#[test]
+fn sanitizer_discards_unicode_controls_but_keeps_printable_unicode_and_newlines() {
+    let styled = sanitize_ansi("界\u{0085}✓\u{009b}é\u{009f}\r\nnext");
+
+    assert_eq!(styled.text, "界✓é\nnext");
+    assert!(
+        styled
+            .text
+            .chars()
+            .all(|character| character == '\n' || !character.is_control())
+    );
+    assert!(styled.text.contains('界'));
+    assert!(styled.text.contains('✓'));
+    assert!(styled.text.contains('é'));
 }
 
 #[test]

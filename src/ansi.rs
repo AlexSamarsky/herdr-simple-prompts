@@ -24,7 +24,9 @@ pub fn sanitize_ansi(input: &str) -> StyledText {
                     .chars()
                     .next()
                     .expect("index is always on a UTF-8 boundary");
-                text.push(character);
+                if !character.is_control() {
+                    text.push(character);
+                }
                 index += character.len_utf8();
             }
         }
