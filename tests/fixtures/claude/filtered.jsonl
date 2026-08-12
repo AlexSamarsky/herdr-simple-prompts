@@ -1,0 +1,5 @@
+{"type":"progress","data":{"message":"working internally"}}
+{"type":"user","uuid":"meta1","isMeta":true,"isSidechain":false,"userType":"external","message":{"role":"user","content":"system reminder"}}
+{"type":"user","uuid":"side1","isSidechain":true,"userType":"external","message":{"role":"user","content":"subagent prompt"}}
+{"type":"assistant","uuid":"think1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"private thought"}]}}
+{"type":"user","uuid":"u-image","isSidechain":false,"userType":"external","message":{"role":"user","content":[{"type":"text","text":"look at this"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"omitted"}}]}}
