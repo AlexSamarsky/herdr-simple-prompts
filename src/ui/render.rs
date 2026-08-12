@@ -15,7 +15,8 @@ use std::time::Instant;
 
 #[derive(Default)]
 pub(crate) struct HistoryRenderCache {
-    revision: Option<u64>,
+    generation: u64,
+    cached_generation: Option<u64>,
     width: Option<u16>,
     document: HistoryDocument,
     #[cfg(test)]
@@ -23,10 +24,14 @@ pub(crate) struct HistoryRenderCache {
 }
 
 impl HistoryRenderCache {
+    pub(crate) fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     fn document_for(&mut self, app: &AppState, width: u16) -> &HistoryDocument {
-        if self.revision != Some(app.history_revision) || self.width != Some(width) {
+        if self.cached_generation != Some(self.generation) || self.width != Some(width) {
             self.document = HistoryDocument::from_app(app, width);
-            self.revision = Some(app.history_revision);
+            self.cached_generation = Some(self.generation);
             self.width = Some(width);
             #[cfg(test)]
             {
@@ -347,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn history_cache_reuses_matching_revision_and_width() {
+    fn history_cache_reuses_until_invalidated_or_resized() {
         let mut cache = HistoryRenderCache::default();
         let mut app = AppState::default();
 
@@ -360,6 +365,7 @@ mod tests {
             "changed",
             Some(1),
         )));
+        cache.invalidate();
         cache.document_for(&app, 20);
         assert_eq!(cache.rebuild_count(), 2);
 

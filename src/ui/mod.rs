@@ -67,7 +67,12 @@ pub fn run_from_env() -> AppResult<()> {
         prompt_displays: draft.prompt_displays,
         ..AppState::default()
     };
-    apply_follower_events(&mut app, follower.poll_initial(identity.status)?);
+    let mut history_cache = render::HistoryRenderCache::default();
+    apply_follower_events(
+        &mut app,
+        follower.poll_initial(identity.status)?,
+        &mut history_cache,
+    );
     draft_writer.queue_editor(
         editor.snapshot(),
         app.draft_attachments.clone(),
@@ -82,12 +87,12 @@ pub fn run_from_env() -> AppResult<()> {
     terminal.clear()?;
     let mut local_sequence = 1_u64;
     let mut draft_dirty = false;
-    let mut history_cache = render::HistoryRenderCache::default();
     let mut draft_save_at = Instant::now();
 
     loop {
         while let Some(event) = runtime.try_recv() {
-            let change = apply_runtime_event(event, &identity, &mut app, &mut editor);
+            let change =
+                apply_runtime_event(event, &identity, &mut app, &mut editor, &mut history_cache);
             apply_draft_change(
                 change,
                 &draft_writer,
@@ -115,7 +120,14 @@ pub fn run_from_env() -> AppResult<()> {
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let change = handle_key(key, &mut app, &mut editor, &runtime, &mut local_sequence)?;
+                let change = handle_key(
+                    key,
+                    &mut app,
+                    &mut editor,
+                    &runtime,
+                    &mut local_sequence,
+                    &mut history_cache,
+                )?;
                 apply_draft_change(
                     change,
                     &draft_writer,
@@ -176,6 +188,7 @@ fn handle_key(
     editor: &mut Editor,
     runtime: &UiRuntime,
     local_sequence: &mut u64,
+    history_cache: &mut render::HistoryRenderCache,
 ) -> AppResult<DraftChange> {
     if !app.input_enabled && !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
         return Ok(DraftChange::None);
@@ -212,11 +225,13 @@ fn handle_key(
                 attachments,
                 at_ms: now_ms(),
             });
+            history_cache.invalidate();
             if let Err(error) = runtime.submit(local_id.clone(), complete_text) {
                 app.apply(AppEvent::SendFailed {
                     local_id,
                     reason: error.to_string(),
                 });
+                history_cache.invalidate();
                 editor.replace_snapshot(app.draft.clone());
                 app.send_error = Some(error.to_string());
             }
@@ -297,11 +312,12 @@ fn apply_runtime_event(
     original: &crate::agent::AgentIdentity,
     app: &mut AppState,
     editor: &mut Editor,
+    history_cache: &mut render::HistoryRenderCache,
 ) -> DraftChange {
     match event {
         RuntimeEvent::Transcript(events) => {
             app.transcript_error = None;
-            apply_follower_events(app, events)
+            apply_follower_events(app, events, history_cache)
         }
         RuntimeEvent::TranscriptError(error) => {
             app.transcript_error = Some(error);
@@ -331,6 +347,7 @@ fn apply_runtime_event(
                     local_id,
                     reason: reason.clone(),
                 });
+                history_cache.invalidate();
                 editor.replace_snapshot(app.draft.clone());
                 app.send_error = Some(reason);
                 DraftChange::Immediate
@@ -385,7 +402,11 @@ fn apply_draft_change(
     }
 }
 
-fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) -> DraftChange {
+fn apply_follower_events(
+    app: &mut AppState,
+    events: Vec<FollowerEvent>,
+    history_cache: &mut render::HistoryRenderCache,
+) -> DraftChange {
     let prompt_displays_before = app.prompt_displays.clone();
     let replayed = events
         .iter()
@@ -393,12 +414,17 @@ fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) -> Draf
     for event in events {
         match event {
             FollowerEvent::Conversation(ConversationEvent::User(message)) => {
-                app.apply(AppEvent::NativeUser(message))
+                app.apply(AppEvent::NativeUser(message));
+                history_cache.invalidate();
             }
             FollowerEvent::Conversation(ConversationEvent::Final(message)) => {
-                app.apply(AppEvent::NativeFinal(message))
+                app.apply(AppEvent::NativeFinal(message));
+                history_cache.invalidate();
             }
-            FollowerEvent::Reloaded => app.apply(AppEvent::TranscriptReloaded),
+            FollowerEvent::Reloaded => {
+                app.apply(AppEvent::TranscriptReloaded);
+                history_cache.invalidate();
+            }
             FollowerEvent::ParseError { line, message } => {
                 app.transcript_error = Some(format!("transcript line {line}: {message}"))
             }

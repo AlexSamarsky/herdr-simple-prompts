@@ -40,6 +40,7 @@ fn prompt_band_and_answer_label_distinguish_roles_without_color_only() {
         .find(|&row| buffer[(0, row)].symbol() == "Y")
         .expect("prompt row should start with YOU");
     let prompt_style = buffer[(0, prompt_row)].style();
+    assert_eq!(prompt_style.fg, Some(Color::White));
     assert_eq!(prompt_style.bg, Some(Color::DarkGray));
     assert!(prompt_style.add_modifier.contains(Modifier::BOLD));
 }

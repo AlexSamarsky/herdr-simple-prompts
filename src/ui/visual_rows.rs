@@ -456,7 +456,7 @@ fn push_labeled_rows(
 
 fn prompt_fill() -> Option<CellStyle> {
     Some(CellStyle {
-        foreground: Some(AnsiColor::White),
+        foreground: Some(AnsiColor::BrightWhite),
         background: Some(AnsiColor::BrightBlack),
         modifiers: StyleModifiers::default(),
     })
