@@ -39,3 +39,24 @@ fn excludes_internal_events_and_keeps_user_images() {
     assert_eq!(message.attachments.len(), 1);
     assert_eq!(message.attachments[0].display, "a.png");
 }
+
+#[test]
+fn preserves_native_compact_paste_marker_exactly() {
+    let mut adapter = CodexAdapter;
+    let text = "inspect\n[Pasted Content 1000 chars]";
+    let line = serde_json::json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": text,
+        },
+    })
+    .to_string();
+
+    let event = adapter.ingest_line(1, &line).unwrap().unwrap();
+
+    assert!(matches!(
+        event,
+        ConversationEvent::User(message) if message.text == text
+    ));
+}

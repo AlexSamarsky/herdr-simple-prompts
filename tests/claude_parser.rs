@@ -73,3 +73,22 @@ fn keeps_visible_text_from_a_mixed_thinking_response() {
         Some(ConversationEvent::Final(message)) if message.text == "Visible answer."
     ));
 }
+
+#[test]
+fn preserves_native_compact_paste_marker_exactly() {
+    let mut adapter = ClaudeAdapter::default();
+    let text = "inspect\n[Pasted Content 1000 chars]";
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "u1",
+        "message": {"content": text},
+    })
+    .to_string();
+
+    let events = adapter.ingest_line(1, &line).unwrap();
+
+    assert!(matches!(
+        events.as_slice(),
+        [ConversationEvent::User(message)] if message.text == text
+    ));
+}

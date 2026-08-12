@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+use crate::editor::EditorSnapshot;
+use crate::paste::PasteRange;
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Attachment {
     pub id: String,
@@ -32,6 +35,9 @@ pub enum Delivery {
     Optimistic {
         local_id: String,
         submitted_at_ms: u64,
+        complete_text: String,
+        recovery: EditorSnapshot,
+        paste_ranges: Vec<PasteRange>,
     },
     Failed {
         reason: String,

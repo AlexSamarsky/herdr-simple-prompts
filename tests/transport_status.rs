@@ -43,6 +43,27 @@ fn refuses_to_send_after_native_session_changes() {
 }
 
 #[test]
+fn submit_preserves_full_large_paste_source() {
+    let source = "line\n".repeat(1_000);
+    let fake =
+        support::ScriptedHerdr::start(vec![agent_result("s1"), json!({"type": "agent_prompted"})]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    transport.submit(&source).unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests[1]["method"], "agent.prompt");
+    assert_eq!(requests[1]["params"]["text"], source);
+    assert!(
+        !requests[1]["params"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Pasted Content")
+    );
+}
+
+#[test]
 fn interrupt_revalidates_then_sends_escape() {
     let fake =
         support::ScriptedHerdr::start(vec![agent_result("s1"), json!({"type":"agent_keys_sent"})]);

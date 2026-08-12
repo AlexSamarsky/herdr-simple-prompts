@@ -52,16 +52,26 @@ pub fn run_from_env() -> AppResult<()> {
     let mut follower = TranscriptFollower::new(transcript, adapter)?;
     let state_store = StateStore::at(state_root);
     let mut editor = Editor::default();
-    let draft = state_store.load_draft(&source_pane)?;
+    let mut draft = state_store.load_draft(&source_pane)?;
+    draft
+        .prompt_displays
+        .retain(|summary| summary.session_id == identity.session_id);
     let draft_writer = DraftWriter::spawn(state_store.clone(), source_pane.clone());
-    editor.replace(draft.text);
+    editor.replace_snapshot(draft.editor);
     let mut app = AppState {
+        session_id: identity.session_id.clone(),
         agent_status: identity.status,
         working_since: identity.status.is_working().then(Instant::now),
         draft_attachments: draft.attachments,
+        prompt_displays: draft.prompt_displays,
         ..AppState::default()
     };
     apply_follower_events(&mut app, follower.poll_initial(identity.status)?);
+    draft_writer.queue_editor(
+        editor.snapshot(),
+        app.draft_attachments.clone(),
+        app.prompt_displays.clone(),
+    );
     let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
 
     let mut stdout = io::stdout();
@@ -86,7 +96,11 @@ pub fn run_from_env() -> AppResult<()> {
             );
         }
         if draft_dirty && Instant::now() >= draft_save_at {
-            draft_writer.queue(editor.text().to_owned(), app.draft_attachments.clone());
+            draft_writer.queue_editor(
+                editor.snapshot(),
+                app.draft_attachments.clone(),
+                app.prompt_displays.clone(),
+            );
             draft_dirty = false;
         }
         if let Some(error) = draft_writer.take_error() {
@@ -181,26 +195,27 @@ fn handle_key(
                 app.send_error = Some("wait for image attachment verification".to_owned());
                 return Ok(DraftChange::None);
             }
-            if editor.text().trim().is_empty() && app.draft_attachments.is_empty() {
+            if editor.submission_text().trim().is_empty() && app.draft_attachments.is_empty() {
                 return Ok(DraftChange::None);
             }
-            let text = editor.take_submission();
+            let submission = editor.take_editor_submission();
+            let complete_text = submission.complete_text.clone();
             app.send_error = None;
             let attachments = app.draft_attachments.clone();
             let local_id = format!("local-{}", *local_sequence);
             *local_sequence += 1;
             app.apply(AppEvent::PromptSubmitted {
                 local_id: local_id.clone(),
-                text: text.clone(),
+                submission,
                 attachments,
                 at_ms: now_ms(),
             });
-            if let Err(error) = runtime.submit(local_id.clone(), text) {
+            if let Err(error) = runtime.submit(local_id.clone(), complete_text) {
                 app.apply(AppEvent::SendFailed {
                     local_id,
                     reason: error.to_string(),
                 });
-                editor.replace(app.draft.clone());
+                editor.replace_snapshot(app.draft.clone());
                 app.send_error = Some(error.to_string());
             }
             DraftChange::Immediate
@@ -284,8 +299,7 @@ fn apply_runtime_event(
     match event {
         RuntimeEvent::Transcript(events) => {
             app.transcript_error = None;
-            apply_follower_events(app, events);
-            DraftChange::None
+            apply_follower_events(app, events)
         }
         RuntimeEvent::TranscriptError(error) => {
             app.transcript_error = Some(error);
@@ -315,7 +329,7 @@ fn apply_runtime_event(
                     local_id,
                     reason: reason.clone(),
                 });
-                editor.replace(app.draft.clone());
+                editor.replace_snapshot(app.draft.clone());
                 app.send_error = Some(reason);
                 DraftChange::Immediate
             } else {
@@ -359,13 +373,18 @@ fn apply_draft_change(
             *save_at = Instant::now() + DRAFT_DEBOUNCE;
         }
         DraftChange::Immediate => {
-            writer.queue(editor.text().to_owned(), app.draft_attachments.clone());
+            writer.queue_editor(
+                editor.snapshot(),
+                app.draft_attachments.clone(),
+                app.prompt_displays.clone(),
+            );
             *dirty = false;
         }
     }
 }
 
-fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) {
+fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) -> DraftChange {
+    let prompt_displays_before = app.prompt_displays.clone();
     let replayed = events
         .iter()
         .any(|event| matches!(event, FollowerEvent::Reloaded));
@@ -385,6 +404,11 @@ fn apply_follower_events(app: &mut AppState, events: Vec<FollowerEvent>) {
     }
     if replayed {
         app.apply(AppEvent::TranscriptReplayComplete);
+    }
+    if app.prompt_displays == prompt_displays_before {
+        DraftChange::None
+    } else {
+        DraftChange::Immediate
     }
 }
 

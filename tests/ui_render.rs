@@ -107,3 +107,20 @@ fn disabled_composer_explains_that_the_source_must_be_reopened() {
     assert!(rendered.contains("Input disabled"));
     assert!(rendered.contains("source agent session changed"));
 }
+
+#[test]
+fn composer_shows_large_paste_marker_instead_of_log_body() {
+    let app = AppState::default();
+    let mut editor = Editor::default();
+    editor.insert_char('>');
+    editor.insert_paste(&"private-log-line\n".repeat(1_000));
+    editor.insert_char('<');
+
+    let rendered = render_to_string(&app, &editor, 80, 24);
+
+    assert!(rendered.contains("Pasted Content"));
+    assert!(rendered.contains("chars"));
+    assert!(rendered.contains('>'));
+    assert!(rendered.contains('<'));
+    assert!(!rendered.contains("private-log-line"));
+}

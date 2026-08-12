@@ -1,5 +1,7 @@
 use crate::agent::AgentStatus;
+use crate::editor::{EditorSnapshot, EditorSubmission};
 use crate::model::{Attachment, Delivery, Message, Turn};
+use crate::paste::{CompactPromptOverride, canonicalize_compact_markers};
 use crate::status::StatusLine;
 use std::time::Instant;
 
@@ -9,7 +11,7 @@ const RECONCILE_WINDOW_MS: u64 = 30_000;
 pub enum AppEvent {
     PromptSubmitted {
         local_id: String,
-        text: String,
+        submission: EditorSubmission,
         attachments: Vec<Attachment>,
         at_ms: u64,
     },
@@ -24,10 +26,12 @@ pub enum AppEvent {
 }
 
 pub struct AppState {
+    pub session_id: String,
     pub turns: Vec<Turn>,
-    pub draft: String,
+    pub draft: EditorSnapshot,
     pub draft_attachments: Vec<Attachment>,
     pub pending_attachments: Vec<Attachment>,
+    pub prompt_displays: Vec<CompactPromptOverride>,
     pub agent_status: AgentStatus,
     pub working_since: Option<Instant>,
     pub status_line: Option<StatusLine>,
@@ -43,10 +47,12 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            session_id: String::new(),
             turns: Vec::new(),
-            draft: String::new(),
+            draft: EditorSnapshot::default(),
             draft_attachments: Vec::new(),
             pending_attachments: Vec::new(),
+            prompt_displays: Vec::new(),
             agent_status: AgentStatus::Unknown,
             working_since: None,
             status_line: None,
@@ -65,16 +71,22 @@ impl AppState {
         match event {
             AppEvent::PromptSubmitted {
                 local_id,
-                text,
+                submission,
                 attachments,
                 at_ms,
             } => {
-                self.draft.clear();
+                self.draft = EditorSnapshot::default();
                 self.draft_attachments.clear();
+                let EditorSubmission {
+                    complete_text,
+                    display_text,
+                    recovery,
+                    paste_ranges,
+                } = submission;
                 self.turns.push(Turn {
                     prompt: Message {
                         stable_id: local_id.clone(),
-                        text,
+                        text: display_text,
                         attachments,
                         timestamp_ms: Some(at_ms),
                     },
@@ -82,6 +94,9 @@ impl AppState {
                     delivery: Delivery::Optimistic {
                         local_id,
                         submitted_at_ms: at_ms,
+                        complete_text,
+                        recovery,
+                        paste_ranges,
                     },
                 });
             }
@@ -108,7 +123,10 @@ impl AppState {
                         Delivery::Optimistic { local_id: candidate, .. } if candidate == &local_id
                     )
                 }) {
-                    self.draft.clone_from(&turn.prompt.text);
+                    let Delivery::Optimistic { recovery, .. } = &turn.delivery else {
+                        unreachable!("matched only optimistic turns");
+                    };
+                    self.draft.clone_from(recovery);
                     self.draft_attachments.clone_from(&turn.prompt.attachments);
                     turn.delivery = Delivery::Failed { reason };
                 }
@@ -123,24 +141,86 @@ impl AppState {
             .or(self.transcript_error.as_deref())
     }
 
-    fn reconcile_user(&mut self, message: Message) {
-        if let Some(turn) = self.turns.iter_mut().find(|turn| {
+    fn reconcile_user(&mut self, mut message: Message) {
+        let provider_text = message.text.clone();
+        if let Some(compact_text) = self
+            .prompt_displays
+            .iter()
+            .find(|summary| {
+                summary.session_id == self.session_id && summary.stable_id == message.stable_id
+            })
+            .and_then(|summary| summary.compact_text(&provider_text))
+        {
+            message.text = compact_text;
+        }
+
+        if let Some(index) = self.turns.iter().position(|turn| {
             let Delivery::Optimistic {
-                submitted_at_ms, ..
-            } = turn.delivery
+                submitted_at_ms,
+                complete_text,
+                paste_ranges,
+                ..
+            } = &turn.delivery
             else {
                 return false;
             };
-            normalized_text(&turn.prompt.text) == normalized_text(&message.text)
+            (normalized_text(complete_text) == normalized_text(&provider_text)
+                || normalized_text(&turn.prompt.text) == normalized_text(&provider_text)
+                || (!paste_ranges.is_empty()
+                    && normalized_text(&canonicalize_compact_markers(&provider_text))
+                        == normalized_text(&turn.prompt.text)))
                 && turn.prompt.attachments.len() == message.attachments.len()
                 && timestamps_match(
-                    Some(submitted_at_ms),
+                    Some(*submitted_at_ms),
                     message.timestamp_ms,
                     RECONCILE_WINDOW_MS,
                 )
         }) {
-            turn.prompt = message;
+            let turn = &mut self.turns[index];
+            let Delivery::Optimistic {
+                complete_text,
+                paste_ranges,
+                ..
+            } = &turn.delivery
+            else {
+                unreachable!("matched only optimistic turns");
+            };
+            let complete_text = complete_text.clone();
+            let paste_ranges = paste_ranges.clone();
+            let display_text = if normalized_text(&provider_text) == normalized_text(&complete_text)
+            {
+                turn.prompt.text.clone()
+            } else {
+                message.text.clone()
+            };
+            let native_id = message.stable_id.clone();
+            turn.prompt = Message {
+                stable_id: native_id.clone(),
+                text: display_text,
+                attachments: message.attachments,
+                timestamp_ms: message.timestamp_ms,
+            };
             turn.delivery = Delivery::Native;
+
+            if paste_ranges.is_empty() {
+                self.prompt_displays.retain(|existing| {
+                    existing.session_id != self.session_id || existing.stable_id != native_id
+                });
+            } else {
+                let summary = CompactPromptOverride::new(
+                    self.session_id.clone(),
+                    native_id.clone(),
+                    &complete_text,
+                    paste_ranges,
+                );
+                if let Some(existing) = self.prompt_displays.iter_mut().find(|existing| {
+                    existing.session_id == self.session_id && existing.stable_id == native_id
+                }) {
+                    *existing = summary;
+                } else {
+                    self.prompt_displays.push(summary);
+                }
+            }
         } else {
             let turn = Turn {
                 prompt: message,

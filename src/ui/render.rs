@@ -13,9 +13,10 @@ use std::time::Instant;
 
 pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
     let area = frame.area();
+    let display_text = editor.display_text();
     let working_height = u16::from(app.agent_status == AgentStatus::Working);
     let attachment_rows = attachment_visual_height(app, area.width);
-    let editor_rows = wrapped_text_height(editor.text(), area.width);
+    let editor_rows = wrapped_text_height(display_text, area.width);
     let composer_rows = attachment_rows.saturating_add(editor_rows);
     let composer_height = (composer_rows + 1).clamp(3, (area.height * 2 / 5).max(3));
     let error_height = u16::from(app.visible_error().is_some());
@@ -95,22 +96,17 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
             "Input disabled · reopen Simple Prompts",
             Style::default().fg(Color::Red),
         )));
-    } else if editor.text().is_empty() {
+    } else if display_text.is_empty() {
         composer_lines.push(Line::from(Span::styled(
             "Write a prompt",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        composer_lines.extend(
-            editor
-                .text()
-                .lines()
-                .map(|line| Line::from(line.to_owned())),
-        );
+        composer_lines.extend(display_text.lines().map(|line| Line::from(line.to_owned())));
     }
     let composer = Text::from(composer_lines);
     let (editor_row, editor_column) =
-        editor_visual_cursor(editor.text(), editor.cursor_byte(), areas[3].width);
+        editor_visual_cursor(display_text, editor.display_cursor_byte(), areas[3].width);
     let cursor_content_row = attachment_rows.saturating_add(editor_row);
     let visible_composer_rows = areas[3].height.saturating_sub(1).max(1);
     let composer_scroll = cursor_content_row.saturating_sub(visible_composer_rows - 1);
