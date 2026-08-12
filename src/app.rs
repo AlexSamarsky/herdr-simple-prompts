@@ -1,4 +1,7 @@
+use crate::agent::AgentStatus;
 use crate::model::{Attachment, Delivery, Message, Turn};
+use crate::status::StatusLine;
+use std::time::Instant;
 
 const RECONCILE_WINDOW_MS: u64 = 30_000;
 
@@ -18,11 +21,30 @@ pub enum AppEvent {
     },
 }
 
-#[derive(Default)]
 pub struct AppState {
     pub turns: Vec<Turn>,
     pub draft: String,
     pub draft_attachments: Vec<Attachment>,
+    pub agent_status: AgentStatus,
+    pub working_since: Option<Instant>,
+    pub status_line: Option<StatusLine>,
+    pub error: Option<String>,
+    pub scroll_from_bottom: u16,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            turns: Vec::new(),
+            draft: String::new(),
+            draft_attachments: Vec::new(),
+            agent_status: AgentStatus::Unknown,
+            working_since: None,
+            status_line: None,
+            error: None,
+            scroll_from_bottom: 0,
+        }
+    }
 }
 
 impl AppState {

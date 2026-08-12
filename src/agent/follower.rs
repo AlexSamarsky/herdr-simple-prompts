@@ -107,6 +107,12 @@ impl TranscriptFollower {
         }
         Ok(events)
     }
+
+    pub fn finalize_pending(&mut self) -> Option<FollowerEvent> {
+        self.adapter
+            .finalize_pending()
+            .map(FollowerEvent::Conversation)
+    }
 }
 
 fn identity(metadata: &std::fs::Metadata) -> FileIdentity {

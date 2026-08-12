@@ -18,6 +18,9 @@ pub trait TranscriptAdapter: Send {
         line: &str,
     ) -> AppResult<Vec<crate::model::ConversationEvent>>;
     fn reset(&mut self);
+    fn finalize_pending(&mut self) -> Option<crate::model::ConversationEvent> {
+        None
+    }
 }
 
 impl TranscriptAdapter for codex::CodexAdapter {
@@ -45,6 +48,10 @@ impl TranscriptAdapter for claude::ClaudeAdapter {
 
     fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    fn finalize_pending(&mut self) -> Option<crate::model::ConversationEvent> {
+        claude::ClaudeAdapter::finalize_pending(self)
     }
 }
 
