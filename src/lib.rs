@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod ansi;
 pub mod app;
 pub mod editor;
 mod error;
@@ -7,6 +8,7 @@ pub mod model;
 pub mod paste;
 pub mod state;
 pub mod status;
+pub mod style;
 pub mod toggle;
 pub mod transport;
 pub mod ui;

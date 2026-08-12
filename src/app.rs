@@ -3,6 +3,7 @@ use crate::editor::{EditorSnapshot, EditorSubmission};
 use crate::model::{Attachment, Delivery, Message, Turn};
 use crate::paste::{CompactPromptOverride, canonicalize_compact_markers};
 use crate::status::StatusLine;
+use crate::style::MessagePresentation;
 use std::time::Instant;
 
 const RECONCILE_WINDOW_MS: u64 = 30_000;
@@ -87,6 +88,7 @@ impl AppState {
                     prompt: Message {
                         stable_id: local_id.clone(),
                         text: display_text,
+                        presentation: MessagePresentation::Plain,
                         attachments,
                         timestamp_ms: Some(at_ms),
                     },
@@ -101,7 +103,10 @@ impl AppState {
                 });
             }
             AppEvent::NativeUser(message) => self.reconcile_user(message),
-            AppEvent::NativeFinal(message) => {
+            AppEvent::NativeFinal(mut message) => {
+                if message.presentation == MessagePresentation::Plain {
+                    message.presentation = MessagePresentation::MarkdownFallback;
+                }
                 if let Some(turn) =
                     self.turns.iter_mut().rev().find(|turn| {
                         turn.delivery == Delivery::Native && turn.final_answer.is_none()
@@ -197,6 +202,7 @@ impl AppState {
             turn.prompt = Message {
                 stable_id: native_id.clone(),
                 text: display_text,
+                presentation: MessagePresentation::Plain,
                 attachments: message.attachments,
                 timestamp_ms: message.timestamp_ms,
             };

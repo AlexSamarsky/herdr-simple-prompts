@@ -68,6 +68,7 @@ fn parse_user(line_number: u64, record: &Value, payload: &Value) -> Option<Messa
     Some(Message {
         stable_id: stable_id(line_number, payload),
         text,
+        presentation: crate::style::MessagePresentation::Plain,
         attachments,
         timestamp_ms: record_timestamp_ms(record),
     })

@@ -68,6 +68,7 @@ impl ClaudeAdapter {
         events.push(ConversationEvent::User(Message {
             stable_id: stable_id(line_number, record),
             text,
+            presentation: crate::style::MessagePresentation::Plain,
             attachments,
             timestamp_ms: record_timestamp_ms(record),
         }));

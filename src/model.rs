@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::editor::EditorSnapshot;
 use crate::paste::PasteRange;
+use crate::style::MessagePresentation;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Attachment {
@@ -14,6 +15,7 @@ pub struct Attachment {
 pub struct Message {
     pub stable_id: String,
     pub text: String,
+    pub presentation: MessagePresentation,
     pub attachments: Vec<Attachment>,
     pub timestamp_ms: Option<u64>,
 }
@@ -23,6 +25,21 @@ impl Message {
         Self {
             stable_id: id.into(),
             text: text.into(),
+            presentation: MessagePresentation::Plain,
+            attachments: Vec::new(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn final_text(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        timestamp_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            stable_id: id.into(),
+            text: text.into(),
+            presentation: MessagePresentation::MarkdownFallback,
             attachments: Vec::new(),
             timestamp_ms,
         }
