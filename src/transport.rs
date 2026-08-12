@@ -61,15 +61,23 @@ impl AgentTransport {
 
     pub fn visible_source(&self, lines: u16) -> AppResult<String> {
         self.validate_source()?;
-        let result = self
-            .client
-            .pane_read_visible(&self.original.pane_id, lines)
-            .map_err(|error| AppError::new("source screen", error.to_string()))?;
-        result
-            .pointer("/read/text")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| AppError::new("source screen", "Herdr response has no visible text"))
+        self.client
+            .pane_read_visible_text(&self.original.pane_id, u32::from(lines))
+            .map_err(|error| AppError::new("source screen", error.to_string()))
+    }
+
+    pub fn recent_unwrapped_ansi(&self, lines: u32) -> AppResult<String> {
+        self.validate_source()?;
+        self.client
+            .agent_read_recent_unwrapped_ansi(&self.original.pane_id, lines)
+            .map_err(|error| AppError::new("capture final style", error.to_string()))
+    }
+
+    pub fn visible_source_ansi(&self, lines: u32) -> AppResult<String> {
+        self.validate_source()?;
+        self.client
+            .pane_read_visible_ansi(&self.original.pane_id, lines)
+            .map_err(|error| AppError::new("source screen", error.to_string()))
     }
 
     pub fn refresh_identity(&self) -> AppResult<AgentIdentity> {

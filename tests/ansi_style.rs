@@ -1,4 +1,5 @@
-use herdr_simple_prompts::ansi::sanitize_ansi;
+use herdr_simple_prompts::agent::AgentKind;
+use herdr_simple_prompts::ansi::{extract_native_final, sanitize_ansi};
 use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::markdown::style_markdown;
 use herdr_simple_prompts::model::Message;
@@ -325,4 +326,167 @@ fn markdown_links_recover_after_nested_or_invalid_candidates() {
     for url in ["https://nested.test", "https://deep.test"] {
         assert!(style_at(&styled, text.find(url).unwrap()).is_none());
     }
+}
+
+#[test]
+fn exact_codex_final_capture_removes_only_known_chrome_and_preserves_styles() {
+    let ansi = concat!(
+        "tool output\n",
+        "────────\n",
+        "\u{1b}[32m• Final heading\u{1b}[0m\n",
+        "  body\n",
+        "────────\n",
+        "› Write a prompt",
+    );
+
+    let captured = extract_native_final(ansi, "Final heading\nbody", AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, "Final heading\nbody");
+    assert_eq!(captured.runs[0].foreground, Some(AnsiColor::Green));
+    assert_eq!(
+        &captured.text[captured.runs[0].start_byte..captured.runs[0].end_byte],
+        "Final heading"
+    );
+    assert!(validate_style_runs(&captured.text, &captured.runs).is_ok());
+}
+
+#[test]
+fn exact_claude_final_capture_uses_claude_boundaries() {
+    let ansi = concat!(
+        "earlier output\n",
+        "────────────────────────────────\n",
+        "\u{1b}[1;36m⏺ Final heading\u{1b}[0m\n",
+        "  body\n",
+        "────────────────────────────────\n",
+        "❯ ",
+    );
+
+    let captured = extract_native_final(ansi, "Final heading\nbody", AgentKind::Claude).unwrap();
+
+    assert_eq!(captured.text, "Final heading\nbody");
+    assert_eq!(captured.runs[0].foreground, Some(AnsiColor::Cyan));
+    assert!(captured.runs[0].modifiers.bold);
+}
+
+#[test]
+fn native_final_capture_rejects_unsafe_or_non_exact_candidates() {
+    let canonical = "same answer\nsecond line";
+    let unsafe_reads = [
+        // User prompt.
+        "────────\n› same answer\n  second line\n────────\n› Write a prompt",
+        // Commentary / working item, without an accepted final boundary.
+        "────────\n• Working (2s)\n  same answer\n  second line\n────────\n› Write a prompt",
+        // Tool result.
+        "────────\n• Ran command\n  same answer\n  second line\n────────\n› Write a prompt",
+        // Native composer contents.
+        "────────\n› same answer\n  second line",
+        // Text mismatch.
+        "────────\n• same answer\n  different line\n────────\n› Write a prompt",
+        // Partial scrollback misses the leading boundary.
+        "• same answer\n  second line\n────────\n› Write a prompt",
+        // Partial scrollback misses the trailing composer boundary.
+        "────────\n• same answer\n  second line",
+        // Two complete candidates are ambiguous.
+        concat!(
+            "────────\n• same answer\n  second line\n────────\n› Write a prompt\n",
+            "────────\n• same answer\n  second line\n────────\n› Write a prompt",
+        ),
+    ];
+
+    for ansi in unsafe_reads {
+        assert!(
+            extract_native_final(ansi, canonical, AgentKind::Codex).is_none(),
+            "unsafe read was accepted: {ansi:?}"
+        );
+    }
+}
+
+#[test]
+fn canonical_ansi_looking_literals_are_matched_as_text_not_executed_controls() {
+    let ansi = "────────\n• literal \\x1b[31m red\n────────\n› Write a prompt";
+
+    let captured = extract_native_final(ansi, "literal \\x1b[31m red", AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, "literal \\x1b[31m red");
+    assert!(captured.runs.is_empty());
+}
+
+#[test]
+fn native_final_capture_preserves_blank_lines_and_canonical_indentation() {
+    let ansi = concat!(
+        "────────\n",
+        "\u{1b}[32m• first\u{1b}[0m\n",
+        "\n",
+        "    indented\n",
+        "────────\n",
+        "› Write a prompt",
+    );
+
+    let captured = extract_native_final(ansi, "first\n\n  indented", AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, "first\n\n  indented");
+    assert!(validate_style_runs(&captured.text, &captured.runs).is_ok());
+}
+
+#[test]
+fn native_final_capture_accepts_resized_reviewed_agent_boundaries() {
+    for width in [8, 24, 80] {
+        let separator = "─".repeat(width);
+        let ansi = format!("{separator}\n• answer\n{separator}\n› Write a prompt");
+        assert!(extract_native_final(&ansi, "answer", AgentKind::Codex).is_some());
+    }
+    for width in [16, 32, 96] {
+        let separator = "─".repeat(width);
+        let ansi = format!("{separator}\n⏺ answer\n{separator}\n❯ ");
+        assert!(extract_native_final(&ansi, "answer", AgentKind::Claude).is_some());
+    }
+
+    let decorated = concat!(
+        "────────────────────────\n",
+        "• answer\n",
+        "─ Worked for 58m 35s ─────────\n",
+        "› Write a prompt",
+    );
+    assert!(extract_native_final(decorated, "answer", AgentKind::Codex).is_some());
+
+    for unsafe_read in [
+        "───────\n• answer\n───────\n› Write a prompt",
+        "━━━━━━━━\n• answer\n━━━━━━━━\n› Write a prompt",
+        "────────\n• answer\n- Worked for 2s -\n› Write a prompt",
+        "────────\n• answer\n─ Worked for eventually ────────\n› Write a prompt",
+        "───────────────\n⏺ answer\n───────────────\n❯ ",
+    ] {
+        assert!(extract_native_final(unsafe_read, "answer", AgentKind::Codex).is_none());
+        assert!(extract_native_final(unsafe_read, "answer", AgentKind::Claude).is_none());
+    }
+}
+
+#[test]
+fn native_final_capture_accepts_only_known_optional_agent_footers() {
+    let codex = concat!(
+        "────────\n",
+        "• answer\n",
+        "────────\n",
+        "› Write a prompt\n",
+        "gpt-5.6-sol xhigh · /repo",
+    );
+    let claude = concat!(
+        "────────────────────────────────\n",
+        "⏺ answer\n",
+        "────────────────────────────────\n",
+        "❯ \n",
+        "Claude Opus · /repo",
+    );
+
+    assert!(extract_native_final(codex, "answer", AgentKind::Codex).is_some());
+    assert!(extract_native_final(claude, "answer", AgentKind::Claude).is_some());
+
+    let arbitrary = concat!(
+        "────────\n",
+        "• answer\n",
+        "────────\n",
+        "› Write a prompt\n",
+        "unreviewed footer",
+    );
+    assert!(extract_native_final(arbitrary, "answer", AgentKind::Codex).is_none());
 }

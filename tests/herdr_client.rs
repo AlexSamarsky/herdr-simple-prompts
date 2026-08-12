@@ -109,3 +109,79 @@ fn read_timeout_prevents_a_stalled_peer_from_hanging_the_plugin() {
     assert!(client.call("ping", serde_json::json!({})).is_err());
     assert!(started.elapsed() < Duration::from_millis(90));
 }
+
+#[test]
+fn typed_ansi_reads_send_exact_contracts_and_extract_text() {
+    let fake = support::ScriptedHerdr::start(vec![
+        serde_json::json!({"read": {"text": "\u{1b}[32manswer\u{1b}[0m"}}),
+        serde_json::json!({"read": {"text": "visible text"}}),
+        serde_json::json!({"read": {"text": "\u{1b}[33mvisible\u{1b}[0m"}}),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert_eq!(
+        client
+            .agent_read_recent_unwrapped_ansi("w1:p1", 240)
+            .unwrap(),
+        "\u{1b}[32manswer\u{1b}[0m"
+    );
+    assert_eq!(
+        client.pane_read_visible_text("w1:p1", 8).unwrap(),
+        "visible text"
+    );
+    assert_eq!(
+        client.pane_read_visible_ansi("w1:p1", 8).unwrap(),
+        "\u{1b}[33mvisible\u{1b}[0m"
+    );
+
+    let requests = fake.requests();
+    assert_eq!(requests[0]["method"], "agent.read");
+    assert_eq!(
+        requests[0]["params"],
+        serde_json::json!({
+            "target": "w1:p1",
+            "source": "recent_unwrapped",
+            "lines": 240,
+            "format": "ansi",
+            "strip_ansi": false
+        })
+    );
+    assert_eq!(requests[1]["method"], "pane.read");
+    assert_eq!(
+        requests[1]["params"],
+        serde_json::json!({
+            "pane_id": "w1:p1",
+            "source": "visible",
+            "lines": 8,
+            "format": "text",
+            "strip_ansi": true
+        })
+    );
+    assert_eq!(requests[2]["method"], "pane.read");
+    assert_eq!(
+        requests[2]["params"],
+        serde_json::json!({
+            "pane_id": "w1:p1",
+            "source": "visible",
+            "lines": 8,
+            "format": "ansi",
+            "strip_ansi": false
+        })
+    );
+}
+
+#[test]
+fn typed_read_reports_structured_protocol_error_when_text_is_absent() {
+    let fake = support::ScriptedHerdr::start(vec![serde_json::json!({"read": {}})]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let error = client
+        .agent_read_recent_unwrapped_ansi("w1:p1", 240)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        herdr_simple_prompts::herdr::HerdrError::Protocol(_)
+    ));
+    assert!(error.to_string().contains("read text"));
+}

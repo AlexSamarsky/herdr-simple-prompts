@@ -28,6 +28,12 @@ use terminal::TerminalGuard;
 const DRAFT_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapturePolicy {
+    NewestFinalOnly,
+    AllFinals,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DraftChange {
     None,
     Debounced,
@@ -68,18 +74,20 @@ pub fn run_from_env() -> AppResult<()> {
         ..AppState::default()
     };
     let mut history_cache = render::HistoryRenderCache::default();
-    apply_follower_events(
+    let initial_events = follower.poll_initial(identity.status)?;
+    let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
+    apply_follower_events_with_policy(
         &mut app,
-        follower.poll_initial(identity.status)?,
+        initial_events,
         &mut history_cache,
+        &runtime,
+        CapturePolicy::NewestFinalOnly,
     );
     draft_writer.queue_editor(
         editor.snapshot(),
         app.draft_attachments.clone(),
         app.prompt_displays.clone(),
     );
-    let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
-
     let mut stdout = io::stdout();
     let _guard = TerminalGuard::enter(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
@@ -91,8 +99,14 @@ pub fn run_from_env() -> AppResult<()> {
 
     loop {
         while let Some(event) = runtime.try_recv() {
-            let change =
-                apply_runtime_event(event, &identity, &mut app, &mut editor, &mut history_cache);
+            let change = apply_runtime_event(
+                event,
+                &identity,
+                &mut app,
+                &mut editor,
+                &mut history_cache,
+                &runtime,
+            );
             apply_draft_change(
                 change,
                 &draft_writer,
@@ -313,11 +327,18 @@ fn apply_runtime_event(
     app: &mut AppState,
     editor: &mut Editor,
     history_cache: &mut render::HistoryRenderCache,
+    runtime: &UiRuntime,
 ) -> DraftChange {
     match event {
         RuntimeEvent::Transcript(events) => {
             app.transcript_error = None;
-            apply_follower_events(app, events, history_cache)
+            apply_follower_events_with_policy(
+                app,
+                events,
+                history_cache,
+                runtime,
+                CapturePolicy::AllFinals,
+            )
         }
         RuntimeEvent::TranscriptError(error) => {
             app.transcript_error = Some(error);
@@ -374,6 +395,23 @@ fn apply_runtime_event(
                 }
             }
         }
+        RuntimeEvent::FinalPresentation {
+            stable_id,
+            text_fingerprint,
+            presentation,
+        } => {
+            app.apply(AppEvent::FinalPresentation {
+                stable_id,
+                text_fingerprint,
+                presentation,
+            });
+            history_cache.invalidate();
+            DraftChange::None
+        }
+        RuntimeEvent::CaptureDiagnostic(error) => {
+            app.transcript_error = Some(format!("final style capture: {error}"));
+            DraftChange::None
+        }
     }
 }
 
@@ -402,24 +440,45 @@ fn apply_draft_change(
     }
 }
 
-fn apply_follower_events(
+fn apply_follower_events_with_policy(
     app: &mut AppState,
     events: Vec<FollowerEvent>,
     history_cache: &mut render::HistoryRenderCache,
+    runtime: &UiRuntime,
+    capture_policy: CapturePolicy,
 ) -> DraftChange {
     let prompt_displays_before = app.prompt_displays.clone();
     let replayed = events
         .iter()
         .any(|event| matches!(event, FollowerEvent::Reloaded));
-    for event in events {
+    let newest_final = (capture_policy == CapturePolicy::NewestFinalOnly)
+        .then(|| {
+            events.iter().rposition(|event| {
+                matches!(
+                    event,
+                    FollowerEvent::Conversation(ConversationEvent::Final(_))
+                )
+            })
+        })
+        .flatten();
+    for (event_index, event) in events.into_iter().enumerate() {
         match event {
             FollowerEvent::Conversation(ConversationEvent::User(message)) => {
                 app.apply(AppEvent::NativeUser(message));
                 history_cache.invalidate();
             }
             FollowerEvent::Conversation(ConversationEvent::Final(message)) => {
+                let stable_id = message.stable_id.clone();
+                let canonical_text = message.text.clone();
                 app.apply(AppEvent::NativeFinal(message));
                 history_cache.invalidate();
+                let should_capture =
+                    capture_policy == CapturePolicy::AllFinals || newest_final == Some(event_index);
+                if should_capture
+                    && let Err(error) = runtime.capture_final(stable_id, canonical_text)
+                {
+                    app.transcript_error = Some(error.to_string());
+                }
             }
             FollowerEvent::Reloaded => {
                 app.apply(AppEvent::TranscriptReloaded);
@@ -457,4 +516,77 @@ fn next_image_id(sequence: &mut u64) -> String {
     let id = format!("local-image-{}", *sequence);
     *sequence += 1;
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapturePolicy, apply_follower_events_with_policy, render, runtime};
+    use crate::agent::follower::FollowerEvent;
+    use crate::app::AppState;
+    use crate::model::{ConversationEvent, Message};
+
+    fn final_event(index: usize) -> FollowerEvent {
+        FollowerEvent::Conversation(ConversationEvent::Final(Message::final_text(
+            format!("final-{index}"),
+            format!("answer-{index}"),
+            Some(index as u64),
+        )))
+    }
+
+    #[test]
+    fn initial_replay_with_more_than_capture_capacity_enqueues_only_newest_final() {
+        let (runtime, captures) = runtime::capture_test_runtime(8);
+        let mut app = AppState::default();
+        let mut cache = render::HistoryRenderCache::default();
+        let mut events = Vec::new();
+        for index in 0..10 {
+            events.push(FollowerEvent::Conversation(ConversationEvent::User(
+                Message::text(format!("prompt-{index}"), format!("prompt {index}"), None),
+            )));
+            events.push(final_event(index));
+        }
+
+        apply_follower_events_with_policy(
+            &mut app,
+            events,
+            &mut cache,
+            &runtime,
+            CapturePolicy::NewestFinalOnly,
+        );
+
+        let captured: Vec<_> = captures.try_iter().collect();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].stable_id, "final-9");
+        assert_eq!(app.turns.len(), 10);
+    }
+
+    #[test]
+    fn live_batch_enqueues_each_new_final() {
+        let (runtime, captures) = runtime::capture_test_runtime(8);
+        let mut app = AppState::default();
+        let mut cache = render::HistoryRenderCache::default();
+        let events = vec![
+            FollowerEvent::Conversation(ConversationEvent::User(Message::text(
+                "prompt-1", "prompt 1", None,
+            ))),
+            final_event(1),
+            FollowerEvent::Conversation(ConversationEvent::User(Message::text(
+                "prompt-2", "prompt 2", None,
+            ))),
+            final_event(2),
+        ];
+
+        apply_follower_events_with_policy(
+            &mut app,
+            events,
+            &mut cache,
+            &runtime,
+            CapturePolicy::AllFinals,
+        );
+
+        let captured: Vec<_> = captures.try_iter().collect();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].stable_id, "final-1");
+        assert_eq!(captured[1].stable_id, "final-2");
+    }
 }

@@ -99,3 +99,38 @@ fn status_extraction_omits_unproven_fields() {
     assert!(unknown.usage.is_none());
     assert_eq!(unknown.cwd, PathBuf::from("/repo"));
 }
+
+#[test]
+fn ansi_reads_revalidate_source_and_use_agent_specific_read_contracts() {
+    let fake = support::ScriptedHerdr::start(vec![
+        agent_result("s1"),
+        json!({"read": {"text": "recent ansi"}}),
+        agent_result("s1"),
+        json!({"read": {"text": "visible ansi"}}),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    assert_eq!(transport.recent_unwrapped_ansi(240).unwrap(), "recent ansi");
+    assert_eq!(transport.visible_source_ansi(8).unwrap(), "visible ansi");
+
+    let requests = fake.requests();
+    assert_eq!(requests[0]["method"], "agent.get");
+    assert_eq!(requests[1]["method"], "agent.read");
+    assert_eq!(requests[1]["params"]["source"], "recent_unwrapped");
+    assert_eq!(requests[2]["method"], "agent.get");
+    assert_eq!(requests[3]["method"], "pane.read");
+    assert_eq!(requests[3]["params"]["format"], "ansi");
+}
+
+#[test]
+fn ansi_reads_do_not_read_after_native_session_changes() {
+    let fake = support::ScriptedHerdr::start(vec![agent_result("s2")]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    let error = transport.recent_unwrapped_ansi(240).unwrap_err();
+
+    assert!(error.to_string().contains("session changed"));
+    assert_eq!(fake.requests().len(), 1);
+}

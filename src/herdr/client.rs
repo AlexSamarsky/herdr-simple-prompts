@@ -163,6 +163,57 @@ impl HerdrClient {
         )
     }
 
+    pub fn agent_read_recent_unwrapped_ansi(
+        &self,
+        target: &str,
+        lines: u32,
+    ) -> Result<String, HerdrError> {
+        self.read_text(
+            "agent.read",
+            json!({
+                "target": target,
+                "source": "recent_unwrapped",
+                "lines": lines,
+                "format": "ansi",
+                "strip_ansi": false
+            }),
+        )
+    }
+
+    pub fn pane_read_visible_text(&self, pane_id: &str, lines: u32) -> Result<String, HerdrError> {
+        self.read_text(
+            "pane.read",
+            json!({
+                "pane_id": pane_id,
+                "source": "visible",
+                "lines": lines,
+                "format": "text",
+                "strip_ansi": true
+            }),
+        )
+    }
+
+    pub fn pane_read_visible_ansi(&self, pane_id: &str, lines: u32) -> Result<String, HerdrError> {
+        self.read_text(
+            "pane.read",
+            json!({
+                "pane_id": pane_id,
+                "source": "visible",
+                "lines": lines,
+                "format": "ansi",
+                "strip_ansi": false
+            }),
+        )
+    }
+
+    fn read_text(&self, method: &str, params: Value) -> Result<String, HerdrError> {
+        self.call(method, params)?
+            .pointer("/read/text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| HerdrError::Protocol("read response has no read text".to_owned()))
+    }
+
     pub fn pane_send_input(
         &self,
         pane_id: &str,

@@ -2,6 +2,8 @@ use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::editor::{Editor, EditorSnapshot, EditorSubmission};
 use herdr_simple_prompts::model::{Delivery, Message};
 use herdr_simple_prompts::paste::CompactPromptOverride;
+use herdr_simple_prompts::paste::fingerprint;
+use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
 
 fn compact_submission(source: &str) -> EditorSubmission {
     let mut editor = Editor::default();
@@ -335,4 +337,151 @@ fn send_failure_restores_exact_snapshot_with_two_large_pastes() {
     restored.replace_snapshot(app.draft.clone());
     assert_eq!(restored.display_text().matches("Pasted Content").count(), 2);
     assert!(!restored.display_text().contains("private-log"));
+}
+
+#[test]
+fn final_presentation_applies_only_to_the_same_stable_id_and_text_fingerprint() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "prompt",
+        "question",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "answer",
+        "canonical",
+        Some(2),
+    )));
+    let native = MessagePresentation::NativeAnsi(vec![StyleRun {
+        start_byte: 0,
+        end_byte: "canonical".len(),
+        foreground: Some(AnsiColor::Green),
+        background: None,
+        modifiers: StyleModifiers::default(),
+    }]);
+
+    app.apply(AppEvent::FinalPresentation {
+        stable_id: "other".into(),
+        text_fingerprint: fingerprint("canonical"),
+        presentation: native.clone(),
+    });
+    app.apply(AppEvent::FinalPresentation {
+        stable_id: "answer".into(),
+        text_fingerprint: fingerprint("replaced"),
+        presentation: native.clone(),
+    });
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::MarkdownFallback
+    );
+
+    app.apply(AppEvent::FinalPresentation {
+        stable_id: "answer".into(),
+        text_fingerprint: fingerprint("canonical"),
+        presentation: native.clone(),
+    });
+
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        native
+    );
+}
+
+#[test]
+fn final_presentation_rejects_invalid_native_style_ranges_for_current_text() {
+    let invalid_runs = [
+        vec![StyleRun {
+            start_byte: 0,
+            end_byte: 99,
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+        vec![
+            StyleRun {
+                start_byte: 0,
+                end_byte: 2,
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers::default(),
+            },
+            StyleRun {
+                start_byte: 1,
+                end_byte: 3,
+                foreground: Some(AnsiColor::Red),
+                background: None,
+                modifiers: StyleModifiers::default(),
+            },
+        ],
+        vec![StyleRun {
+            start_byte: 1,
+            end_byte: 2,
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+    ];
+
+    for runs in invalid_runs {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text(
+            "prompt",
+            "question",
+            Some(1),
+        )));
+        app.apply(AppEvent::NativeFinal(Message::final_text(
+            "answer",
+            "a界b",
+            Some(2),
+        )));
+
+        app.apply(AppEvent::FinalPresentation {
+            stable_id: "answer".into(),
+            text_fingerprint: fingerprint("a界b"),
+            presentation: MessagePresentation::NativeAnsi(runs),
+        });
+
+        assert_eq!(
+            app.turns[0].final_answer.as_ref().unwrap().presentation,
+            MessagePresentation::MarkdownFallback
+        );
+    }
+}
+
+#[test]
+fn capture_fallback_never_downgrades_an_existing_native_presentation() {
+    let native = MessagePresentation::NativeAnsi(vec![StyleRun {
+        start_byte: 0,
+        end_byte: "answer".len(),
+        foreground: Some(AnsiColor::Green),
+        background: None,
+        modifiers: StyleModifiers::default(),
+    }]);
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "prompt",
+        "question",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "final",
+        "answer",
+        Some(2),
+    )));
+    app.apply(AppEvent::FinalPresentation {
+        stable_id: "final".into(),
+        text_fingerprint: fingerprint("answer"),
+        presentation: native.clone(),
+    });
+
+    app.apply(AppEvent::FinalPresentation {
+        stable_id: "final".into(),
+        text_fingerprint: fingerprint("answer"),
+        presentation: MessagePresentation::MarkdownFallback,
+    });
+
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        native
+    );
 }

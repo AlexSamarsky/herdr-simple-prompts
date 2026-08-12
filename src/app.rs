@@ -1,9 +1,10 @@
 use crate::agent::AgentStatus;
 use crate::editor::{EditorSnapshot, EditorSubmission};
 use crate::model::{Attachment, Delivery, Message, Turn};
+use crate::paste::fingerprint;
 use crate::paste::{CompactPromptOverride, canonicalize_compact_markers};
 use crate::status::StatusLine;
-use crate::style::MessagePresentation;
+use crate::style::{MessagePresentation, validate_style_runs};
 use std::time::Instant;
 
 const RECONCILE_WINDOW_MS: u64 = 30_000;
@@ -23,6 +24,11 @@ pub enum AppEvent {
     SendFailed {
         local_id: String,
         reason: String,
+    },
+    FinalPresentation {
+        stable_id: String,
+        text_fingerprint: u64,
+        presentation: MessagePresentation,
     },
 }
 
@@ -134,6 +140,34 @@ impl AppState {
                     self.draft.clone_from(recovery);
                     self.draft_attachments.clone_from(&turn.prompt.attachments);
                     turn.delivery = Delivery::Failed { reason };
+                }
+            }
+            AppEvent::FinalPresentation {
+                stable_id,
+                text_fingerprint,
+                presentation,
+            } => {
+                if let Some(message) = self
+                    .turns
+                    .iter_mut()
+                    .filter_map(|turn| turn.final_answer.as_mut())
+                    .find(|message| {
+                        message.stable_id == stable_id
+                            && fingerprint(&message.text) == text_fingerprint
+                    })
+                {
+                    let valid = match &presentation {
+                        MessagePresentation::NativeAnsi(runs) => {
+                            validate_style_runs(&message.text, runs).is_ok()
+                        }
+                        MessagePresentation::MarkdownFallback => {
+                            !matches!(message.presentation, MessagePresentation::NativeAnsi(_))
+                        }
+                        MessagePresentation::Plain => false,
+                    };
+                    if valid {
+                        message.presentation = presentation;
+                    }
                 }
             }
         }

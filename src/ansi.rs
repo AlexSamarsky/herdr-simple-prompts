@@ -1,4 +1,32 @@
-use crate::style::{AnsiColor, StyleRunBuilder, StyleState, StyledText};
+use crate::agent::AgentKind;
+use crate::style::{AnsiColor, StyleRun, StyleRunBuilder, StyleState, StyledText};
+
+struct NativeChrome {
+    role_prefixes: &'static [&'static str],
+    continuation_prefixes: &'static [&'static str],
+    separator_min_width: usize,
+    trailing_boundary_prefixes: &'static [&'static str],
+    composer_prefixes: &'static [&'static str],
+    footer_prefixes: &'static [&'static str],
+}
+
+const CODEX_CHROME: NativeChrome = NativeChrome {
+    role_prefixes: &["• "],
+    continuation_prefixes: &["  "],
+    separator_min_width: 8,
+    trailing_boundary_prefixes: &["─ Worked for "],
+    composer_prefixes: &["› "],
+    footer_prefixes: &["gpt-"],
+};
+
+const CLAUDE_CHROME: NativeChrome = NativeChrome {
+    role_prefixes: &["⏺ "],
+    continuation_prefixes: &["  "],
+    separator_min_width: 16,
+    trailing_boundary_prefixes: &[],
+    composer_prefixes: &["❯ "],
+    footer_prefixes: &["Claude", "Opus"],
+};
 
 pub fn sanitize_ansi(input: &str) -> StyledText {
     let bytes = input.as_bytes();
@@ -36,6 +64,208 @@ pub fn sanitize_ansi(input: &str) -> StyledText {
         runs: runs.finish(text.len()),
         text,
     }
+}
+
+pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Option<StyledText> {
+    if canonical.is_empty() || canonical.contains('\r') {
+        return None;
+    }
+    let sanitized = sanitize_ansi(ansi);
+    let lines = line_ranges(&sanitized.text);
+    let chrome = match kind {
+        AgentKind::Codex => &CODEX_CHROME,
+        AgentKind::Claude => &CLAUDE_CHROME,
+    };
+    let canonical_lines: Vec<&str> = canonical.split('\n').collect();
+    let mut candidates = Vec::new();
+
+    for boundary in 0..lines.len() {
+        if !is_pure_separator(
+            line_text(&sanitized.text, lines[boundary]),
+            chrome.separator_min_width,
+        ) {
+            continue;
+        }
+        let first = boundary + 1;
+        let trailing = first + canonical_lines.len();
+        let composer = trailing + 1;
+        if composer >= lines.len()
+            || !is_trailing_boundary(line_text(&sanitized.text, lines[trailing]), chrome)
+            || !starts_with_any(
+                line_text(&sanitized.text, lines[composer]),
+                chrome.composer_prefixes,
+            )
+        {
+            continue;
+        }
+
+        let mut mappings = Vec::with_capacity(canonical_lines.len() * 2);
+        let mut destination = 0;
+        let mut exact = true;
+        for (offset, canonical_line) in canonical_lines.iter().enumerate() {
+            let range = lines[first + offset];
+            let source_line = line_text(&sanitized.text, range);
+            let prefixes = if offset == 0 {
+                chrome.role_prefixes
+            } else {
+                chrome.continuation_prefixes
+            };
+            let prefix = if source_line.is_empty() && canonical_line.is_empty() {
+                ""
+            } else if let Some(prefix) = prefixes
+                .iter()
+                .copied()
+                .find(|prefix| source_line.starts_with(prefix))
+            {
+                prefix
+            } else {
+                exact = false;
+                break;
+            };
+            let content_start = range.start + prefix.len();
+            if &sanitized.text[content_start..range.end] != *canonical_line {
+                exact = false;
+                break;
+            }
+            mappings.push((content_start, range.end, destination));
+            destination += canonical_line.len();
+            if offset + 1 < canonical_lines.len() {
+                let newline_end = range.end.checked_add(1)?;
+                if sanitized.text.as_bytes().get(range.end) != Some(&b'\n') {
+                    exact = false;
+                    break;
+                }
+                mappings.push((range.end, newline_end, destination));
+                destination += 1;
+            }
+        }
+        if exact {
+            candidates.push((slice_mapped_runs(&sanitized.runs, &mappings), composer));
+        }
+    }
+
+    if candidates.len() != 1 {
+        return None;
+    }
+    let (runs, composer) = candidates.pop().expect("one candidate");
+    if lines[composer + 1..]
+        .iter()
+        .map(|range| line_text(&sanitized.text, *range))
+        .filter(|line| !line.is_empty())
+        .any(|line| !starts_with_any(line, chrome.footer_prefixes))
+    {
+        return None;
+    }
+    Some(StyledText {
+        text: canonical.to_owned(),
+        runs,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct LineRange {
+    start: usize,
+    end: usize,
+}
+
+fn line_ranges(text: &str) -> Vec<LineRange> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            ranges.push(LineRange { start, end: index });
+            start = index + 1;
+        }
+    }
+    if start < text.len() || text.ends_with('\n') {
+        ranges.push(LineRange {
+            start,
+            end: text.len(),
+        });
+    }
+    ranges
+}
+
+fn line_text(text: &str, range: LineRange) -> &str {
+    &text[range.start..range.end]
+}
+
+fn is_pure_separator(line: &str, minimum_width: usize) -> bool {
+    let width = line.chars().count();
+    width >= minimum_width && line.chars().all(|character| character == '─')
+}
+
+fn is_trailing_boundary(line: &str, chrome: &NativeChrome) -> bool {
+    is_pure_separator(line, chrome.separator_min_width)
+        || chrome
+            .trailing_boundary_prefixes
+            .iter()
+            .any(|prefix| matches_decorated_boundary(line, prefix, chrome.separator_min_width))
+}
+
+fn matches_decorated_boundary(line: &str, prefix: &str, minimum_width: usize) -> bool {
+    if line.chars().count() < minimum_width || !line.starts_with(prefix) {
+        return false;
+    }
+    let remainder = &line[prefix.len()..];
+    let Some((label, suffix)) = remainder.rsplit_once(" ") else {
+        return false;
+    };
+    valid_elapsed_label(label)
+        && !suffix.is_empty()
+        && suffix.chars().all(|character| character == '─')
+}
+
+fn valid_elapsed_label(label: &str) -> bool {
+    let mut parts = label.split_ascii_whitespace().peekable();
+    if parts.peek().is_none() {
+        return false;
+    }
+    parts.all(|part| {
+        let Some(unit) = part.chars().last() else {
+            return false;
+        };
+        matches!(unit, 'h' | 'm' | 's')
+            && part.len() > unit.len_utf8()
+            && part[..part.len() - unit.len_utf8()]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn starts_with_any(line: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| line.starts_with(prefix))
+}
+
+fn slice_mapped_runs(runs: &[StyleRun], mappings: &[(usize, usize, usize)]) -> Vec<StyleRun> {
+    let mut sliced: Vec<StyleRun> = Vec::new();
+    for &(source_start, source_end, destination_start) in mappings {
+        for run in runs {
+            let start = run.start_byte.max(source_start);
+            let end = run.end_byte.min(source_end);
+            if start >= end {
+                continue;
+            }
+            let mapped = StyleRun {
+                start_byte: destination_start + start - source_start,
+                end_byte: destination_start + end - source_start,
+                foreground: run.foreground,
+                background: run.background,
+                modifiers: run.modifiers,
+            };
+            if let Some(previous) = sliced.last_mut()
+                && previous.end_byte == mapped.start_byte
+                && previous.foreground == mapped.foreground
+                && previous.background == mapped.background
+                && previous.modifiers == mapped.modifiers
+            {
+                previous.end_byte = mapped.end_byte;
+            } else {
+                sliced.push(mapped);
+            }
+        }
+    }
+    sliced
 }
 
 fn consume_escape(
