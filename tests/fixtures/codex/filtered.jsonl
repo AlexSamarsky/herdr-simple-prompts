@@ -1,0 +1,9 @@
+{"type":"response_item","payload":{"type":"reasoning","text":"private reasoning"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"progress commentary","phase":"commentary"}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell"}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"secret tool output"}}
+{"type":"event_msg","payload":{"type":"developer_message","message":"developer context"}}
+{"type":"event_msg","payload":{"type":"system_message","message":"system context"}}
+{"type":"event_msg","payload":{"type":"approval_request","message":"approve"}}
+{"type":"event_msg","is_subagent":true,"payload":{"type":"user_message","message":"subagent prompt"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"with image","images":["/tmp/a.png"]}}

@@ -1,0 +1,3 @@
+{"timestamp":"2026-08-12T10:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"build it","images":[]}}
+{"timestamp":"2026-08-12T10:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"I am checking files","phase":"commentary"}}
+{"timestamp":"2026-08-12T10:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Built and verified.","phase":"final_answer"}}

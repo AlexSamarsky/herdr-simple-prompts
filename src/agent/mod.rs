@@ -1,3 +1,5 @@
+pub mod claude;
+pub mod codex;
 mod resolve;
 
 pub use resolve::{AgentPaths, resolve_transcript};
