@@ -3,8 +3,41 @@ use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::editor::Editor;
 use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::model::Message;
-use herdr_simple_prompts::ui::render::render_to_string;
+use herdr_simple_prompts::ui::render::{render_to_buffer, render_to_string};
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier};
 use std::time::{Duration, Instant};
+
+fn rendered_buffer(app: &AppState, width: u16, height: u16) -> Buffer {
+    render_to_buffer(app, &Editor::default(), width, height)
+}
+
+#[test]
+fn prompt_band_and_answer_label_distinguish_roles_without_color_only() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "check dns",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::text(
+        "a1",
+        "zone is pending",
+        Some(2),
+    )));
+
+    let rendered = render_to_string(&app, &Editor::default(), 50, 14);
+    let buffer = rendered_buffer(&app, 50, 14);
+
+    assert!(rendered.contains("YOU  check dns"));
+    assert!(rendered.contains("ANSWER"));
+    let prompt_row = (0..14)
+        .find(|&row| buffer[(0, row)].symbol() == "Y")
+        .expect("prompt row should start with YOU");
+    let prompt_style = buffer[(0, prompt_row)].style();
+    assert_eq!(prompt_style.bg, Some(Color::DarkGray));
+    assert!(prompt_style.add_modifier.contains(Modifier::BOLD));
+}
 
 #[test]
 fn working_prompt_is_above_composer_and_footer() {

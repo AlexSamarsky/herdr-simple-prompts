@@ -5,11 +5,52 @@ use crate::model::Delivery;
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::time::Instant;
+
+const PROMPT_BG: Color = Color::DarkGray;
+const PROMPT_FG: Color = Color::White;
+const ANSWER_FG: Color = Color::Green;
+const PROMPT_PREFIX: &str = "YOU  ";
+const ANSWER_PREFIX: &str = "ANSWER  ";
+
+#[derive(Clone, Debug)]
+struct HistoryRow {
+    line: Line<'static>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PromptSection {
+    start_row: u16,
+    prompt_rows: u16,
+    end_row: u16,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HistoryDocument {
+    rows: Vec<HistoryRow>,
+    prompts: Vec<PromptSection>,
+}
+
+impl HistoryDocument {
+    fn text(&self) -> Text<'static> {
+        debug_assert!(self.prompts.iter().all(|section| {
+            section.prompt_rows > 0
+                && section.start_row.saturating_add(section.prompt_rows) <= section.end_row
+                && usize::from(section.end_row) <= self.rows.len()
+        }));
+        Text::from(
+            self.rows
+                .iter()
+                .map(|row| row.line.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+}
 
 pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
     let area = frame.area();
@@ -31,7 +72,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
         ])
         .split(area);
 
-    let history = history_text(app);
+    let history = build_history_document(app).text();
     let history_height = wrapped_history_height(&history, areas[0].width);
     let top = history_height
         .saturating_sub(areas[0].height)
@@ -124,45 +165,81 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState, editor: &Editor) {
     frame.set_cursor_position((cursor_column, cursor_row));
 }
 
-fn history_text(app: &AppState) -> Text<'static> {
-    let mut lines = Vec::new();
+fn build_history_document(app: &AppState) -> HistoryDocument {
+    let mut document = HistoryDocument::default();
     for turn in &app.turns {
-        push_prefixed_text(&mut lines, "› ", &turn.prompt.text, Color::Cyan);
-        for (index, attachment) in turn.prompt.attachments.iter().enumerate() {
-            lines.push(Line::from(format!(
-                "  [Image #{}] {}",
-                index + 1,
-                attachment.display
-            )));
-        }
+        let start_row = document_row_count(&document);
+        let mut prompt_lines = turn
+            .prompt
+            .text
+            .split('\n')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let first_attachment_on_prompt_row = turn.prompt.text.is_empty()
+            && turn.prompt.attachments.first().is_some_and(|attachment| {
+                prompt_lines[0] = format!("[Image #1] {}", attachment.display);
+                true
+            });
+        prompt_lines.extend(
+            turn.prompt
+                .attachments
+                .iter()
+                .enumerate()
+                .skip(usize::from(first_attachment_on_prompt_row))
+                .map(|(index, attachment)| {
+                    format!("[Image #{}] {}", index + 1, attachment.display)
+                }),
+        );
         if let Delivery::Failed { reason } = &turn.delivery {
-            lines.push(Line::styled(
-                format!("  not sent: {reason}"),
-                Style::default().fg(Color::Red),
-            ));
+            prompt_lines.push(format!("not sent: {reason}"));
         }
+
+        let prompt_style = Style::default().fg(PROMPT_FG).bg(PROMPT_BG);
+        for (index, content) in prompt_lines.into_iter().enumerate() {
+            let prefix = if index == 0 {
+                Span::styled(PROMPT_PREFIX, Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                Span::raw(" ".repeat(PROMPT_PREFIX.len()))
+            };
+            document.rows.push(HistoryRow {
+                line: Line::from(vec![prefix, Span::raw(content)]).style(prompt_style),
+            });
+        }
+        let prompt_rows = document_row_count(&document).saturating_sub(start_row);
+
         if let Some(answer) = &turn.final_answer {
-            push_prefixed_text(&mut lines, "• ", &answer.text, Color::Green);
+            push_answer(&mut document.rows, &answer.text);
         }
-        lines.push(Line::default());
+        document.rows.push(HistoryRow {
+            line: Line::default(),
+        });
+        document.prompts.push(PromptSection {
+            start_row,
+            prompt_rows,
+            end_row: document_row_count(&document),
+        });
     }
-    Text::from(lines)
+    document
 }
 
-fn push_prefixed_text(lines: &mut Vec<Line<'static>>, prefix: &str, text: &str, color: Color) {
+fn push_answer(rows: &mut Vec<HistoryRow>, text: &str) {
     for (index, text_line) in text.split('\n').enumerate() {
-        lines.push(Line::from(vec![
+        let prefix = if index == 0 {
             Span::styled(
-                if index == 0 {
-                    prefix.to_owned()
-                } else {
-                    "  ".to_owned()
-                },
-                Style::default().fg(color),
-            ),
-            Span::raw(text_line.to_owned()),
-        ]));
+                ANSWER_PREFIX,
+                Style::default().fg(ANSWER_FG).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(" ".repeat(ANSWER_PREFIX.len()))
+        };
+        rows.push(HistoryRow {
+            line: Line::from(vec![prefix, Span::raw(text_line.to_owned())]),
+        });
     }
+}
+
+fn document_row_count(document: &HistoryDocument) -> u16 {
+    u16::try_from(document.rows.len()).unwrap_or(u16::MAX)
 }
 
 fn wrapped_history_height(history: &Text<'_>, width: u16) -> u16 {
@@ -253,11 +330,15 @@ fn editor_cursor(area: Rect, content_row: u16, column: u16, scroll: u16) -> (u16
     )
 }
 
-pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16) -> String {
+pub fn render_to_buffer(app: &AppState, editor: &Editor, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, app, editor)).unwrap();
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16) -> String {
+    let buffer = render_to_buffer(app, editor, width, height);
     let mut output = String::new();
     for y in 0..height {
         for x in 0..width {
