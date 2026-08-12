@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod app;
+pub mod editor;
 mod error;
 pub mod herdr;
 pub mod model;
