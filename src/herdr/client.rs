@@ -1,10 +1,14 @@
 use super::protocol::{ApiError, Request, Response};
 use serde_json::{Value, json};
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum HerdrError {
@@ -51,6 +55,7 @@ impl From<serde_json::Error> for HerdrError {
 pub struct HerdrClient {
     socket_path: PathBuf,
     next_id: AtomicU64,
+    timeout: Duration,
 }
 
 impl HerdrClient {
@@ -65,11 +70,19 @@ impl HerdrClient {
         Ok(Self {
             socket_path,
             next_id: AtomicU64::new(1),
+            timeout: DEFAULT_TIMEOUT,
         })
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub fn call(&self, method: &str, params: Value) -> Result<Value, HerdrError> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
+        stream.set_read_timeout(Some(self.timeout))?;
+        stream.set_write_timeout(Some(self.timeout))?;
         let id = format!(
             "herdr-simple-prompts-{}",
             self.next_id.fetch_add(1, Ordering::Relaxed)
@@ -85,12 +98,24 @@ impl HerdrClient {
         stream.write_all(b"\n")?;
         stream.flush()?;
 
-        let mut line = String::new();
-        let bytes = BufReader::new(stream).read_line(&mut line)?;
+        let mut line = Vec::new();
+        let bytes = BufReader::new(stream)
+            .take(MAX_RESPONSE_BYTES + 1)
+            .read_until(b'\n', &mut line)?;
         if bytes == 0 {
             return Err(HerdrError::Protocol("unexpected EOF".to_owned()));
         }
-        let response: Response = serde_json::from_str(&line)?;
+        if line.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err(HerdrError::Protocol(format!(
+                "response exceeds {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
+        if line.last() != Some(&b'\n') {
+            return Err(HerdrError::Protocol(
+                "response ended before newline".to_owned(),
+            ));
+        }
+        let response: Response = serde_json::from_slice(&line)?;
         if response.id != id {
             return Err(HerdrError::Protocol(format!(
                 "response id mismatch: expected {id}, received {}",
@@ -170,11 +195,13 @@ impl HerdrClient {
             .ok_or_else(|| HerdrError::Protocol("plugin pane response has no pane id".to_owned()))
     }
 
-    pub fn plugin_pane_focus(&self, pane_id: &str) -> Result<Value, HerdrError> {
-        self.call("plugin.pane.focus", json!({"pane_id": pane_id}))
+    pub fn plugin_pane_focus(&self, pane_id: &str) -> Result<(), HerdrError> {
+        self.call("plugin.pane.focus", json!({"pane_id": pane_id}))?;
+        Ok(())
     }
 
-    pub fn plugin_pane_close(&self, pane_id: &str) -> Result<Value, HerdrError> {
-        self.call("plugin.pane.close", json!({"pane_id": pane_id}))
+    pub fn plugin_pane_close(&self, pane_id: &str) -> Result<(), HerdrError> {
+        self.call("plugin.pane.close", json!({"pane_id": pane_id}))?;
+        Ok(())
     }
 }

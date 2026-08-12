@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
@@ -17,6 +17,14 @@ pub struct FakeHerdr {
 
 impl FakeHerdr {
     pub fn start(handler: impl FnOnce(Value) -> Value + Send + 'static) -> Self {
+        Self::start_raw(move |request, stream| {
+            let response = handler(request);
+            serde_json::to_writer(&mut *stream, &response).unwrap();
+            stream.write_all(b"\n").unwrap();
+        })
+    }
+
+    pub fn start_raw(handler: impl FnOnce(Value, &mut UnixStream) + Send + 'static) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "herdr-simple-prompts-test-{}-{}",
             std::process::id(),
@@ -32,9 +40,7 @@ impl FakeHerdr {
                 .read_line(&mut request)
                 .unwrap();
             let request = serde_json::from_str(&request).unwrap();
-            let response = handler(request);
-            serde_json::to_writer(&mut stream, &response).unwrap();
-            stream.write_all(b"\n").unwrap();
+            handler(request, &mut stream);
         });
         Self {
             directory,

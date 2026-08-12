@@ -46,7 +46,7 @@ fn resolves_codex_session_by_native_id_under_codex_home() {
 
     assert_eq!(
         resolve_transcript(AgentKind::Codex, "session-123", &paths).unwrap(),
-        wanted
+        std::fs::canonicalize(wanted).unwrap()
     );
 }
 
@@ -59,7 +59,7 @@ fn resolves_claude_exact_filename_and_ignores_similar_session() {
 
     assert_eq!(
         resolve_transcript(AgentKind::Claude, "session-123", &paths).unwrap(),
-        wanted
+        std::fs::canonicalize(wanted).unwrap()
     );
 }
 
@@ -72,6 +72,15 @@ fn rejects_unsafe_or_ambiguous_session_resolution() {
 
     assert!(resolve_transcript(AgentKind::Codex, "../escape", &paths).is_err());
     assert!(resolve_transcript(AgentKind::Codex, "session-123", &paths).is_err());
+}
+
+#[test]
+fn codex_session_id_must_match_the_filename_suffix_boundary() {
+    let root = TestTree::new();
+    root.file("codex/sessions/a/rollout-abc2.jsonl");
+    let paths = AgentPaths::new(root.path("home"), Some(root.path("codex")), None);
+
+    assert!(resolve_transcript(AgentKind::Codex, "abc", &paths).is_err());
 }
 
 #[test]

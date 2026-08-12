@@ -1,5 +1,6 @@
 use super::AgentKind;
 use crate::{AppError, AppResult};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -51,14 +52,24 @@ pub fn resolve_transcript(
     paths: &AgentPaths,
 ) -> AppResult<PathBuf> {
     validate_session_id(session_id)?;
-    let root = paths.root_for(kind);
+    let configured_root = paths.root_for(kind);
+    let root = std::fs::canonicalize(&configured_root).map_err(|error| {
+        AppError::new(
+            "transcript",
+            format!("cannot resolve {}: {error}", configured_root.display()),
+        )
+    })?;
     let mut matches = Vec::new();
-    visit_files(&root, &mut |path| {
+    let mut visited = HashSet::new();
+    visit_files(&root, &root, &mut visited, &mut |path| {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             return;
         };
         let matches_session = match kind {
-            AgentKind::Codex => file_name.ends_with(".jsonl") && file_name.contains(session_id),
+            AgentKind::Codex => {
+                file_name == format!("{session_id}.jsonl")
+                    || file_name.ends_with(&format!("-{session_id}.jsonl"))
+            }
             AgentKind::Claude => file_name == format!("{session_id}.jsonl"),
         };
         if matches_session {
@@ -97,31 +108,45 @@ fn validate_session_id(session_id: &str) -> AppResult<()> {
     }
 }
 
-fn visit_files(root: &Path, visitor: &mut impl FnMut(&Path)) -> AppResult<()> {
-    let metadata = std::fs::symlink_metadata(root).map_err(|error| {
+fn visit_files(
+    path: &Path,
+    allowed_root: &Path,
+    visited: &mut HashSet<PathBuf>,
+    visitor: &mut impl FnMut(&Path),
+) -> AppResult<()> {
+    let resolved = std::fs::canonicalize(path).map_err(|error| {
         AppError::new(
             "transcript",
-            format!("cannot inspect {}: {error}", root.display()),
+            format!("cannot resolve {}: {error}", path.display()),
         )
     })?;
-    if metadata.file_type().is_symlink() {
+    if !resolved.starts_with(allowed_root) {
         return Ok(());
     }
+    let metadata = std::fs::metadata(&resolved).map_err(|error| {
+        AppError::new(
+            "transcript",
+            format!("cannot inspect {}: {error}", resolved.display()),
+        )
+    })?;
     if metadata.is_file() {
-        visitor(root);
+        visitor(&resolved);
         return Ok(());
     }
     if !metadata.is_dir() {
         return Ok(());
     }
-    for entry in std::fs::read_dir(root).map_err(|error| {
+    if !visited.insert(resolved.clone()) {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&resolved).map_err(|error| {
         AppError::new(
             "transcript",
-            format!("cannot read {}: {error}", root.display()),
+            format!("cannot read {}: {error}", resolved.display()),
         )
     })? {
         let entry = entry.map_err(|error| AppError::new("transcript", error.to_string()))?;
-        visit_files(&entry.path(), visitor)?;
+        visit_files(&entry.path(), allowed_root, visited, visitor)?;
     }
     Ok(())
 }
