@@ -1,6 +1,8 @@
 pub mod agent;
+pub mod app;
 mod error;
 pub mod herdr;
+pub mod model;
 
 pub use error::AppError;
 

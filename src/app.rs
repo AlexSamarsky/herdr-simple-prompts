@@ -1,0 +1,118 @@
+use crate::model::{Attachment, Delivery, Message, Turn};
+
+const RECONCILE_WINDOW_MS: u64 = 30_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppEvent {
+    PromptSubmitted {
+        local_id: String,
+        text: String,
+        attachments: Vec<Attachment>,
+        at_ms: u64,
+    },
+    NativeUser(Message),
+    NativeFinal(Message),
+    SendFailed {
+        local_id: String,
+        reason: String,
+    },
+}
+
+#[derive(Default)]
+pub struct AppState {
+    pub turns: Vec<Turn>,
+    pub draft: String,
+    pub draft_attachments: Vec<Attachment>,
+}
+
+impl AppState {
+    pub fn apply(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::PromptSubmitted {
+                local_id,
+                text,
+                attachments,
+                at_ms,
+            } => {
+                self.draft.clear();
+                self.draft_attachments.clear();
+                self.turns.push(Turn {
+                    prompt: Message {
+                        stable_id: local_id.clone(),
+                        text,
+                        attachments,
+                        timestamp_ms: Some(at_ms),
+                    },
+                    final_answer: None,
+                    delivery: Delivery::Optimistic {
+                        local_id,
+                        submitted_at_ms: at_ms,
+                    },
+                });
+            }
+            AppEvent::NativeUser(message) => self.reconcile_user(message),
+            AppEvent::NativeFinal(message) => {
+                if let Some(turn) = self
+                    .turns
+                    .iter_mut()
+                    .find(|turn| turn.delivery == Delivery::Native && turn.final_answer.is_none())
+                {
+                    turn.final_answer = Some(message);
+                }
+            }
+            AppEvent::SendFailed { local_id, reason } => {
+                if let Some(turn) = self.turns.iter_mut().find(|turn| {
+                    matches!(
+                        &turn.delivery,
+                        Delivery::Optimistic { local_id: candidate, .. } if candidate == &local_id
+                    )
+                }) {
+                    self.draft.clone_from(&turn.prompt.text);
+                    self.draft_attachments.clone_from(&turn.prompt.attachments);
+                    turn.delivery = Delivery::Failed { reason };
+                }
+            }
+        }
+    }
+
+    fn reconcile_user(&mut self, message: Message) {
+        if let Some(turn) = self.turns.iter_mut().find(|turn| {
+            let Delivery::Optimistic {
+                submitted_at_ms, ..
+            } = turn.delivery
+            else {
+                return false;
+            };
+            normalized_text(&turn.prompt.text) == normalized_text(&message.text)
+                && turn.prompt.attachments.len() == message.attachments.len()
+                && timestamps_match(
+                    Some(submitted_at_ms),
+                    message.timestamp_ms,
+                    RECONCILE_WINDOW_MS,
+                )
+        }) {
+            turn.prompt = message;
+            turn.delivery = Delivery::Native;
+        } else {
+            self.turns.push(Turn {
+                prompt: message,
+                final_answer: None,
+                delivery: Delivery::Native,
+            });
+        }
+    }
+}
+
+fn normalized_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end()
+        .to_owned()
+}
+
+fn timestamps_match(left: Option<u64>, right: Option<u64>, window_ms: u64) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.abs_diff(right) <= window_ms,
+        _ => true,
+    }
+}
