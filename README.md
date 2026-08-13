@@ -83,9 +83,9 @@ long answer remains reachable instead of being wrapped a second time by the
 terminal widget.
 
 - Each user prompt is a full-width neutral-gray block. Its existing top gray
-  row shows the prompt's local `DD.MM.YYYY HH:MM` timestamp, and one blank gray
-  row remains below the text. There is no `YOU` label. Legacy records without a
-  valid timestamp keep the top row blank.
+  row shows the prompt's local `DD.MM.YYYY HH:MM` timestamp in undimmed gray,
+  and one blank gray row remains below the text. There is no `YOU` label. Legacy
+  records without a valid timestamp keep the top row blank.
 - Each final answer begins with its local `DD.MM.YYYY HH:MM` timestamp on one
   undimmed gray, unboxed row on the normal terminal surface, followed
   immediately by the styled answer text. There is no `ANSWER` label or answer

@@ -115,7 +115,7 @@ impl HistoryDocument {
                 format_timestamp(turn.prompt.timestamp_ms).as_deref(),
                 prompt_fill(),
                 width,
-                true,
+                false,
             ));
             let content_start_row = document.rows.len();
             let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);

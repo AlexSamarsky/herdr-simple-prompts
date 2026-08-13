@@ -87,7 +87,7 @@ fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
         document.rows[0].spans[0].style.foreground,
         Some(AnsiColor::BrightBlack)
     );
-    assert!(document.rows[0].spans[0].style.modifiers.dim);
+    assert!(!document.rows[0].spans[0].style.modifiers.dim);
 }
 
 #[test]

@@ -29,8 +29,8 @@ honors the local offset that applied at the answer instant, including DST.
 - Clip the timestamp to the available terminal width so it always occupies at
   most one visual row.
 - Use an ANSI `BrightBlack` foreground without `dim` on the ordinary terminal
-  surface. This is brighter than the prompt timestamp's existing
-  `BrightBlack + dim` treatment but below the answer body's `BrightWhite`
+  surface. The prompt timestamp uses the same undimmed gray after the follow-up
+  contrast adjustment; both remain below the answer body's `BrightWhite`
   default.
 - Keep the answer's existing native ANSI or Markdown fallback body unchanged.
 - Keep prompt bands, sticky prompt behavior, bottom-following, and scrolling
