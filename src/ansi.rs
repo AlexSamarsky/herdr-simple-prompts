@@ -283,7 +283,8 @@ fn consume_escape(
         b']' => consume_osc(bytes, start),
         b'P' | b'_' | b'^' => consume_st_string(bytes, start + 2),
         0x20..=0x2f => consume_escape_with_intermediate(bytes, start + 2),
-        _ => (start + 2).min(bytes.len()),
+        _ if kind.is_ascii() => (start + 2).min(bytes.len()),
+        _ => start + 1,
     }
 }
 

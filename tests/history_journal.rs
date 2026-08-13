@@ -9,6 +9,7 @@ use herdr_simple_prompts::paste::{LARGE_PASTE_CHARS, fingerprint};
 use herdr_simple_prompts::state::StateStore;
 use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 
 fn test_root(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -154,6 +155,105 @@ fn incomplete_final_line_is_ignored_until_terminated() {
 
     assert_eq!(journal.load().unwrap(), vec![first]);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn append_repairs_an_incomplete_tail_before_writing_the_next_record() {
+    let root = test_root("repair-incomplete");
+    let _ = std::fs::remove_dir_all(&root);
+    let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
+    let first = prompt("u1", "u1", 1, "safe");
+    let next = prompt("u3", "u3", 3, "after recovery");
+    journal.append(&first).unwrap();
+    let mut partial = serde_json::to_vec(&prompt("u2", "u2", 2, "partial")).unwrap();
+    partial.truncate(partial.len() / 2);
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal.path())
+        .unwrap()
+        .write_all(&partial)
+        .unwrap();
+
+    journal.append(&next).unwrap();
+
+    assert_eq!(journal.load().unwrap(), vec![first, next]);
+    assert_eq!(std::fs::read(journal.path()).unwrap().last(), Some(&b'\n'));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn append_rejects_symlinked_history_components_and_journal_files() {
+    let root = test_root("append-symlink");
+    let external = test_root("append-symlink-external");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    let external_file = external.join("keep.jsonl");
+    std::fs::write(&external_file, b"external\n").unwrap();
+    symlink(&external, root.join("history")).unwrap();
+    let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
+
+    assert!(journal.append(&prompt("u1", "u1", 1, "question")).is_err());
+    assert_eq!(std::fs::read(&external_file).unwrap(), b"external\n");
+
+    std::fs::remove_file(root.join("history")).unwrap();
+    std::fs::create_dir_all(root.join("history/w1_p1")).unwrap();
+    symlink(&external_file, journal.path()).unwrap();
+    assert!(journal.append(&prompt("u2", "u2", 2, "answer")).is_err());
+    assert_eq!(std::fs::read(&external_file).unwrap(), b"external\n");
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(external).unwrap();
+}
+
+#[test]
+fn load_rejects_a_symlinked_state_root() {
+    let root = test_root("load-root-symlink");
+    let external = test_root("load-root-symlink-external");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(external.join("history/w1_p1")).unwrap();
+    std::fs::write(
+        external.join("history/w1_p1/session-1.jsonl"),
+        b"external\n",
+    )
+    .unwrap();
+    symlink(&external, &root).unwrap();
+    let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
+
+    assert!(journal.load().is_err());
+    assert_eq!(
+        std::fs::read(external.join("history/w1_p1/session-1.jsonl")).unwrap(),
+        b"external\n"
+    );
+    std::fs::remove_file(root).unwrap();
+    std::fs::remove_dir_all(external).unwrap();
+}
+
+#[test]
+fn load_rejects_symlinked_history_and_pane_ancestors() {
+    let root = test_root("load-ancestor-symlink");
+    let external = test_root("load-ancestor-symlink-external");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(external.join("w1_p1")).unwrap();
+    std::fs::write(external.join("w1_p1/session-1.jsonl"), b"external\n").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    symlink(&external, root.join("history")).unwrap();
+    let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
+    assert!(journal.load().is_err());
+
+    std::fs::remove_file(root.join("history")).unwrap();
+    std::fs::create_dir_all(root.join("history")).unwrap();
+    symlink(external.join("w1_p1"), root.join("history/w1_p1")).unwrap();
+    assert!(journal.load().is_err());
+    assert_eq!(
+        std::fs::read(external.join("w1_p1/session-1.jsonl")).unwrap(),
+        b"external\n"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(external).unwrap();
 }
 
 #[test]

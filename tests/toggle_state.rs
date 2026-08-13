@@ -714,3 +714,69 @@ fn validation_refuses_symlinked_namespace_metadata_and_preserves_external_target
     std::fs::remove_dir_all(directory).unwrap();
     std::fs::remove_dir_all(external).unwrap();
 }
+
+#[test]
+fn state_writes_reject_a_symlinked_root_and_ignore_predictable_temp_symlinks() {
+    let directory = test_state_directory("state-write-symlink");
+    let external = test_state_directory("state-write-symlink-external");
+    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(&external).unwrap();
+    let external_file = external.join("keep.json");
+    std::fs::write(&external_file, b"external\n").unwrap();
+    symlink(&external, &directory).unwrap();
+
+    assert!(
+        StateStore::at(&directory)
+            .save_overlay("w1:p1", "w1:p9")
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&external_file).unwrap(), b"external\n");
+
+    std::fs::remove_file(&directory).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    let predictable = directory.join(format!("registry.tmp-{}", std::process::id()));
+    symlink(&external_file, &predictable).unwrap();
+    StateStore::at(&directory)
+        .save_overlay("w1:p1", "w1:p9")
+        .unwrap();
+    assert_eq!(std::fs::read(&external_file).unwrap(), b"external\n");
+    assert!(
+        std::fs::symlink_metadata(&predictable)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+    std::fs::remove_dir_all(external).unwrap();
+}
+
+#[test]
+fn cleanup_and_draft_reads_reject_a_symlinked_state_root() {
+    let directory = test_state_directory("state-root-cleanup-symlink");
+    let external = test_state_directory("state-root-cleanup-symlink-external");
+    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&external);
+    std::fs::create_dir_all(external.join("history/w1_p1")).unwrap();
+    std::fs::write(external.join("draft-w1_p1.json"), b"external draft\n").unwrap();
+    std::fs::write(
+        external.join("history/w1_p1/session-1.jsonl"),
+        b"external history\n",
+    )
+    .unwrap();
+    symlink(&external, &directory).unwrap();
+    let store = StateStore::at(&directory);
+
+    assert!(store.load_draft("w1:p1").is_err());
+    assert!(store.remove_pane_state("w1:p1").is_err());
+    assert_eq!(
+        std::fs::read(external.join("draft-w1_p1.json")).unwrap(),
+        b"external draft\n"
+    );
+    assert_eq!(
+        std::fs::read(external.join("history/w1_p1/session-1.jsonl")).unwrap(),
+        b"external history\n"
+    );
+    std::fs::remove_file(directory).unwrap();
+    std::fs::remove_dir_all(external).unwrap();
+}

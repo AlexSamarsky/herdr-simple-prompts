@@ -117,7 +117,9 @@ pub fn run_from_env() -> AppResult<()> {
     loop {
         while let Some(event) = runtime.try_recv() {
             if matches!(&event, RuntimeEvent::SourcePaneClosed) {
-                drop(history_writer.take());
+                if let Some(writer) = history_writer.take() {
+                    writer.cancel();
+                }
                 drop(draft_writer.take());
                 if let Err(error) = state_store.remove_pane_state(&source_pane) {
                     app.transcript_error = Some(format!("source cleanup: {error}"));
@@ -227,10 +229,12 @@ pub fn run_from_env() -> AppResult<()> {
             Event::Mouse(mouse) => match mouse.kind {
                 _ if app.agent_status == AgentStatus::Blocked => {}
                 MouseEventKind::ScrollUp => {
-                    app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(3)
+                    history_cache.scroll_up(3);
+                    app.scroll_from_bottom = history_cache.scroll_from_bottom();
                 }
                 MouseEventKind::ScrollDown => {
-                    app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(3)
+                    history_cache.scroll_down(3);
+                    app.scroll_from_bottom = history_cache.scroll_from_bottom();
                 }
                 _ => {}
             },
@@ -363,11 +367,13 @@ fn handle_key(
             DraftChange::None
         }
         (KeyCode::PageUp, _) => {
-            app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(5);
+            history_cache.scroll_up(5);
+            app.scroll_from_bottom = history_cache.scroll_from_bottom();
             DraftChange::None
         }
         (KeyCode::PageDown, _) => {
-            app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(5);
+            history_cache.scroll_down(5);
+            app.scroll_from_bottom = history_cache.scroll_from_bottom();
             DraftChange::None
         }
         (KeyCode::Char(character), modifiers)

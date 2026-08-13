@@ -1,20 +1,27 @@
 use crate::ansi::sanitize_ansi;
 use crate::model::{Attachment, Message};
 use crate::paste::fingerprint;
-use crate::state::safe_state_component;
+use crate::state::{
+    ensure_private_directory, nofollow_flag, reject_symlink, safe_state_component,
+    validate_private_directory, validate_regular_file,
+};
 use crate::style::{MessagePresentation, StyleRun, validate_style_runs};
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 const HISTORY_VERSION: u8 = 1;
+const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(2);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+const WRITER_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,10 +236,22 @@ impl HistoryJournal {
     }
 
     pub fn load(&self) -> AppResult<Vec<VisibleHistoryRecord>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
+        for directory in &self.directories {
+            if !validate_private_directory(directory)? {
+                return Ok(Vec::new());
+            }
         }
-        let file = OpenOptions::new().read(true).open(&self.path)?;
+        match std::fs::symlink_metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        reject_symlink(&self.path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nofollow_flag())
+            .open(&self.path)?;
+        validate_regular_file(&file, &self.path)?;
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut line_number = 0_u64;
@@ -268,29 +287,81 @@ impl HistoryJournal {
     }
 
     pub fn append(&self, record: &VisibleHistoryRecord) -> AppResult<()> {
+        if self.append_cancellable(record, || false)? {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "history journal",
+                "journal append was cancelled",
+            ))
+        }
+    }
+
+    fn append_cancellable(
+        &self,
+        record: &VisibleHistoryRecord,
+        cancelled: impl Fn() -> bool,
+    ) -> AppResult<bool> {
         record.validate()?;
         let mut bytes = serde_json::to_vec(record)?;
         bytes.push(b'\n');
         self.ensure_private_directories()?;
+        reject_symlink(&self.path)?;
         let mut file = OpenOptions::new()
             .append(true)
             .create(true)
+            .read(true)
             .mode(0o600)
+            .custom_flags(nofollow_flag())
             .open(&self.path)?;
-        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
-        let _lock = FileLock::exclusive(&file)?;
+        validate_regular_file(&file, &self.path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        let Some(_lock) = FileLock::exclusive(&file, &cancelled)? else {
+            return Ok(false);
+        };
+        truncate_incomplete_tail(&mut file)?;
         file.write_all(&bytes)?;
         file.sync_data()?;
-        Ok(())
+        Ok(true)
     }
 
     fn ensure_private_directories(&self) -> AppResult<()> {
         for directory in &self.directories {
-            std::fs::create_dir_all(directory)?;
-            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+            ensure_private_directory(directory)?;
         }
         Ok(())
     }
+}
+
+fn truncate_incomplete_tail(file: &mut File) -> AppResult<()> {
+    let length = file.metadata()?.len();
+    if length == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    let mut cursor = length;
+    let mut buffer = [0_u8; 8 * 1024];
+    while cursor > 0 {
+        let chunk = usize::try_from(cursor.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let start = cursor - chunk as u64;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buffer[..chunk])?;
+        if let Some(index) = buffer[..chunk].iter().rposition(|byte| *byte == b'\n') {
+            file.set_len(start + index as u64 + 1)?;
+            file.seek(SeekFrom::End(0))?;
+            return Ok(());
+        }
+        cursor = start;
+    }
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(())
 }
 
 struct FileLock {
@@ -298,10 +369,27 @@ struct FileLock {
 }
 
 impl FileLock {
-    fn exclusive(file: &std::fs::File) -> AppResult<Self> {
+    fn exclusive(file: &std::fs::File, cancelled: impl Fn() -> bool) -> AppResult<Option<Self>> {
         let fd = file.as_raw_fd();
-        flock(fd, LOCK_EX)?;
-        Ok(Self { fd })
+        let deadline = Instant::now() + LOCK_WAIT_LIMIT;
+        loop {
+            if cancelled() {
+                return Ok(None);
+            }
+            match flock(fd, LOCK_EX | LOCK_NB) {
+                Ok(()) => return Ok(Some(Self { fd })),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(AppError::new(
+                            "history journal",
+                            "timed out waiting for the journal lock",
+                        ));
+                    }
+                    thread::sleep(LOCK_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 }
 
@@ -313,6 +401,7 @@ impl Drop for FileLock {
 
 const LOCK_EX: std::os::raw::c_int = 2;
 const LOCK_UN: std::os::raw::c_int = 8;
+const LOCK_NB: std::os::raw::c_int = 4;
 
 fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::io::Result<()> {
     unsafe extern "C" {
@@ -332,6 +421,7 @@ fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::io::Re
 struct HistorySlot {
     pending: BTreeMap<(VisibleRole, String), VisibleHistoryRecord>,
     shutdown: bool,
+    cancel: bool,
 }
 
 pub struct HistoryWriter {
@@ -356,19 +446,52 @@ impl HistoryWriter {
                             .wait(state)
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                     }
+                    if state.cancel {
+                        break;
+                    }
                     if state.pending.is_empty() && state.shutdown {
                         break;
                     }
                     std::mem::take(&mut state.pending)
                 };
-                for record in pending.into_values() {
-                    if let Err(write_error) = journal.append(&record) {
-                        let mut first_error = worker_error
+                let mut records = pending.into_iter();
+                while let Some((key, record)) = records.next() {
+                    let append = journal.append_cancellable(&record, || {
+                        worker_slot
+                            .0
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if first_error.is_none() {
-                            *first_error = Some(write_error.to_string());
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .cancel
+                    });
+                    if matches!(append, Ok(false)) {
+                        return;
+                    }
+                    if let Err(write_error) = append {
+                        {
+                            let mut first_error = worker_error
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if first_error.is_none() {
+                                *first_error = Some(write_error.to_string());
+                            }
                         }
+                        let (lock, ready) = &*worker_slot;
+                        let mut state =
+                            lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if state.cancel || state.shutdown {
+                            return;
+                        }
+                        state.pending.entry(key).or_insert(record);
+                        for (remaining_key, remaining_record) in records {
+                            state
+                                .pending
+                                .entry(remaining_key)
+                                .or_insert(remaining_record);
+                        }
+                        let _ = ready
+                            .wait_timeout(state, WRITER_RETRY_BACKOFF)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        break;
                     }
                 }
             }
@@ -393,6 +516,19 @@ impl HistoryWriter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
+    }
+
+    pub fn cancel(mut self) {
+        let (lock, ready) = &*self.slot;
+        let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending.clear();
+        state.cancel = true;
+        state.shutdown = true;
+        ready.notify_one();
+        drop(state);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -430,4 +566,100 @@ fn sanitize_display_label(display: &str) -> String {
         .chars()
         .filter(|character| !character.is_control())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FileLock, HistoryJournal, HistoryWriter, LOCK_WAIT_LIMIT, PersistedPresentation,
+        VisibleHistoryRecord, VisibleRole,
+    };
+    use crate::paste::fingerprint;
+    use std::fs::OpenOptions;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn exclusive_lock_wait_is_bounded_and_cancellable() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-simple-prompts-lock-timeout-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let first_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let second_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let _first = FileLock::exclusive(&first_file, || false)
+            .unwrap()
+            .expect("first lock should be acquired");
+
+        let started = Instant::now();
+        assert!(FileLock::exclusive(&second_file, || false).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+
+        let started = Instant::now();
+        assert!(
+            FileLock::exclusive(&second_file, || true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn writer_recovers_after_a_transient_lock_timeout() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-simple-prompts-lock-recovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
+        let first = VisibleHistoryRecord {
+            version: 1,
+            role: VisibleRole::Prompt,
+            stable_id: "u1".into(),
+            turn_id: "u1".into(),
+            order: 1,
+            text: "first".into(),
+            attachments: Vec::new(),
+            timestamp_ms: Some(1),
+            text_fingerprint: fingerprint("first"),
+            presentation: PersistedPresentation::Plain,
+        };
+        journal.append(&first).unwrap();
+        let locked_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(journal.path())
+            .unwrap();
+        let lock = FileLock::exclusive(&locked_file, || false)
+            .unwrap()
+            .expect("test lock should be acquired");
+        let writer = HistoryWriter::spawn(journal.clone());
+        writer.queue(first.clone());
+        std::thread::sleep(LOCK_WAIT_LIMIT + Duration::from_millis(100));
+        assert!(writer.take_error().is_some());
+
+        drop(lock);
+        let mut second = first.clone();
+        second.stable_id = "u2".into();
+        second.turn_id = "u2".into();
+        second.order = 2;
+        second.text = "second".into();
+        second.text_fingerprint = fingerprint("second");
+        writer.queue(second.clone());
+        drop(writer);
+
+        assert_eq!(journal.load().unwrap(), vec![first, second]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

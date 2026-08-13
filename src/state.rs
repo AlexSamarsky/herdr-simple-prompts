@@ -6,16 +6,28 @@ use crate::paste::CompactPromptOverride;
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PANE_NAMESPACE_VERSION: u8 = 1;
 const DRAFT_VERSION: u8 = 3;
 const ORPHAN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x0000_0100;
+#[cfg(target_os = "linux")]
+const O_DIRECTORY: i32 = 0o200000;
+#[cfg(target_os = "macos")]
+const O_DIRECTORY: i32 = 0x0010_0000;
 
 #[derive(Default, Deserialize, Serialize)]
 struct OverlayRegistry {
@@ -205,6 +217,9 @@ impl StateStore {
     }
 
     pub fn remove_pane_state(&self, source_pane: &str) -> AppResult<()> {
+        if !validate_private_directory(&self.root)? {
+            return Ok(());
+        }
         let safe = checked_pane_component(source_pane)?;
         let draft = self.root.join(format!("draft-{safe}.json"));
         let history_root = self.root.join("history");
@@ -242,6 +257,7 @@ impl StateStore {
             ));
         }
         let panes = self.root.join("panes");
+        ensure_private_directory(&self.root)?;
         ensure_private_directory(&panes)?;
         let destination = panes.join(format!("{safe}.json"));
         require_exact_parent(&destination, &panes)?;
@@ -261,6 +277,9 @@ impl StateStore {
     }
 
     pub fn validate_saved_namespaces(&self, client: &HerdrClient, now_ms: u64) -> AppResult<()> {
+        if !validate_private_directory(&self.root)? {
+            return Ok(());
+        }
         let panes = self.root.join("panes");
         if !panes.exists() {
             return Ok(());
@@ -368,13 +387,20 @@ impl StateStore {
     }
 
     pub fn load_draft(&self, pane_id: &str) -> AppResult<DraftState> {
+        if !validate_private_directory(&self.root)? {
+            return Ok(DraftState::default());
+        }
         let file = self
             .root
             .join(format!("draft-{}.json", safe_state_component(pane_id)));
-        if !file.exists() {
-            return Ok(DraftState::default());
+        match std::fs::symlink_metadata(&file) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DraftState::default());
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
         }
-        let bytes = std::fs::read(&file)?;
+        let bytes = read_regular_file(&file)?;
         let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(value) => value,
             Err(error) => return quarantine_draft(&file, error),
@@ -506,6 +532,7 @@ impl StateStore {
 
     fn save_namespace(&self, namespace: &PaneNamespaceState) -> AppResult<()> {
         let panes = self.root.join("panes");
+        ensure_private_directory(&self.root)?;
         ensure_private_directory(&panes)?;
         let destination = self.namespace_path(&namespace.source_pane)?;
         reject_symlink(&destination)?;
@@ -530,10 +557,18 @@ impl StateStore {
 
     fn load_registry(&self) -> AppResult<OverlayRegistry> {
         let path = self.registry_path();
-        if !path.exists() {
+        reject_symlink(&self.root)?;
+        if std::fs::symlink_metadata(&self.root).is_ok_and(|metadata| !metadata.is_dir()) {
             return Ok(OverlayRegistry::default());
         }
-        match serde_json::from_slice(&std::fs::read(&path)?) {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(OverlayRegistry::default());
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        match serde_json::from_slice(&read_regular_file(&path)?) {
             Ok(registry) => Ok(registry),
             Err(error) => {
                 let invalid = path.with_extension("json.invalid");
@@ -611,7 +646,7 @@ fn require_exact_parent(path: &Path, expected_parent: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn reject_symlink(path: &Path) -> AppResult<()> {
+pub(crate) fn reject_symlink(path: &Path) -> AppResult<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::new(
             "plugin state",
@@ -623,11 +658,71 @@ fn reject_symlink(path: &Path) -> AppResult<()> {
     }
 }
 
-fn ensure_private_directory(path: &Path) -> AppResult<()> {
+pub(crate) fn ensure_private_directory(path: &Path) -> AppResult<()> {
     reject_symlink(path)?;
-    std::fs::create_dir_all(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    match std::fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let directory = open_private_directory(path)?.ok_or_else(|| {
+        AppError::new(
+            "plugin state",
+            format!("state directory disappeared: {}", path.display()),
+        )
+    })?;
+    directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+pub(crate) fn validate_private_directory(path: &Path) -> AppResult<bool> {
+    Ok(open_private_directory(path)?.is_some())
+}
+
+fn open_private_directory(path: &Path) -> AppResult<Option<File>> {
+    reject_symlink(path)?;
+    let directory = match OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_DIRECTORY)
+        .open(path)
+    {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !directory.metadata()?.is_dir() {
+        return Err(AppError::new(
+            "plugin state",
+            format!("state directory is not a directory: {}", path.display()),
+        ));
+    }
+    Ok(Some(directory))
+}
+
+pub(crate) fn nofollow_flag() -> i32 {
+    O_NOFOLLOW
+}
+
+pub(crate) fn validate_regular_file(file: &File, path: &Path) -> AppResult<()> {
+    if !file.metadata()?.is_file() {
+        return Err(AppError::new(
+            "plugin state",
+            format!("state target is not a regular file: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn read_regular_file(path: &Path) -> AppResult<Vec<u8>> {
+    reject_symlink(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    validate_regular_file(&file, path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn remove_file_if_present(path: &Path) -> AppResult<()> {
@@ -671,20 +766,54 @@ fn quarantine_draft(file: &Path, error: impl std::fmt::Display) -> AppResult<Dra
 }
 
 fn atomic_write(root: &Path, destination: &Path, bytes: Vec<u8>) -> AppResult<()> {
-    std::fs::create_dir_all(root)?;
-    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-    let temporary = destination.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&temporary, destination)?;
-    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    ensure_private_directory(root)?;
+    let parent = destination.parent().ok_or_else(|| {
+        AppError::new(
+            "plugin state",
+            format!("state target has no parent: {}", destination.display()),
+        )
+    })?;
+    if parent != root {
+        ensure_private_directory(parent)?;
+    }
+    reject_symlink(destination)?;
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let (temporary, mut file) = (0..16)
+        .find_map(|_| {
+            let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary = destination
+                .with_extension(format!("tmp-{}-{nonce}-{sequence}", std::process::id()));
+            match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(O_NOFOLLOW)
+                .open(&temporary)
+            {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| AppError::new("plugin state", "cannot allocate a temporary state file"))?;
+    let result = (|| -> AppResult<()> {
+        validate_regular_file(&file, &temporary)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        reject_symlink(destination)?;
+        std::fs::rename(&temporary, destination)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub(crate) fn safe_state_component(value: &str) -> String {

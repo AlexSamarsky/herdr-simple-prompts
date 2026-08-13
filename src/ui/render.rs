@@ -19,6 +19,10 @@ pub(crate) struct HistoryRenderCache {
     cached_generation: Option<u64>,
     width: Option<u16>,
     document: HistoryDocument,
+    scroll_from_bottom: usize,
+    maximum_offset: usize,
+    viewport_height: Option<usize>,
+    viewport_initialized: bool,
     #[cfg(test)]
     rebuilds: usize,
 }
@@ -39,6 +43,54 @@ impl HistoryRenderCache {
             }
         }
         &self.document
+    }
+
+    fn viewport_rows(&mut self, app: &AppState, width: u16, height: usize) -> Vec<VisualRow> {
+        let rebuild = self.cached_generation != Some(self.generation) || self.width != Some(width);
+        let layout_changed = self.viewport_height != Some(height);
+        let old_maximum = self.maximum_offset;
+        let old_offset = self.scroll_from_bottom.min(old_maximum);
+        let old_top = old_maximum.saturating_sub(old_offset);
+        let requested_initial_offset = app.scroll_from_bottom;
+
+        self.document_for(app, width);
+        let visible_height = height.min(self.document.rows.len());
+        let new_maximum = self.document.rows.len().saturating_sub(visible_height);
+        if !self.viewport_initialized {
+            self.scroll_from_bottom = requested_initial_offset.min(new_maximum);
+            self.viewport_initialized = true;
+        } else if rebuild || layout_changed {
+            self.scroll_from_bottom = if old_offset == 0 {
+                0
+            } else {
+                new_maximum.saturating_sub(old_top.min(new_maximum))
+            };
+        } else {
+            self.scroll_from_bottom = self.scroll_from_bottom.min(new_maximum);
+        }
+        self.maximum_offset = new_maximum;
+        self.viewport_height = Some(height);
+        self.document.viewport(height, self.scroll_from_bottom)
+    }
+
+    pub(crate) fn scroll_up(&mut self, rows: usize) {
+        self.scroll_from_bottom = self
+            .scroll_from_bottom
+            .saturating_add(rows)
+            .min(self.maximum_offset);
+    }
+
+    pub(crate) fn scroll_down(&mut self, rows: usize) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(rows);
+    }
+
+    pub(crate) fn scroll_from_bottom(&self) -> usize {
+        self.scroll_from_bottom
+    }
+
+    #[cfg(test)]
+    fn maximum_offset(&self) -> usize {
+        self.maximum_offset
     }
 
     #[cfg(test)]
@@ -78,8 +130,7 @@ pub(crate) fn render(
 
     let history = Text::from(
         history_cache
-            .document_for(app, areas[0].width)
-            .viewport(usize::from(areas[0].height), app.scroll_from_bottom)
+            .viewport_rows(app, areas[0].width, usize::from(areas[0].height))
             .iter()
             .map(|row| visual_row_line(row, areas[0].width))
             .collect::<Vec<_>>(),
@@ -425,5 +476,75 @@ mod tests {
 
         cache.document_for(&app, 21);
         assert_eq!(cache.rebuild_count(), 3);
+    }
+
+    #[test]
+    fn history_scroll_clamps_overscroll_and_page_down_moves_immediately() {
+        let mut cache = HistoryRenderCache::default();
+        let mut app = AppState::default();
+        for index in 0..8 {
+            app.apply(AppEvent::NativeUser(Message::text(
+                format!("u{index}"),
+                format!("prompt {index}"),
+                Some(index),
+            )));
+            app.apply(AppEvent::NativeFinal(Message::final_text(
+                format!("a{index}"),
+                format!("answer {index}"),
+                Some(index),
+            )));
+        }
+        let _ = cache.viewport_rows(&app, 40, 5);
+
+        cache.scroll_up(usize::MAX);
+        assert_eq!(cache.scroll_from_bottom(), cache.maximum_offset());
+        let oldest = cache.scroll_from_bottom();
+        cache.scroll_down(5);
+
+        assert_eq!(cache.scroll_from_bottom(), oldest.saturating_sub(5));
+    }
+
+    #[test]
+    fn history_append_preserves_the_manual_viewport_top() {
+        let mut cache = HistoryRenderCache::default();
+        let mut app = AppState::default();
+        for index in 0..8 {
+            app.apply(AppEvent::NativeUser(Message::text(
+                format!("u{index}"),
+                format!("prompt {index}"),
+                Some(index),
+            )));
+            app.apply(AppEvent::NativeFinal(Message::final_text(
+                format!("a{index}"),
+                format!("answer {index}"),
+                Some(index),
+            )));
+        }
+        let _ = cache.viewport_rows(&app, 40, 5);
+        cache.scroll_up(7);
+        let before = cache
+            .viewport_rows(&app, 40, 5)
+            .into_iter()
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+
+        app.apply(AppEvent::NativeUser(Message::text(
+            "u-new",
+            "new prompt",
+            Some(100),
+        )));
+        app.apply(AppEvent::NativeFinal(Message::final_text(
+            "a-new",
+            "new answer",
+            Some(101),
+        )));
+        cache.invalidate();
+        let after = cache
+            .viewport_rows(&app, 40, 5)
+            .into_iter()
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+
+        assert_eq!(after, before);
     }
 }

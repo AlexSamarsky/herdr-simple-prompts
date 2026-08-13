@@ -75,6 +75,35 @@ unchanged native agent pane.
 `prefix+p` is intentionally not used because Herdr assigns it to the previous
 tab by default.
 
+## Conversation view
+
+History is laid out once by a Unicode-aware visual-row engine. The same rows
+drive rendering, bottom alignment, scrolling, and sticky prompt context, so a
+long answer remains reachable instead of being wrapped a second time by the
+terminal widget.
+
+- Each user prompt starts with `YOU` and fills every wrapped row to the pane's
+  right edge with a neutral band.
+- Each final answer starts with `ANSWER` and remains unboxed.
+- After a prompt scrolls out of its natural position, at most its first two
+  wrapped rows stay at the top. The next prompt pushes those rows away one at a
+  time. The sticky copy never replaces or truncates the complete prompt in
+  ordinary history.
+- `PageUp`, `PageDown`, and the mouse wheel scroll the conversation. Returning
+  the offset to the bottom resumes live bottom-following.
+
+For a newly observed final answer, Simple Prompts reads recent ANSI output from
+the source agent and accepts a styled block only when its sanitized text exactly
+matches the canonical transcript answer at a known Codex or Claude boundary.
+Only text plus safe SGR colors and bold, dim, italic, and underline attributes
+are retained. Cursor movement, alternate-screen commands, OSC title, hyperlink,
+clipboard, and other terminal controls are discarded and never replayed.
+
+When exact native ANSI is unavailable, the canonical transcript text is still
+shown using the built-in dependency-free Markdown fallback for headings, lists,
+inline and fenced code, emphasis, and links. This is fallback presentation; it
+is not treated or persisted as captured native styling.
+
 ## Composer keys
 
 | Key | Action |
@@ -87,9 +116,32 @@ tab by default.
 | `PageUp` / `PageDown` | Scroll conversation history |
 | Mouse wheel | Scroll conversation history |
 
-Normal and large bracketed-paste input is inserted atomically without a
-plugin-defined text limit. Any Herdr or agent-side rejection is shown and the
-exact draft is restored.
+Pastes below 1,000 characters remain directly editable. A paste of 1,000
+characters or more appears as one atomic `[Pasted Content · N chars]` token in
+the composer and prompt history, while Codex or Claude receives the complete
+original text with all newlines. Multiple large pastes remain separate; the
+cursor skips each token and deletion removes it as a whole. The plugin imposes
+no arbitrary prompt-length truncation. Any Herdr or agent-side rejection is
+shown and the exact draft, including the hidden source behind compact tokens,
+is restored.
+
+## Native questions and approvals
+
+When Herdr reports that the source agent is blocked, the overlay temporarily
+shows `INTERACTION REQUIRED` and a refreshed, sanitized view of the native
+Codex or Claude question, choice, permission, or approval surface. Conversation
+history and the composer are hidden during this mode, but their contents remain
+unchanged and return automatically when the agent leaves the blocked state.
+
+Typed text and pasted text are forwarded to the native surface. These native
+keys are supported: `Up`, `Down`, `Left`, `Right`, `Tab`, `Shift+Tab`, `Space`,
+`Enter`, `Backspace`, `Delete`, and `Esc`. Each accepted input is sent once;
+unsupported control keys are ignored. Mouse interaction is not mapped in
+version 0.1.
+
+If the native interaction cannot be read, Simple Prompts shows an error instead
+of guessing the question or its answer. Press `prefix+m` to close the overlay
+and answer directly in the unchanged native pane.
 
 ## Images and remote attach
 
@@ -105,17 +157,55 @@ does not render or copy their pixels.
 
 ## Privacy and state
 
-Simple Prompts reads the current native JSONL transcript but never modifies or
-copies it into another conversation database. Its Herdr-managed state directory
-contains only:
+Simple Prompts never modifies the native Codex or Claude transcript. It does
+keep an intentional private copy of the visible prompt/final-answer subset so
+reopening the overlay can reproduce what it previously showed. This is scoped
+to one source pane and one native session; it is not a global conversation
+database or cross-pane browser.
+
+The Herdr-managed state directory contains:
 
 - the source-to-overlay pane registry;
-- the current draft;
-- local attachment placeholders.
+- the current draft and local attachment placeholders;
+- compact-paste display ranges, character counts, and integrity fingerprints;
+- the pane/session visible-history journal.
 
-State files use user-only permissions. Before every prompt, interrupt, or image
-mutation, the plugin verifies that the source pane still contains the original
-agent kind and native session id.
+The journal is auditable JSON Lines at:
+
+```text
+history/<safe-source-pane-id>/<native-session-id>.jsonl
+```
+
+Each versioned record contains only a display-safe user prompt or visible final
+answer, its native stable and turn identifiers, sanitized attachment labels,
+attachment IDs, timestamp and display order, a text fingerprint, and either
+validated native style ranges or fallback/plain presentation provenance. A
+repeated stable id is an append-only upsert whose latest valid record wins, so
+later exact native ANSI can replace fallback presentation.
+
+The journal never stores reasoning, commentary, tool calls or results, system
+context, subagent traffic, blocked interaction surfaces, native attachment
+paths, or the hidden body of a large paste. A submitted large paste is copied to
+history only as its compact marker. Only an unsent draft may retain the complete
+hidden paste so editing and send-failure recovery stay lossless.
+
+State directories use mode `0700`; registry, draft, namespace, and journal files
+use mode `0600`. Journal writes are asynchronous, append newline-terminated
+records, and ignore an incomplete final line during recovery.
+
+State retention follows the source pane rather than the overlay:
+
+| Event | Result |
+|---|---|
+| Close only Simple Prompts with `prefix+m` | Keep the pane/session history and draft for reopening |
+| Close the native source pane | Delete that pane's registry, draft, compact metadata, and history namespace |
+| Reuse a pane for a different native session | Delete the replaced session's saved state during validation |
+| Source cannot be verified temporarily | Keep its state; after seven continuously unverifiable days, remove it on the next plugin invocation |
+
+Before every prompt, interrupt, image mutation, or blocked-input forwarding, the
+plugin verifies that the source pane still contains the original agent kind and
+native session id. No detached cleanup watcher or resident plugin daemon is
+created.
 
 ## Local development
 
@@ -144,6 +234,41 @@ cargo build --locked --release
 ```
 
 CI runs the source build on macOS and Linux and uploads no executable artifact.
+
+## Manual Codex and Claude smoke test
+
+Build and link the current source, then install both native integrations:
+
+```bash
+cargo build --locked --release
+herdr plugin link .
+herdr integration install codex
+herdr integration install claude
+herdr server reload-config
+```
+
+For Codex, focus a current native Codex pane and press `prefix+m`. Verify this
+sequence with synthetic, non-sensitive input:
+
+1. Submit a normal prompt and confirm it appears above the native `Working` row.
+2. Request a long answer containing a heading, list, emphasis, inline code, and
+   fenced code. Confirm the bottom is reachable, `PageUp`/`PageDown` and the
+   mouse wheel scroll, and the first two prompt rows stick and are pushed away
+   by the following prompt.
+3. Paste 1,000 or more characters. Confirm the composer and saved prompt show
+   only the compact marker while the native agent receives the complete text.
+4. Use a workflow that asks a question or permission. Confirm
+   `INTERACTION REQUIRED`, exercise the supported keys, and confirm the
+   unchanged draft returns afterward.
+5. Close and reopen only the overlay with `prefix+m`; confirm styled visible
+   history returns. Then close the native source pane and confirm its private
+   pane state is removed.
+
+Repeat steps 1, 2, 4, and 5 in a current Claude Code pane. Include one
+tool-using prompt and confirm thinking, tool use/results, and progress remain in
+the native pane while only the final visible answer appears in Simple Prompts.
+If no live Claude session is available, report that prerequisite as missing;
+the automated Claude fixtures do not constitute a live smoke test.
 
 ## Troubleshooting
 

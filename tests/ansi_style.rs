@@ -166,6 +166,14 @@ fn sanitizer_discards_single_escape_commands_and_malformed_sgr() {
 }
 
 #[test]
+fn sanitizer_never_splits_a_multibyte_scalar_after_an_unknown_escape() {
+    let styled = sanitize_ansi("before\x1bé界after");
+
+    assert_eq!(styled.text, "beforeé界after");
+    assert!(styled.runs.is_empty());
+}
+
+#[test]
 fn markdown_fallback_styles_the_supported_subset_without_rewriting_text() {
     let text = concat!(
         "paragraph with `inline` code\n",
