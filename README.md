@@ -94,17 +94,26 @@ terminal widget.
 - `PageUp`, `PageDown`, and the mouse wheel scroll the conversation. Returning
   the offset to the bottom resumes live bottom-following.
 
-For a newly observed final answer, Simple Prompts reads recent ANSI output from
-the source agent and accepts a styled block only when its sanitized text exactly
-matches the canonical transcript answer at a known Codex or Claude boundary.
-Only text plus safe SGR colors and bold, dim, italic, and underline attributes
-are retained. Cursor movement, alternate-screen commands, OSC title, hyperlink,
-clipboard, and other terminal controls are discarded and never replayed.
+For every final answer, the transcript's `Message.text` remains the
+canonical Markdown value used for identity and replay. Simple Prompts separately
+projects that Markdown into the visible text a terminal renderer shows:
+supported heading, emphasis, inline-code, and fenced-code delimiters are
+removed, and a Markdown link is shown as its label without the destination.
+Malformed or unsupported syntax remains literal.
 
-When exact native ANSI is unavailable, the canonical transcript text is still
-shown using the built-in dependency-free Markdown fallback for headings, lists,
-inline and fenced code, emphasis, and links. This is fallback presentation; it
-is not treated or persisted as captured native styling.
+For a newly observed final answer, Simple Prompts reads recent ANSI output from
+the source agent and accepts a styled block only when its sanitized visible text
+exactly matches that deterministic projection at one unique known Codex or
+Claude final-answer boundary. The captured presentation owns both the visible
+text and safe SGR colors, bold, dim, italic, and underline styles. Cursor
+movement, alternate-screen commands, OSC titles, hyperlinks, clipboard
+commands, and other terminal controls are discarded and never replayed.
+
+When exact native ANSI is unavailable, the same dependency-free projected text
+is shown with deterministic fallback styles. Captured native visible text and
+styles are saved together in the pane/session journal; older version-1 journal
+records remain readable and are downgraded to fallback when their legacy style
+offsets cannot safely describe the new visible projection.
 
 ## Composer keys
 
@@ -255,18 +264,22 @@ sequence with synthetic, non-sensitive input:
 1. Submit a normal prompt and confirm it appears above the native `Working` row
    as a full-width gray block with one blank gray row above and below, without
    `YOU` or `ANSWER` labels.
-2. Request a long answer containing a heading, list, emphasis, inline code, and
-   fenced code. Confirm the bottom is reachable, `PageUp`/`PageDown` and the
-   mouse wheel scroll, and the first two prompt rows stick and are pushed away
-   by the following prompt.
+2. Request a long final answer containing a Markdown heading, bold and
+   emphasized text, inline code, fenced code, and a Markdown link. Compare the
+   native pane with Simple Prompts: confirm the same visible words appear in the
+   same order; supported delimiters and the link destination are absent; native
+   colors and emphasis remain when exact capture succeeds; and the last line is
+   reachable by scrolling. Also confirm `PageUp`/`PageDown` and the mouse wheel
+   scroll, and the first two prompt rows stick and are pushed away by the
+   following prompt.
 3. Paste 1,000 or more characters. Confirm the composer and saved prompt show
    only the compact marker while the native agent receives the complete text.
 4. Use a workflow that asks a question or permission. Confirm
    `INTERACTION REQUIRED`, exercise the supported keys, and confirm the
    unchanged draft returns afterward.
-5. Close and reopen only the overlay with `prefix+m`; confirm styled visible
-   history returns. Then close the native source pane and confirm its private
-   pane state is removed.
+5. Close and reopen only the overlay with `prefix+m`; confirm the exact rendered
+   text and styles from step 2 are restored. Then close the native source pane
+   and confirm its private pane state is removed.
 
 Repeat steps 1, 2, 4, and 5 in a current Claude Code pane. Include one
 tool-using prompt and confirm thinking, tool use/results, and progress remain in
