@@ -138,7 +138,7 @@ fn native_final_capture_maps_wrapped_shell_styles_to_projected_markdown() {
 
     let captured = extract_native_final(ansi, &projected.text, AgentKind::Codex).unwrap();
 
-    assert_eq!(captured.text, "Run:\nherdr agent list |\n  jq '.result'");
+    assert_eq!(captured.text, projected.text);
     assert_eq!(
         style_at(&captured, captured.text.find("herdr").unwrap())
             .unwrap()
@@ -331,7 +331,10 @@ let candidate = match strict_candidates.len() {
 }?;
 ```
 
-Keep the current known-footer validation after candidate selection and return
+After candidate selection, validate every non-empty footer row with its complete
+reviewed structure: a provider-appropriate model label, `·`, and an absolute or
+home-relative working-directory field. Reject prefix-only lookalikes such as
+`gpt-unreviewed payload` and `ClaudeInjected · /repo`. Return
 `StyledText { text: expected_visible.to_owned(), runs }`. Do not modify runtime,
 history, or rendering schemas.
 
@@ -344,7 +347,7 @@ cargo test --test ansi_style
 ```
 
 Expected: all ANSI sanitizer, strict capture, soft-wrap capture, fenced-shell,
-ambiguity, footer, Codex, and Claude tests pass.
+ambiguity, structured-footer, multibyte Unicode, Codex, and Claude tests pass.
 
 - [ ] **Step 4: Confirm no additional refactor is required**
 

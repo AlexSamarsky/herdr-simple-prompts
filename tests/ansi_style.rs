@@ -531,6 +531,120 @@ fn native_final_capture_matches_projected_visible_text_and_keeps_native_styles()
 }
 
 #[test]
+fn native_final_capture_ignores_physical_wraps_without_a_leading_separator() {
+    let expected = "Use herdr agent list |\njq '.result.agents[]'";
+    let ansi = concat!(
+        "earlier output\n",
+        "\u{1b}[36m• Use herdr agent \u{1b}[0m\n",
+        "  \u{1b}[36mlist |\u{1b}[0m\n",
+        "  \u{1b}[33mjq '.result.agents[]'\u{1b}[0m\n",
+        "─ Worked for 2s ────────\n",
+        "› Write a prompt",
+    );
+
+    let captured = extract_native_final(ansi, expected, AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, expected);
+    assert!(validate_styled_text(&captured).is_ok());
+    assert_eq!(
+        style_at(&captured, captured.text.find("herdr").unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Cyan),
+    );
+    assert_eq!(
+        style_at(&captured, captured.text.find("jq").unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Yellow),
+    );
+}
+
+#[test]
+fn native_final_capture_maps_wrapped_shell_styles_to_projected_markdown() {
+    let projected = style_markdown(concat!(
+        "Run:\n",
+        "```sh\n",
+        "herdr agent list |\n",
+        "  jq '.result'\n",
+        "```",
+    ));
+    let ansi = concat!(
+        "• Run:\n",
+        "  \u{1b}[36mherdr agent \u{1b}[0m\n",
+        "  \u{1b}[36mlist |\u{1b}[0m\n",
+        "  \u{1b}[33mjq '.result'\u{1b}[0m\n",
+        "────────\n",
+        "› Write a prompt",
+    );
+
+    let captured = extract_native_final(ansi, &projected.text, AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, projected.text);
+    assert_eq!(
+        style_at(&captured, captured.text.find("herdr").unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Cyan),
+    );
+    assert_eq!(
+        style_at(&captured, captured.text.find("jq").unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Yellow),
+    );
+}
+
+#[test]
+fn width_independent_native_capture_maps_multibyte_scalars_safely() {
+    let expected = "Привет мир\n界 test";
+    let ansi = concat!(
+        "\u{1b}[36m• Привет \u{1b}[0m\n",
+        "  \u{1b}[32mмир\u{1b}[0m\n",
+        "  \u{1b}[33m界\u{1b}[0m test\n",
+        "────────\n",
+        "› Write a prompt",
+    );
+
+    let captured = extract_native_final(ansi, expected, AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, expected);
+    assert!(validate_styled_text(&captured).is_ok());
+    assert_eq!(
+        style_at(&captured, captured.text.find("Привет").unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Cyan),
+    );
+    assert_eq!(
+        style_at(&captured, captured.text.find("мир").unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Green),
+    );
+    assert_eq!(
+        style_at(&captured, captured.text.find('界').unwrap())
+            .unwrap()
+            .foreground,
+        Some(AnsiColor::Yellow),
+    );
+}
+
+#[test]
+fn width_independent_native_capture_rejects_content_changes_and_duplicates() {
+    let changed = "• same answer\n  changed token\n────────\n› Write a prompt";
+    assert!(
+        extract_native_final(changed, "same answer\nexpected token", AgentKind::Codex,).is_none()
+    );
+
+    let duplicate = concat!(
+        "• same answer\n────────\n› Write a prompt\n",
+        "• same answer\n────────\n› Write a prompt",
+    );
+    assert!(extract_native_final(duplicate, "same answer", AgentKind::Codex).is_none());
+}
+
+#[test]
 fn exact_claude_final_capture_uses_claude_boundaries() {
     let ansi = concat!(
         "earlier output\n",
@@ -562,8 +676,6 @@ fn native_final_capture_rejects_unsafe_or_non_exact_candidates() {
         "────────\n› same answer\n  second line",
         // Text mismatch.
         "────────\n• same answer\n  different line\n────────\n› Write a prompt",
-        // Partial scrollback misses the leading boundary.
-        "• same answer\n  second line\n────────\n› Write a prompt",
         // Partial scrollback misses the trailing composer boundary.
         "────────\n• same answer\n  second line",
         // Two complete candidates are ambiguous.
@@ -669,4 +781,21 @@ fn native_final_capture_accepts_only_known_optional_agent_footers() {
         "unreviewed footer",
     );
     assert!(extract_native_final(arbitrary, "answer", AgentKind::Codex).is_none());
+
+    for (kind, unsafe_footer) in [
+        (AgentKind::Codex, "gpt-unreviewed payload"),
+        (AgentKind::Codex, "gpt-unreviewed · payload"),
+        (AgentKind::Claude, "ClaudeInjected · /repo"),
+        (AgentKind::Claude, "OpusInjected · /repo"),
+    ] {
+        let prefix = match kind {
+            AgentKind::Codex => "• answer\n────────\n› Write a prompt\n",
+            AgentKind::Claude => "⏺ answer\n────────────────────────────────\n❯ \n",
+        };
+        let ansi = format!("{prefix}{unsafe_footer}");
+        assert!(
+            extract_native_final(&ansi, "answer", kind).is_none(),
+            "unsafe footer was accepted: {unsafe_footer:?}",
+        );
+    }
 }

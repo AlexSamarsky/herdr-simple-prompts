@@ -231,7 +231,10 @@ fn wrapped_prompt_rows_fill_the_full_band_background() {
     assert_eq!(buffer[(0, block_start + gray_rows - 1)].symbol(), " ");
     for row in block_start..block_start + gray_rows {
         for column in 0..width {
-            assert_eq!(buffer[(column, row)].style().bg, Some(Color::DarkGray));
+            assert_eq!(
+                buffer[(column, row)].style().bg,
+                Some(Color::Rgb(52, 53, 54)),
+            );
         }
     }
 }

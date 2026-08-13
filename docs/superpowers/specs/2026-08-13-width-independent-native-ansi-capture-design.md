@@ -82,7 +82,10 @@ Regression tests in `tests/ansi_style.rs` cover:
    logical lines without storing terminal wraps.
 3. A non-whitespace mismatch is rejected.
 4. Duplicate normalized candidates are rejected as ambiguous.
-5. Existing strict Codex and Claude captures remain unchanged.
+5. Multibyte Unicode scalars keep valid UTF-8 style ranges.
+6. Provider footers require a reviewed model label plus an absolute or
+   home-relative working-directory field; prefix-only lookalikes are rejected.
+7. Existing strict Codex and Claude captures remain unchanged.
 
 The rendered-buffer regression in `tests/ui_render.rs` additionally asserts
 that every cell in every wrapped prompt-band row uses

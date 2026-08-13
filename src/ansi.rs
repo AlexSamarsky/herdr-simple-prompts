@@ -7,7 +7,6 @@ struct NativeChrome {
     separator_min_width: usize,
     trailing_boundary_prefixes: &'static [&'static str],
     composer_prefixes: &'static [&'static str],
-    footer_prefixes: &'static [&'static str],
 }
 
 const CODEX_CHROME: NativeChrome = NativeChrome {
@@ -16,7 +15,6 @@ const CODEX_CHROME: NativeChrome = NativeChrome {
     separator_min_width: 8,
     trailing_boundary_prefixes: &["─ Worked for "],
     composer_prefixes: &["› "],
-    footer_prefixes: &["gpt-"],
 };
 
 const CLAUDE_CHROME: NativeChrome = NativeChrome {
@@ -25,7 +23,6 @@ const CLAUDE_CHROME: NativeChrome = NativeChrome {
     separator_min_width: 16,
     trailing_boundary_prefixes: &[],
     composer_prefixes: &["❯ "],
-    footer_prefixes: &["Claude", "Opus"],
 };
 
 pub fn sanitize_ansi(input: &str) -> StyledText {
@@ -81,6 +78,70 @@ pub fn extract_native_final(
         AgentKind::Claude => &CLAUDE_CHROME,
     };
     let expected_visible_lines: Vec<&str> = expected_visible.split('\n').collect();
+    let strict_candidates =
+        strict_final_candidates(&sanitized, &lines, &expected_visible_lines, chrome);
+    let candidate = match strict_candidates.len() {
+        1 => strict_candidates.into_iter().next(),
+        0 => {
+            let mut reflow_candidates = Vec::new();
+            for trailing in 0..lines.len() {
+                if !is_trailing_boundary(line_text(&sanitized.text, lines[trailing]), chrome) {
+                    continue;
+                }
+                let composer = trailing + 1;
+                if composer >= lines.len()
+                    || !starts_with_any(
+                        line_text(&sanitized.text, lines[composer]),
+                        chrome.composer_prefixes,
+                    )
+                {
+                    continue;
+                }
+                for first in 0..trailing {
+                    if !starts_with_any(
+                        line_text(&sanitized.text, lines[first]),
+                        chrome.role_prefixes,
+                    ) {
+                        continue;
+                    }
+                    if let Some(runs) = reflow_candidate_runs(
+                        &sanitized,
+                        &lines,
+                        first,
+                        trailing,
+                        expected_visible,
+                        chrome,
+                    ) {
+                        reflow_candidates.push((runs, composer));
+                    }
+                }
+            }
+            (reflow_candidates.len() == 1)
+                .then(|| reflow_candidates.pop().expect("one reflow candidate"))
+        }
+        _ => None,
+    }?;
+    let (runs, composer) = candidate;
+    if lines[composer + 1..]
+        .iter()
+        .map(|range| line_text(&sanitized.text, *range))
+        .filter(|line| !line.is_empty())
+        .any(|line| !is_known_footer(line, kind))
+    {
+        return None;
+    }
+    Some(StyledText {
+        text: expected_visible.to_owned(),
+        runs,
+    })
+}
+
+fn strict_final_candidates(
+    sanitized: &StyledText,
+    lines: &[LineRange],
+    expected_visible_lines: &[&str],
+    chrome: &NativeChrome,
+) -> Vec<(Vec<StyleRun>, usize)> {
     let mut candidates = Vec::new();
 
     for boundary in 0..lines.len() {
@@ -91,7 +152,9 @@ pub fn extract_native_final(
             continue;
         }
         let first = boundary + 1;
-        let trailing = first + expected_visible_lines.len();
+        let Some(trailing) = first.checked_add(expected_visible_lines.len()) else {
+            continue;
+        };
         let composer = trailing + 1;
         if composer >= lines.len()
             || !is_trailing_boundary(line_text(&sanitized.text, lines[trailing]), chrome)
@@ -134,7 +197,10 @@ pub fn extract_native_final(
             mappings.push((content_start, range.end, destination));
             destination += expected_visible_line.len();
             if offset + 1 < expected_visible_lines.len() {
-                let newline_end = range.end.checked_add(1)?;
+                let Some(newline_end) = range.end.checked_add(1) else {
+                    exact = false;
+                    break;
+                };
                 if sanitized.text.as_bytes().get(range.end) != Some(&b'\n') {
                     exact = false;
                     break;
@@ -148,28 +214,81 @@ pub fn extract_native_final(
         }
     }
 
-    if candidates.len() != 1 {
-        return None;
-    }
-    let (runs, composer) = candidates.pop().expect("one candidate");
-    if lines[composer + 1..]
-        .iter()
-        .map(|range| line_text(&sanitized.text, *range))
-        .filter(|line| !line.is_empty())
-        .any(|line| !starts_with_any(line, chrome.footer_prefixes))
-    {
-        return None;
-    }
-    Some(StyledText {
-        text: expected_visible.to_owned(),
-        runs,
-    })
+    candidates
 }
 
 #[derive(Clone, Copy)]
 struct LineRange {
     start: usize,
     end: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScalarRange {
+    character: char,
+    start: usize,
+    end: usize,
+}
+
+fn non_whitespace_scalars(text: &str, start: usize, end: usize) -> Vec<ScalarRange> {
+    text[start..end]
+        .char_indices()
+        .filter_map(|(offset, character)| {
+            (!character.is_whitespace()).then_some(ScalarRange {
+                character,
+                start: start + offset,
+                end: start + offset + character.len_utf8(),
+            })
+        })
+        .collect()
+}
+
+fn reflow_candidate_runs(
+    sanitized: &StyledText,
+    lines: &[LineRange],
+    first: usize,
+    trailing: usize,
+    expected_visible: &str,
+    chrome: &NativeChrome,
+) -> Option<Vec<StyleRun>> {
+    let mut source = Vec::new();
+    for (line_index, range) in lines.iter().copied().enumerate().take(trailing).skip(first) {
+        let line = line_text(&sanitized.text, range);
+        let prefixes = if line_index == first {
+            chrome.role_prefixes
+        } else {
+            chrome.continuation_prefixes
+        };
+        let content_start = if line.is_empty() {
+            range.start
+        } else {
+            let prefix = prefixes.iter().find(|prefix| line.starts_with(**prefix))?;
+            range.start + prefix.len()
+        };
+        source.extend(non_whitespace_scalars(
+            &sanitized.text,
+            content_start,
+            range.end,
+        ));
+    }
+
+    let destination = non_whitespace_scalars(expected_visible, 0, expected_visible.len());
+    if destination.is_empty()
+        || source.len() != destination.len()
+        || source
+            .iter()
+            .zip(&destination)
+            .any(|(left, right)| left.character != right.character)
+    {
+        return None;
+    }
+
+    let mappings: Vec<_> = source
+        .iter()
+        .zip(destination)
+        .map(|(source, destination)| (source.start, source.end, destination.start))
+        .collect();
+    Some(slice_mapped_runs(&sanitized.runs, &mappings))
 }
 
 fn line_ranges(text: &str) -> Vec<LineRange> {
@@ -239,6 +358,36 @@ fn valid_elapsed_label(label: &str) -> bool {
 
 fn starts_with_any(line: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| line.starts_with(prefix))
+}
+
+fn is_known_footer(line: &str, kind: AgentKind) -> bool {
+    let fields = line
+        .split('·')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let [model, cwd, ..] = fields.as_slice() else {
+        return false;
+    };
+    let model_is_known = match kind {
+        AgentKind::Codex => model.starts_with("gpt-") && valid_model_label(model),
+        AgentKind::Claude => {
+            model
+                .split_ascii_whitespace()
+                .any(|word| matches!(word, "Claude" | "Opus"))
+                && valid_model_label(model)
+        }
+    };
+    model_is_known && (*cwd == "~" || cwd.starts_with("~/") || cwd.starts_with('/'))
+}
+
+fn valid_model_label(model: &str) -> bool {
+    !model.is_empty()
+        && model.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character.is_ascii_whitespace()
+                || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn slice_mapped_runs(runs: &[StyleRun], mappings: &[(usize, usize, usize)]) -> Vec<StyleRun> {

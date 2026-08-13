@@ -403,7 +403,7 @@ fn push_styled_rows(
 fn prompt_fill() -> Option<CellStyle> {
     Some(CellStyle {
         foreground: Some(AnsiColor::BrightWhite),
-        background: Some(AnsiColor::BrightBlack),
+        background: Some(AnsiColor::Rgb(52, 53, 54)),
         modifiers: StyleModifiers::default(),
     })
 }
