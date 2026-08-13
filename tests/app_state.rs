@@ -1,7 +1,8 @@
 use herdr_simple_prompts::app::{AppEvent, AppState};
+use herdr_simple_prompts::composer::{ComposerAccess, NativeComposerState};
 use herdr_simple_prompts::editor::{Editor, EditorSnapshot, EditorSubmission};
 use herdr_simple_prompts::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
-use herdr_simple_prompts::model::{Delivery, Message};
+use herdr_simple_prompts::model::{Attachment, Delivery, Message};
 use herdr_simple_prompts::paste::CompactPromptOverride;
 use herdr_simple_prompts::paste::fingerprint;
 use herdr_simple_prompts::style::{
@@ -919,4 +920,48 @@ fn partial_replay_keeps_existing_final_with_its_saved_owner() {
         .unwrap();
     assert_eq!(owner.final_answer.as_ref().unwrap().stable_id, "a1");
     assert_eq!(owner.final_answer.as_ref().unwrap().text, "updated answer");
+}
+
+#[test]
+fn composer_access_counts_confirmed_and_pending_plugin_images() {
+    let attachment = |id: &str| Attachment {
+        id: id.into(),
+        display: format!("{id}.png"),
+        native_path: None,
+    };
+    let mut app = AppState {
+        native_composer: NativeComposerState::OwnedAttachments(2),
+        draft_attachments: vec![attachment("confirmed")],
+        pending_attachments: vec![attachment("pending")],
+        ..AppState::default()
+    };
+
+    assert_eq!(app.composer_access(), ComposerAccess::Ready);
+
+    app.native_composer = NativeComposerState::OwnedAttachments(1);
+    assert_eq!(app.composer_access(), ComposerAccess::Occupied);
+
+    app.native_composer = NativeComposerState::Clear;
+    app.draft_attachments.clear();
+    assert_eq!(app.composer_access(), ComposerAccess::Ready);
+
+    app.pending_attachments.clear();
+    assert_eq!(app.composer_access(), ComposerAccess::Ready);
+}
+
+#[test]
+fn occupied_unknown_and_source_close_are_never_ready() {
+    let mut app = AppState {
+        native_composer: NativeComposerState::Occupied,
+        ..AppState::default()
+    };
+    assert_eq!(app.composer_access(), ComposerAccess::Occupied);
+
+    app.native_composer = NativeComposerState::Unknown;
+    assert_eq!(app.composer_access(), ComposerAccess::Unknown);
+
+    app.native_composer = NativeComposerState::Clear;
+    app.source_pane_closed();
+    assert_eq!(app.native_composer, NativeComposerState::Unknown);
+    assert_eq!(app.composer_access(), ComposerAccess::Unknown);
 }

@@ -34,13 +34,33 @@ fn agent_result_with_status(session: &str, status: &str) -> serde_json::Value {
     })
 }
 
+fn clear_composer() -> serde_json::Value {
+    json!({"read": {"text": concat!(
+        "────────\n",
+        "• answer\n",
+        "────────\n",
+        "› \u{1b}[2mWrite a prompt\u{1b}[0m\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    )}})
+}
+
+fn composer_with(text: &str) -> serde_json::Value {
+    json!({"read": {"text": format!(concat!(
+        "────────\n",
+        "• answer\n",
+        "────────\n",
+        "› {}\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    ), text)}})
+}
+
 #[test]
 fn refuses_to_send_after_native_session_changes() {
     let fake = support::ScriptedHerdr::start(vec![agent_result("s2")]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
     let transport = AgentTransport::new(client, identity("s1"));
 
-    let error = transport.submit("do it").unwrap_err();
+    let error = transport.submit("do it", 0).unwrap_err();
 
     assert!(error.to_string().contains("session changed"));
     assert_eq!(fake.requests().len(), 1);
@@ -49,22 +69,109 @@ fn refuses_to_send_after_native_session_changes() {
 #[test]
 fn submit_preserves_full_large_paste_source() {
     let source = "line\n".repeat(1_000);
-    let fake =
-        support::ScriptedHerdr::start(vec![agent_result("s1"), json!({"type": "agent_prompted"})]);
+    let fake = support::ScriptedHerdr::start(vec![
+        agent_result("s1"),
+        clear_composer(),
+        json!({"type": "agent_prompted"}),
+    ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
     let transport = AgentTransport::new(client, identity("s1"));
 
-    transport.submit(&source).unwrap();
+    transport.submit(&source, 0).unwrap();
 
     let requests = fake.requests();
-    assert_eq!(requests[1]["method"], "agent.prompt");
-    assert_eq!(requests[1]["params"]["text"], source);
+    assert_eq!(requests[1]["method"], "pane.read");
+    assert_eq!(requests[1]["params"]["format"], "ansi");
+    assert_eq!(requests[2]["method"], "agent.prompt");
+    assert_eq!(requests[2]["params"]["text"], source);
     assert!(
-        !requests[1]["params"]["text"]
+        !requests[2]["params"]["text"]
             .as_str()
             .unwrap()
             .contains("Pasted Content")
     );
+}
+
+#[test]
+fn submit_allows_exact_plugin_owned_image_markers() {
+    let fake = support::ScriptedHerdr::start(vec![
+        agent_result("s1"),
+        composer_with("[Image #1] [Image #2]"),
+        json!({"type": "agent_prompted"}),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    transport.submit("describe", 2).unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2]["method"], "agent.prompt");
+}
+
+#[test]
+fn submit_rejects_native_text_without_prompting_or_disclosing_it() {
+    let native_secret = "private native draft";
+    let fake =
+        support::ScriptedHerdr::start(vec![agent_result("s1"), composer_with(native_secret)]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    let error = transport.submit("plugin draft", 0).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native composer contains unsent input")
+    );
+    assert!(!error.to_string().contains(native_secret));
+    assert_eq!(fake.requests().len(), 2);
+}
+
+#[test]
+fn submit_rejects_attachment_count_mismatch_without_prompting() {
+    let fake = support::ScriptedHerdr::start(vec![
+        agent_result("s1"),
+        composer_with("[Image #1] [Image #2]"),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+    let transport = AgentTransport::new(client, identity("s1"));
+
+    let error = transport.submit("plugin draft", 1).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native composer contains unsent input")
+    );
+    assert_eq!(fake.requests().len(), 2);
+}
+
+#[test]
+fn submit_rejects_unknown_or_unreadable_composer_without_prompting() {
+    for responses in [
+        vec![
+            Ok(agent_result("s1")),
+            Ok(json!({"read": {"text": "truncated"}})),
+        ],
+        vec![
+            Ok(agent_result("s1")),
+            Err(json!({"code":"temporary","message":"screen unavailable"})),
+        ],
+    ] {
+        let fake = support::ScriptedHerdr::start_responses(responses);
+        let client = HerdrClient::connect(fake.socket_path()).unwrap();
+        let transport = AgentTransport::new(client, identity("s1"));
+
+        let error = transport.submit("plugin draft", 0).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot verify native composer is safe to submit")
+        );
+        assert_eq!(fake.requests().len(), 2);
+    }
 }
 
 #[test]

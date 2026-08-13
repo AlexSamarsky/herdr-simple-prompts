@@ -1,5 +1,6 @@
 use herdr_simple_prompts::agent::AgentStatus;
 use herdr_simple_prompts::app::{AppEvent, AppState};
+use herdr_simple_prompts::composer::NativeComposerState;
 use herdr_simple_prompts::editor::Editor;
 use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::model::Message;
@@ -75,6 +76,7 @@ fn composer_shows_attached_images_before_submission() {
         display: "screen.png".into(),
         native_path: None,
     });
+    app.native_composer = NativeComposerState::OwnedAttachments(1);
 
     let rendered = render_to_string(&app, &Editor::default(), 80, 24);
 
@@ -574,6 +576,46 @@ fn disabled_composer_explains_that_the_source_must_be_reopened() {
 
     assert!(rendered.contains("Input disabled"));
     assert!(rendered.contains("source agent session changed"));
+}
+
+#[test]
+fn occupied_native_composer_hides_plugin_draft_and_preserves_history() {
+    let mut app = AppState {
+        native_composer: NativeComposerState::Occupied,
+        ..AppState::default()
+    };
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "visible history",
+        Some(1),
+    )));
+    app.draft_attachments.push(Attachment {
+        id: "image-1".into(),
+        display: "screen.png".into(),
+        native_path: None,
+    });
+    let mut editor = Editor::default();
+    editor.insert_paste("private plugin draft");
+
+    let rendered = render_to_string(&app, &editor, 80, 18);
+
+    assert!(rendered.contains("Native composer contains unsent input · prefix+m to return"));
+    assert!(rendered.contains("visible history"));
+    assert!(!rendered.contains("private plugin draft"));
+    assert!(!rendered.contains("screen.png"));
+}
+
+#[test]
+fn unknown_native_composer_shows_conservative_warning() {
+    let app = AppState {
+        native_composer: NativeComposerState::Unknown,
+        ..AppState::default()
+    };
+
+    let rendered = render_to_string(&app, &Editor::default(), 80, 12);
+
+    assert!(rendered.contains("Unable to verify native composer · prefix+m to return"));
+    assert!(!rendered.contains("Write a prompt"));
 }
 
 #[test]

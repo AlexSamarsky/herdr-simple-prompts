@@ -9,6 +9,7 @@ use crate::agent::{
     AgentKind, AgentPaths, AgentStatus, TranscriptAdapter, agent_identity, resolve_transcript,
 };
 use crate::app::{AppEvent, AppState};
+use crate::composer::{ComposerAccess, NativeComposerState};
 use crate::editor::{Editor, staged_image_path};
 use crate::herdr::HerdrClient;
 use crate::history::HistoryWriter;
@@ -80,6 +81,7 @@ pub fn run_from_env() -> AppResult<()> {
     let mut app = AppState {
         session_id: identity.session_id.clone(),
         agent_status: identity.status,
+        native_composer: NativeComposerState::Unknown,
         working_since: identity.status.is_working().then(Instant::now),
         draft_attachments: draft.attachments,
         prompt_displays: draft.prompt_displays,
@@ -194,35 +196,22 @@ pub fn run_from_env() -> AppResult<()> {
                 if handle_blocked_paste(&content, &mut app, &runtime) {
                     continue;
                 }
-                if !app.input_enabled {
-                    continue;
-                }
-                if let Some(path) = staged_image_path(&content) {
-                    let attachment = Attachment {
-                        id: next_image_id(&mut local_sequence),
-                        display: path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        native_path: Some(path.clone()),
-                    };
-                    match runtime.forward_staged_image(attachment.clone(), path) {
-                        Ok(()) => app.pending_attachments.push(attachment),
-                        Err(error) => app.send_error = Some(error.to_string()),
-                    }
-                } else {
-                    editor.insert_paste(&content);
-                    if let Some(writer) = draft_writer.as_ref() {
-                        apply_draft_change(
-                            DraftChange::Debounced,
-                            writer,
-                            &app,
-                            &editor,
-                            &mut draft_dirty,
-                            &mut draft_save_at,
-                        );
-                    }
+                let change = handle_ordinary_paste(
+                    &content,
+                    &mut app,
+                    &mut editor,
+                    &runtime,
+                    &mut local_sequence,
+                );
+                if let Some(writer) = draft_writer.as_ref() {
+                    apply_draft_change(
+                        change,
+                        writer,
+                        &app,
+                        &editor,
+                        &mut draft_dirty,
+                        &mut draft_save_at,
+                    );
                 }
             }
             Event::Resize(_, _) => {}
@@ -253,6 +242,37 @@ fn handle_blocked_paste(content: &str, app: &mut AppState, runtime: &UiRuntime) 
     true
 }
 
+fn handle_ordinary_paste(
+    content: &str,
+    app: &mut AppState,
+    editor: &mut Editor,
+    runtime: &UiRuntime,
+    local_sequence: &mut u64,
+) -> DraftChange {
+    if !ordinary_input_allowed(app) {
+        return DraftChange::None;
+    }
+    if let Some(path) = staged_image_path(content) {
+        let attachment = Attachment {
+            id: next_image_id(local_sequence),
+            display: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            native_path: Some(path.clone()),
+        };
+        match runtime.forward_staged_image(attachment.clone(), path) {
+            Ok(()) => app.pending_attachments.push(attachment),
+            Err(error) => app.send_error = Some(error.to_string()),
+        }
+        DraftChange::None
+    } else {
+        editor.insert_paste(content);
+        DraftChange::Debounced
+    }
+}
+
 fn handle_key(
     key: KeyEvent,
     app: &mut AppState,
@@ -269,7 +289,26 @@ fn handle_key(
         }
         return Ok(DraftChange::None);
     }
-    if !app.input_enabled && !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+    match key.code {
+        KeyCode::PageUp => {
+            history_cache.scroll_up(5);
+            app.scroll_from_bottom = history_cache.scroll_from_bottom();
+            return Ok(DraftChange::None);
+        }
+        KeyCode::PageDown => {
+            history_cache.scroll_down(5);
+            app.scroll_from_bottom = history_cache.scroll_from_bottom();
+            return Ok(DraftChange::None);
+        }
+        KeyCode::Esc if app.agent_status == AgentStatus::Working => {
+            if let Err(error) = runtime.interrupt() {
+                app.send_error = Some(error.to_string());
+            }
+            return Ok(DraftChange::None);
+        }
+        _ => {}
+    }
+    if !ordinary_input_allowed(app) {
         return Ok(DraftChange::None);
     }
     let change = match (key.code, key.modifiers) {
@@ -296,6 +335,7 @@ fn handle_key(
             let complete_text = submission.complete_text.clone();
             app.send_error = None;
             let attachments = app.draft_attachments.clone();
+            let expected_attachments = attachments.len();
             let local_id = format!("local-{}", *local_sequence);
             *local_sequence += 1;
             app.apply(AppEvent::PromptSubmitted {
@@ -305,7 +345,9 @@ fn handle_key(
                 at_ms: now_ms(),
             });
             history_cache.invalidate();
-            if let Err(error) = runtime.submit(local_id.clone(), complete_text) {
+            if let Err(error) =
+                runtime.submit(local_id.clone(), complete_text, expected_attachments)
+            {
                 app.apply(AppEvent::SendFailed {
                     local_id,
                     reason: error.to_string(),
@@ -315,12 +357,6 @@ fn handle_key(
                 app.send_error = Some(error.to_string());
             }
             DraftChange::Immediate
-        }
-        (KeyCode::Esc, _) if app.agent_status == AgentStatus::Working => {
-            if let Err(error) = runtime.interrupt() {
-                app.send_error = Some(error.to_string());
-            }
-            DraftChange::None
         }
         (KeyCode::Char('v'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             let attachment = Attachment {
@@ -366,16 +402,6 @@ fn handle_key(
             editor.move_end();
             DraftChange::None
         }
-        (KeyCode::PageUp, _) => {
-            history_cache.scroll_up(5);
-            app.scroll_from_bottom = history_cache.scroll_from_bottom();
-            DraftChange::None
-        }
-        (KeyCode::PageDown, _) => {
-            history_cache.scroll_down(5);
-            app.scroll_from_bottom = history_cache.scroll_from_bottom();
-            DraftChange::None
-        }
         (KeyCode::Char(character), modifiers)
             if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
         {
@@ -386,6 +412,10 @@ fn handle_key(
         _ => return Ok(DraftChange::None),
     };
     Ok(change)
+}
+
+fn ordinary_input_allowed(app: &AppState) -> bool {
+    app.input_enabled && app.composer_access() == ComposerAccess::Ready
 }
 
 fn apply_runtime_event(
@@ -417,6 +447,7 @@ fn apply_runtime_event(
             }
             app.connection_error = None;
             app.input_enabled = true;
+            app.native_composer = observation.native_composer;
             let current = observation.identity;
             let was_working = app.agent_status.is_working();
             if !was_working && current.status.is_working() {
@@ -438,6 +469,7 @@ fn apply_runtime_event(
             }
             app.connection_error = Some(error);
             app.input_enabled = false;
+            app.native_composer = NativeComposerState::Unknown;
             DraftChange::None
         }
         RuntimeEvent::Submitted { local_id, result } => {
@@ -617,18 +649,20 @@ fn next_image_id(sequence: &mut u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CapturePolicy, apply_follower_events_with_policy, handle_blocked_paste, handle_key, render,
-        runtime,
+        CapturePolicy, apply_follower_events_with_policy, apply_runtime_event,
+        handle_blocked_paste, handle_key, handle_ordinary_paste, render, runtime,
     };
-    use crate::agent::AgentStatus;
     use crate::agent::follower::FollowerEvent;
+    use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
     use crate::app::AppState;
+    use crate::composer::NativeComposerState;
     use crate::editor::Editor;
     use crate::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
-    use crate::model::{ConversationEvent, Message};
+    use crate::model::{Attachment, ConversationEvent, Message};
     use crate::paste::fingerprint;
     use crate::ui::interaction::InteractionInput;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
 
     fn final_event(index: usize) -> FollowerEvent {
         FollowerEvent::Conversation(ConversationEvent::Final(Message::final_text(
@@ -823,5 +857,332 @@ mod tests {
         ));
         assert!(app.pending_attachments.is_empty());
         assert!(app.draft_attachments.is_empty());
+    }
+
+    #[test]
+    fn occupied_and_unknown_composers_block_ordinary_editor_mutation_and_submit() {
+        for native_composer in [NativeComposerState::Occupied, NativeComposerState::Unknown] {
+            let (runtime, actions) = runtime::interaction_test_runtime(1);
+            let mut app = AppState {
+                native_composer,
+                ..AppState::default()
+            };
+            let mut editor = Editor::default();
+            editor.insert_paste("preserved draft");
+            let before = editor.snapshot();
+            let mut sequence = 1;
+            let mut cache = render::HistoryRenderCache::default();
+
+            let change = handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &mut app,
+                &mut editor,
+                &runtime,
+                &mut sequence,
+                &mut cache,
+            )
+            .unwrap();
+
+            assert_eq!(change, super::DraftChange::None);
+            assert_eq!(editor.snapshot(), before);
+            assert!(actions.try_recv().is_err());
+
+            handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut app,
+                &mut editor,
+                &runtime,
+                &mut sequence,
+                &mut cache,
+            )
+            .unwrap();
+            handle_key(
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut editor,
+                &runtime,
+                &mut sequence,
+                &mut cache,
+            )
+            .unwrap();
+
+            assert_eq!(editor.snapshot(), before);
+            assert!(app.pending_attachments.is_empty());
+            assert!(actions.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn page_navigation_remains_available_while_composer_is_guarded() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::Occupied,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+        for index in 0..8 {
+            app.apply(crate::app::AppEvent::NativeUser(Message::text(
+                format!("u{index}"),
+                format!("prompt {index}"),
+                Some(index),
+            )));
+        }
+        let _ = render::render_to_string(&app, &editor, 40, 8);
+        cache.viewport_rows(&app, 40, 3);
+
+        handle_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(app.scroll_from_bottom > 0);
+    }
+
+    #[test]
+    fn guarded_composer_blocks_text_and_staged_image_paste() {
+        let (runtime, actions) = runtime::interaction_test_runtime(2);
+        let mut app = AppState {
+            native_composer: NativeComposerState::Occupied,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("preserved draft");
+        let before = editor.snapshot();
+        let mut sequence = 1;
+
+        assert_eq!(
+            handle_ordinary_paste(
+                "additional text",
+                &mut app,
+                &mut editor,
+                &runtime,
+                &mut sequence,
+            ),
+            super::DraftChange::None
+        );
+        assert_eq!(
+            handle_ordinary_paste(
+                "/private/tmp/herdr-paste-does-not-exist/image.png",
+                &mut app,
+                &mut editor,
+                &runtime,
+                &mut sequence,
+            ),
+            super::DraftChange::None
+        );
+
+        assert_eq!(editor.snapshot(), before);
+        assert!(app.pending_attachments.is_empty());
+        assert!(actions.try_recv().is_err());
+        assert_eq!(sequence, 1);
+    }
+
+    #[test]
+    fn connection_failure_blocks_input_even_if_composer_snapshot_was_clear() {
+        let app = AppState {
+            input_enabled: false,
+            native_composer: NativeComposerState::Clear,
+            ..AppState::default()
+        };
+
+        assert!(!super::ordinary_input_allowed(&app));
+    }
+
+    #[test]
+    fn safe_observation_reenables_preserved_editor_draft() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let original = AgentIdentity {
+            pane_id: "w1:p1".into(),
+            kind: AgentKind::Codex,
+            session_id: "session-1".into(),
+            cwd: PathBuf::from("/repo"),
+            status: AgentStatus::Done,
+        };
+        let mut app = AppState {
+            native_composer: NativeComposerState::Occupied,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("preserved draft");
+        let before = editor.snapshot();
+        let mut cache = render::HistoryRenderCache::default();
+
+        apply_runtime_event(
+            runtime::RuntimeEvent::Observation(Ok(runtime::SourceObservation {
+                identity: original.clone(),
+                status_text: "gpt-5.6-sol · /repo · weekly 75% left".into(),
+                native_composer: NativeComposerState::Clear,
+                blocked_surface: None,
+            })),
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+
+        assert_eq!(app.native_composer, NativeComposerState::Clear);
+        assert_eq!(editor.snapshot(), before);
+    }
+
+    #[test]
+    fn asynchronous_preflight_failure_restores_exact_draft_once() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let original = AgentIdentity {
+            pane_id: "w1:p1".into(),
+            kind: AgentKind::Codex,
+            session_id: "session-1".into(),
+            cwd: PathBuf::from("/repo"),
+            status: AgentStatus::Done,
+        };
+        let mut app = AppState::default();
+        let mut editor = Editor::default();
+        editor.insert_paste(&"private\n".repeat(1_000));
+        let submission = editor.take_editor_submission();
+        let recovery = submission.recovery.clone();
+        app.apply(crate::app::AppEvent::PromptSubmitted {
+            local_id: "local-1".into(),
+            submission,
+            attachments: Vec::new(),
+            at_ms: 1,
+        });
+        let mut cache = render::HistoryRenderCache::default();
+
+        let failed = runtime::RuntimeEvent::Submitted {
+            local_id: "local-1".into(),
+            result: Err("native composer contains unsent input".into()),
+        };
+        apply_runtime_event(
+            failed,
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+
+        assert_eq!(app.draft, recovery);
+        assert_eq!(editor.snapshot(), recovery);
+        assert_eq!(app.turns.len(), 1);
+        assert!(matches!(
+            app.turns[0].delivery,
+            crate::model::Delivery::Failed { .. }
+        ));
+
+        apply_runtime_event(
+            runtime::RuntimeEvent::Submitted {
+                local_id: "local-1".into(),
+                result: Err("native composer contains unsent input".into()),
+            },
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+        assert_eq!(app.draft, recovery);
+        assert_eq!(app.turns.len(), 1);
+    }
+
+    #[test]
+    fn escape_interrupts_working_agent_even_when_composer_is_unknown() {
+        let (runtime, actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            agent_status: AgentStatus::Working,
+            native_composer: NativeComposerState::Unknown,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::Interrupt
+        ));
+    }
+
+    #[test]
+    fn submit_captures_confirmed_attachment_count_before_optimistic_clear() {
+        let (runtime, actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::OwnedAttachments(1),
+            draft_attachments: vec![Attachment {
+                id: "image-1".into(),
+                display: "screen.png".into(),
+                native_path: None,
+            }],
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("describe it");
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::Submit {
+                expected_attachments: 1,
+                ..
+            }
+        ));
+        assert!(app.draft_attachments.is_empty());
+    }
+
+    #[test]
+    fn failed_observation_replaces_a_stale_clear_composer_with_unknown() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let original = AgentIdentity {
+            pane_id: "w1:p1".into(),
+            kind: AgentKind::Codex,
+            session_id: "session-1".into(),
+            cwd: PathBuf::from("/repo"),
+            status: AgentStatus::Done,
+        };
+        let mut app = AppState {
+            native_composer: NativeComposerState::Clear,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        let mut cache = render::HistoryRenderCache::default();
+
+        apply_runtime_event(
+            runtime::RuntimeEvent::Observation(Err("screen unavailable".into())),
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+
+        assert_eq!(app.native_composer, NativeComposerState::Unknown);
+        assert!(!app.input_enabled);
     }
 }

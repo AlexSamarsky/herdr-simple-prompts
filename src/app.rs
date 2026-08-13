@@ -1,4 +1,5 @@
 use crate::agent::AgentStatus;
+use crate::composer::{ComposerAccess, NativeComposerState};
 use crate::editor::{EditorSnapshot, EditorSubmission};
 use crate::history::{VisibleHistoryRecord, VisibleRole};
 use crate::model::{Attachment, Delivery, Message, Turn};
@@ -40,6 +41,7 @@ pub struct AppState {
     pub draft: EditorSnapshot,
     pub draft_attachments: Vec<Attachment>,
     pub pending_attachments: Vec<Attachment>,
+    pub native_composer: NativeComposerState,
     pub prompt_displays: Vec<CompactPromptOverride>,
     pub agent_status: AgentStatus,
     pub working_since: Option<Instant>,
@@ -70,6 +72,7 @@ impl Default for AppState {
             draft: EditorSnapshot::default(),
             draft_attachments: Vec::new(),
             pending_attachments: Vec::new(),
+            native_composer: NativeComposerState::Clear,
             prompt_displays: Vec::new(),
             agent_status: AgentStatus::Unknown,
             working_since: None,
@@ -91,11 +94,32 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn composer_access(&self) -> ComposerAccess {
+        let confirmed = self.draft_attachments.len();
+        let pending = self.pending_attachments.len();
+        if pending > 0 {
+            return match self.native_composer {
+                NativeComposerState::Clear if confirmed == 0 => ComposerAccess::Ready,
+                NativeComposerState::OwnedAttachments(actual)
+                    if actual == confirmed.saturating_add(pending) =>
+                {
+                    ComposerAccess::Ready
+                }
+                NativeComposerState::Unknown => ComposerAccess::Unknown,
+                NativeComposerState::Clear
+                | NativeComposerState::OwnedAttachments(_)
+                | NativeComposerState::Occupied => ComposerAccess::Occupied,
+            };
+        }
+        self.native_composer.access(confirmed)
+    }
+
     pub fn source_pane_closed(&mut self) {
         self.source_pane_closed = true;
         self.agent_status = AgentStatus::Unknown;
         self.working_since = None;
         self.input_enabled = false;
+        self.native_composer = NativeComposerState::Unknown;
         self.blocked_surface = None;
         self.interaction_error = None;
         self.connection_error = Some("Source pane closed · prefix+m to return".to_owned());

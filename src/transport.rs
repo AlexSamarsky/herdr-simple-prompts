@@ -1,4 +1,6 @@
 use crate::agent::{AgentIdentity, AgentStatus, agent_identity};
+use crate::ansi::sanitize_ansi;
+use crate::composer::{ComposerAccess, classify_native_composer};
 use crate::herdr::HerdrClient;
 use crate::{AppError, AppResult};
 use std::path::Path;
@@ -19,8 +21,33 @@ impl AgentTransport {
         &self.original
     }
 
-    pub fn submit(&self, text: &str) -> AppResult<()> {
+    pub fn submit(&self, text: &str, expected_attachments: usize) -> AppResult<()> {
         self.validate_source()?;
+        let ansi = self
+            .client
+            .pane_read_visible_ansi(&self.original.pane_id, 200)
+            .map_err(|_| {
+                AppError::new(
+                    "send prompt",
+                    "cannot verify native composer is safe to submit; prefix+m to return",
+                )
+            })?;
+        let surface = sanitize_ansi(&ansi);
+        match classify_native_composer(self.original.kind, &surface).access(expected_attachments) {
+            ComposerAccess::Ready => {}
+            ComposerAccess::Occupied => {
+                return Err(AppError::new(
+                    "send prompt",
+                    "native composer contains unsent input; prefix+m to return",
+                ));
+            }
+            ComposerAccess::Unknown => {
+                return Err(AppError::new(
+                    "send prompt",
+                    "cannot verify native composer is safe to submit; prefix+m to return",
+                ));
+            }
+        }
         self.client
             .agent_prompt(&self.original.pane_id, text)
             .map_err(|error| AppError::new("send prompt", error.to_string()))?;
@@ -91,6 +118,10 @@ impl AgentTransport {
 
     pub fn visible_source_ansi(&self, lines: u32) -> AppResult<String> {
         self.validate_source()?;
+        self.read_visible_source_ansi(lines)
+    }
+
+    pub(crate) fn read_visible_source_ansi(&self, lines: u32) -> AppResult<String> {
         self.client
             .pane_read_visible_ansi(&self.original.pane_id, lines)
             .map_err(|error| AppError::new("source screen", error.to_string()))

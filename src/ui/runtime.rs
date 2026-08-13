@@ -1,6 +1,7 @@
 use crate::agent::follower::{FollowerEvent, TranscriptFollower};
 use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
 use crate::ansi::{extract_native_final, sanitize_ansi};
+use crate::composer::{NativeComposerState, classify_native_composer};
 use crate::herdr::HerdrClient;
 use crate::markdown::style_markdown;
 use crate::model::Attachment;
@@ -34,6 +35,7 @@ pub(super) enum ActionCommand {
     Submit {
         local_id: String,
         text: String,
+        expected_attachments: usize,
     },
     Interrupt,
     Interaction(InteractionInput),
@@ -50,6 +52,7 @@ pub(super) enum ActionCommand {
 pub struct SourceObservation {
     pub identity: AgentIdentity,
     pub status_text: String,
+    pub native_composer: NativeComposerState,
     pub blocked_surface: Option<Result<StyledText, String>>,
 }
 
@@ -166,8 +169,17 @@ impl UiRuntime {
         self.events.try_recv().ok()
     }
 
-    pub fn submit(&self, local_id: String, text: String) -> AppResult<()> {
-        self.send_action(ActionCommand::Submit { local_id, text })
+    pub fn submit(
+        &self,
+        local_id: String,
+        text: String,
+        expected_attachments: usize,
+    ) -> AppResult<()> {
+        self.send_action(ActionCommand::Submit {
+            local_id,
+            text,
+            expected_attachments,
+        })
     }
 
     pub fn interrupt(&self) -> AppResult<()> {
@@ -323,11 +335,7 @@ fn spawn_observer(
             let observation = match transport.refresh_identity() {
                 Ok(identity) => {
                     follower_active.store(follower_is_active(identity.status), Ordering::Release);
-                    complete_observation(
-                        identity,
-                        || transport.visible_source(8),
-                        || transport.visible_source_ansi(200),
-                    )
+                    complete_observation(identity, || transport.read_visible_source_ansi(200))
                 }
                 Err(error) => Err(error.to_string()),
             };
@@ -343,18 +351,23 @@ fn follower_is_active(status: AgentStatus) -> bool {
 
 fn complete_observation(
     identity: AgentIdentity,
-    read_status: impl FnOnce() -> AppResult<String>,
-    read_blocked: impl FnOnce() -> AppResult<String>,
+    read_ansi: impl FnOnce() -> AppResult<String>,
 ) -> Result<SourceObservation, String> {
-    let status_text = read_status().map_err(|error| error.to_string())?;
-    let blocked_surface = (identity.status == AgentStatus::Blocked).then(|| {
-        read_blocked()
-            .map(|ansi| sanitize_ansi(&ansi))
-            .map_err(|error| error.to_string())
-    });
+    let ansi = read_ansi().map_err(|error| error.to_string())?;
+    let surface = sanitize_ansi(&ansi);
+    let status_text = surface
+        .text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    let native_composer = classify_native_composer(identity.kind, &surface);
+    let blocked_surface = (identity.status == AgentStatus::Blocked).then_some(Ok(surface));
     Ok(SourceObservation {
         identity,
         status_text,
+        native_composer,
         blocked_surface,
     })
 }
@@ -400,9 +413,15 @@ fn spawn_actions(
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let event = match command {
-                ActionCommand::Submit { local_id, text } => RuntimeEvent::Submitted {
+                ActionCommand::Submit {
                     local_id,
-                    result: transport.submit(&text).map_err(|error| error.to_string()),
+                    text,
+                    expected_attachments,
+                } => RuntimeEvent::Submitted {
+                    local_id,
+                    result: transport
+                        .submit(&text, expected_attachments)
+                        .map_err(|error| error.to_string()),
                 },
                 ActionCommand::Interrupt => RuntimeEvent::Interrupted(
                     transport.interrupt().map_err(|error| error.to_string()),
@@ -516,6 +535,7 @@ mod tests {
     use crate::agent::claude::ClaudeAdapter;
     use crate::agent::follower::{FollowerEvent, TranscriptFollower};
     use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
+    use crate::composer::NativeComposerState;
     use crate::herdr::HerdrClient;
     use crate::style::{AnsiColor, MessagePresentation};
     use crate::{AppError, AppResult};
@@ -735,13 +755,13 @@ mod tests {
         };
 
         let started = Instant::now();
-        runtime.submit("local-1".into(), "hello".into()).unwrap();
+        runtime.submit("local-1".into(), "hello".into(), 2).unwrap();
 
         assert!(started.elapsed() < Duration::from_millis(20));
         assert!(matches!(
             action_rx.try_recv().unwrap(),
-            ActionCommand::Submit { local_id, text }
-                if local_id == "local-1" && text == "hello"
+            ActionCommand::Submit { local_id, text, expected_attachments }
+                if local_id == "local-1" && text == "hello" && expected_attachments == 2
         ));
     }
 
@@ -757,11 +777,11 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
         };
-        runtime.submit("local-1".into(), "first".into()).unwrap();
+        runtime.submit("local-1".into(), "first".into(), 0).unwrap();
 
         let started = Instant::now();
         let error = runtime
-            .submit("local-2".into(), "second".into())
+            .submit("local-2".into(), "second".into(), 0)
             .unwrap_err();
 
         assert!(started.elapsed() < Duration::from_millis(20));
@@ -936,33 +956,35 @@ mod tests {
     }
 
     #[test]
-    fn observation_always_reads_plain_status_and_reads_ansi_only_while_blocked() {
-        for (status, expected_ansi_reads) in [
-            (AgentStatus::Working, 0),
-            (AgentStatus::Done, 0),
-            (AgentStatus::Blocked, 1),
+    fn observation_reads_one_ansi_surface_for_status_composer_and_blocked_view() {
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Done,
+            AgentStatus::Blocked,
         ] {
-            let status_reads = Cell::new(0);
             let ansi_reads = Cell::new(0);
-            let observation = complete_observation(
-                identity(status),
-                || {
-                    status_reads.set(status_reads.get() + 1);
-                    Ok("plain status".into())
-                },
-                || {
-                    ansi_reads.set(ansi_reads.get() + 1);
-                    Ok("\u{1b}]0;secret\u{7}\u{1b}[32mquestion\u{1b}[0m".into())
-                },
-            )
+            let observation = complete_observation(identity(status), || {
+                ansi_reads.set(ansi_reads.get() + 1);
+                Ok(concat!(
+                    "\u{1b}]0;secret\u{7}\u{1b}[32m• question\u{1b}[0m\n",
+                    "────────\n",
+                    "› \u{1b}[2mWrite a prompt\u{1b}[0m\n",
+                    "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+                )
+                .into())
+            })
             .unwrap();
 
-            assert_eq!(status_reads.get(), 1);
-            assert_eq!(ansi_reads.get(), expected_ansi_reads);
-            assert_eq!(observation.status_text, "plain status");
+            assert_eq!(ansi_reads.get(), 1);
+            assert_eq!(
+                observation.status_text,
+                "gpt-5.6-sol xhigh · /repo · weekly 75% left"
+            );
+            assert!(!observation.status_text.contains("question"));
+            assert_eq!(observation.native_composer, NativeComposerState::Clear);
             if status == AgentStatus::Blocked {
                 let styled = observation.blocked_surface.unwrap().unwrap();
-                assert_eq!(styled.text, "question");
+                assert!(styled.text.contains("question"));
                 assert!(!styled.runs.is_empty());
             } else {
                 assert!(observation.blocked_surface.is_none());

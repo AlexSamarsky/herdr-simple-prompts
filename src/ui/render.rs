@@ -1,5 +1,6 @@
 use crate::agent::AgentStatus;
 use crate::app::AppState;
+use crate::composer::ComposerAccess;
 use crate::editor::Editor;
 use crate::style::AnsiColor;
 use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow, wrap_styled};
@@ -45,7 +46,12 @@ impl HistoryRenderCache {
         &self.document
     }
 
-    fn viewport_rows(&mut self, app: &AppState, width: u16, height: usize) -> Vec<VisualRow> {
+    pub(crate) fn viewport_rows(
+        &mut self,
+        app: &AppState,
+        width: u16,
+        height: usize,
+    ) -> Vec<VisualRow> {
         let rebuild = self.cached_generation != Some(self.generation) || self.width != Some(width);
         let layout_changed = self.viewport_height != Some(height);
         let old_maximum = self.maximum_offset;
@@ -112,8 +118,26 @@ pub(crate) fn render(
     let area = frame.area();
     let display_text = editor.display_text();
     let working_height = u16::from(app.agent_status == AgentStatus::Working);
-    let attachment_rows = attachment_visual_height(app, area.width);
-    let editor_rows = wrapped_text_height(display_text, area.width);
+    let composer_guard = app
+        .input_enabled
+        .then(|| match app.composer_access() {
+            ComposerAccess::Ready => None,
+            ComposerAccess::Occupied => {
+                Some("Native composer contains unsent input · prefix+m to return")
+            }
+            ComposerAccess::Unknown => {
+                Some("Unable to verify native composer · prefix+m to return")
+            }
+        })
+        .flatten();
+    let attachment_rows = if composer_guard.is_some() {
+        0
+    } else {
+        attachment_visual_height(app, area.width)
+    };
+    let editor_rows = composer_guard
+        .map(|warning| wrapped_text_height(warning, area.width))
+        .unwrap_or_else(|| wrapped_text_height(display_text, area.width));
     let composer_rows = attachment_rows.saturating_add(editor_rows);
     let composer_height = (composer_rows + 1).clamp(3, (area.height * 2 / 5).max(3));
     let error_height = u16::from(app.visible_error().is_some());
@@ -159,22 +183,18 @@ pub(crate) fn render(
             areas[2],
         );
     }
-    let mut composer_lines = app
-        .draft_attachments
-        .iter()
-        .enumerate()
-        .map(|(index, attachment)| {
-            Line::styled(
-                format!("[Image #{}] {}", index + 1, attachment.display),
-                Style::default().fg(Color::Magenta),
-            )
-        })
-        .collect::<Vec<_>>();
-    composer_lines.extend(
-        app.pending_attachments
-            .iter()
-            .enumerate()
-            .map(|(index, attachment)| {
+    let mut composer_lines = Vec::new();
+    if composer_guard.is_none() {
+        composer_lines.extend(app.draft_attachments.iter().enumerate().map(
+            |(index, attachment)| {
+                Line::styled(
+                    format!("[Image #{}] {}", index + 1, attachment.display),
+                    Style::default().fg(Color::Magenta),
+                )
+            },
+        ));
+        composer_lines.extend(app.pending_attachments.iter().enumerate().map(
+            |(index, attachment)| {
                 Line::styled(
                     format!(
                         "[Image #{}] {} (verifying…)",
@@ -183,12 +203,18 @@ pub(crate) fn render(
                     ),
                     Style::default().fg(Color::Yellow),
                 )
-            }),
-    );
+            },
+        ));
+    }
     if !app.input_enabled {
         composer_lines.push(Line::from(Span::styled(
             "Input disabled · reopen Simple Prompts",
             Style::default().fg(Color::Red),
+        )));
+    } else if let Some(warning) = composer_guard {
+        composer_lines.push(Line::from(Span::styled(
+            warning,
+            Style::default().fg(Color::Yellow),
         )));
     } else if display_text.is_empty() {
         composer_lines.push(Line::from(Span::styled(
@@ -213,9 +239,11 @@ pub(crate) fn render(
     );
     frame.render_widget(Paragraph::new(footer(app)), areas[4]);
 
-    let (cursor_row, cursor_column) =
-        editor_cursor(areas[3], cursor_content_row, editor_column, composer_scroll);
-    frame.set_cursor_position((cursor_column, cursor_row));
+    if app.input_enabled && composer_guard.is_none() {
+        let (cursor_row, cursor_column) =
+            editor_cursor(areas[3], cursor_content_row, editor_column, composer_scroll);
+        frame.set_cursor_position((cursor_column, cursor_row));
+    }
 }
 
 fn render_blocked(frame: &mut Frame<'_>, app: &AppState) {
