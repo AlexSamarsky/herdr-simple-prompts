@@ -2,6 +2,7 @@ use crate::agent::follower::{FollowerEvent, TranscriptFollower};
 use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
 use crate::ansi::{extract_native_final, sanitize_ansi};
 use crate::herdr::HerdrClient;
+use crate::markdown::style_markdown;
 use crate::model::Attachment;
 use crate::paste::fingerprint;
 use crate::style::MessagePresentation;
@@ -487,12 +488,13 @@ fn resolve_capture(
     attempts: usize,
     retry_delay: Duration,
 ) -> (MessagePresentation, Option<String>) {
+    let fallback = style_markdown(canonical_text);
     let mut last_error = None;
     for attempt in 0..attempts {
         match read() {
             Ok(ansi) => {
-                if let Some(styled) = extract_native_final(&ansi, canonical_text, kind) {
-                    return (MessagePresentation::NativeAnsi(styled.runs), None);
+                if let Some(styled) = extract_native_final(&ansi, &fallback.text, kind) {
+                    return (MessagePresentation::NativeAnsi(styled), None);
                 }
             }
             Err(error) => last_error = Some(error.to_string()),
@@ -814,10 +816,38 @@ mod tests {
 
         assert_eq!(reads, 1);
         assert!(diagnostic.is_none());
-        let MessagePresentation::NativeAnsi(runs) = presentation else {
+        let MessagePresentation::NativeAnsi(styled) = presentation else {
             panic!("exact capture must keep native ANSI provenance")
         };
-        assert_eq!(runs[0].foreground, Some(AnsiColor::Green));
+        assert_eq!(styled.text, "answer");
+        assert_eq!(styled.runs[0].foreground, Some(AnsiColor::Green));
+    }
+
+    #[test]
+    fn capture_resolution_projects_canonical_markdown_before_exact_match() {
+        let canonical = "# Final **answer** with [docs](https://example.test)";
+        let (presentation, diagnostic) = resolve_capture(
+            AgentKind::Codex,
+            canonical,
+            || {
+                Ok(concat!(
+                    "────────\n",
+                    "\u{1b}[32m• Final answer with docs\u{1b}[0m\n",
+                    "────────\n",
+                    "› Write a prompt",
+                )
+                .into())
+            },
+            1,
+            Duration::ZERO,
+        );
+
+        assert!(diagnostic.is_none());
+        let MessagePresentation::NativeAnsi(styled) = presentation else {
+            panic!("projected exact capture must keep native ANSI provenance")
+        };
+        assert_eq!(styled.text, "Final answer with docs");
+        assert_eq!(styled.runs[0].foreground, Some(AnsiColor::Green));
     }
 
     #[test]

@@ -347,10 +347,7 @@ fn prompt_lines(message: &Message, delivery: &Delivery) -> Vec<StyledText> {
 
 fn answer_lines(message: &Message) -> Vec<StyledText> {
     let source = match &message.presentation {
-        MessagePresentation::NativeAnsi(runs) => StyledText {
-            text: message.text.clone(),
-            runs: runs.clone(),
-        },
+        MessagePresentation::NativeAnsi(styled) => styled.clone(),
         MessagePresentation::MarkdownFallback => crate::markdown::style_markdown(&message.text),
         MessagePresentation::Plain => StyledText {
             text: message.text.clone(),
@@ -376,7 +373,7 @@ fn split_styled_lines(source: &StyledText) -> Vec<StyledText> {
             .filter_map(|run| {
                 let from = run.start_byte.max(start);
                 let to = run.end_byte.min(end);
-                (from < to).then_some(StyleRun {
+                (from < to).then(|| StyleRun {
                     start_byte: from - start,
                     end_byte: to - start,
                     foreground: run.foreground,

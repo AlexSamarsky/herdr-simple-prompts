@@ -7,7 +7,9 @@ use herdr_simple_prompts::history::{
 use herdr_simple_prompts::model::{Attachment, Message};
 use herdr_simple_prompts::paste::{LARGE_PASTE_CHARS, fingerprint};
 use herdr_simple_prompts::state::StateStore;
-use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
+use herdr_simple_prompts::style::{
+    AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText,
+};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 
@@ -20,7 +22,7 @@ fn test_root(label: &str) -> std::path::PathBuf {
 
 fn prompt(id: &str, turn_id: &str, order: u64, text: &str) -> VisibleHistoryRecord {
     VisibleHistoryRecord {
-        version: 1,
+        version: 2,
         role: VisibleRole::Prompt,
         stable_id: id.into(),
         turn_id: turn_id.into(),
@@ -30,12 +32,14 @@ fn prompt(id: &str, turn_id: &str, order: u64, text: &str) -> VisibleHistoryReco
         timestamp_ms: Some(order),
         text_fingerprint: fingerprint(text),
         presentation: PersistedPresentation::Plain,
+        rendered_text: None,
+        rendered_text_fingerprint: None,
     }
 }
 
 fn final_record(id: &str, turn_id: &str, order: u64, text: &str) -> VisibleHistoryRecord {
     VisibleHistoryRecord {
-        version: 1,
+        version: 2,
         role: VisibleRole::Final,
         stable_id: id.into(),
         turn_id: turn_id.into(),
@@ -45,7 +49,21 @@ fn final_record(id: &str, turn_id: &str, order: u64, text: &str) -> VisibleHisto
         timestamp_ms: Some(order),
         text_fingerprint: fingerprint(text),
         presentation: PersistedPresentation::Fallback,
+        rendered_text: None,
+        rendered_text_fingerprint: None,
     }
+}
+
+fn set_native(record: &mut VisibleHistoryRecord, rendered: &str) {
+    record.presentation = PersistedPresentation::NativeAnsi(vec![native_run(rendered)]);
+    record.rendered_text = Some(rendered.into());
+    record.rendered_text_fingerprint = Some(fingerprint(rendered));
+}
+
+fn legacy_final(id: &str, turn_id: &str, order: u64, text: &str) -> VisibleHistoryRecord {
+    let mut record = final_record(id, turn_id, order, text);
+    record.version = 1;
+    record
 }
 
 fn native_run(text: &str) -> StyleRun {
@@ -128,12 +146,136 @@ fn later_native_style_upsert_replaces_fallback_without_changing_order() {
     let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
     let fallback = final_record("a1", "u1", 2, "answer");
     let mut native = fallback.clone();
-    native.presentation = PersistedPresentation::NativeAnsi(vec![native_run("answer")]);
+    set_native(&mut native, "answer");
     journal.append(&fallback).unwrap();
     journal.append(&native).unwrap();
 
     assert_eq!(journal.load().unwrap(), vec![native]);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn v2_native_roundtrip_and_hydration_preserve_canonical_and_rendered_text() {
+    let root = test_root("v2-native-roundtrip");
+    let _ = std::fs::remove_dir_all(&root);
+    let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
+    let canonical = "# **Answer** [docs](https://example.test)";
+    let rendered = "Answer docs";
+    let prompt_record = prompt("u1", "u1", 1, "question");
+    let mut final_record = final_record("a1", "u1", 2, canonical);
+    set_native(&mut final_record, rendered);
+
+    journal.append(&prompt_record).unwrap();
+    journal.append(&final_record).unwrap();
+    let loaded = journal.load().unwrap();
+    assert_eq!(loaded, vec![prompt_record, final_record.clone()]);
+
+    let mut app = AppState::default();
+    app.hydrate_visible_history(loaded);
+    let restored = app.turns[0].final_answer.as_ref().unwrap();
+    assert_eq!(restored.text, canonical);
+    assert_eq!(
+        restored.presentation,
+        MessagePresentation::NativeAnsi(StyledText {
+            text: rendered.into(),
+            runs: vec![native_run(rendered)],
+        })
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn v2_native_rendered_integrity_is_validated_independently_of_canonical_text() {
+    let canonical = "canonical transcript text that is much longer than rendered";
+    let mut valid = final_record("a1", "u1", 2, canonical);
+    set_native(&mut valid, "short");
+    assert!(valid.validate().is_ok());
+
+    let mut missing_rendered = valid.clone();
+    missing_rendered.rendered_text = None;
+    assert!(missing_rendered.validate().is_err());
+    let mut missing_fingerprint = valid.clone();
+    missing_fingerprint.rendered_text_fingerprint = None;
+    assert!(missing_fingerprint.validate().is_err());
+
+    let mut fingerprint_mismatch = valid.clone();
+    fingerprint_mismatch.rendered_text_fingerprint = Some(fingerprint("different"));
+    assert!(fingerprint_mismatch.validate().is_err());
+
+    let mut rendered_control = valid.clone();
+    rendered_control.rendered_text = Some("unsafe\u{1b}".into());
+    rendered_control.rendered_text_fingerprint = Some(fingerprint("unsafe\u{1b}"));
+    rendered_control.presentation = PersistedPresentation::NativeAnsi(Vec::new());
+    assert!(rendered_control.validate().is_err());
+
+    let mut canonical_relative = valid.clone();
+    canonical_relative.presentation = PersistedPresentation::NativeAnsi(vec![StyleRun {
+        start_byte: 0,
+        end_byte: 20,
+        ..native_run("short")
+    }]);
+    assert!(canonical_relative.validate().is_err());
+
+    let mut fallback_rendered = final_record("a2", "u1", 3, "fallback");
+    fallback_rendered.rendered_text = Some("not allowed".into());
+    fallback_rendered.rendered_text_fingerprint = Some(fingerprint("not allowed"));
+    assert!(fallback_rendered.validate().is_err());
+
+    let mut prompt_rendered = prompt("u2", "u2", 4, "question");
+    prompt_rendered.rendered_text = Some("not allowed".into());
+    prompt_rendered.rendered_text_fingerprint = Some(fingerprint("not allowed"));
+    assert!(prompt_rendered.validate().is_err());
+}
+
+#[test]
+fn v1_native_records_restore_only_when_projection_is_byte_identical() {
+    let runs = vec![native_run("plain answer")];
+    let mut plain = legacy_final("a1", "u1", 2, "plain answer");
+    plain.presentation = PersistedPresentation::NativeAnsi(runs.clone());
+    assert!(plain.validate().is_ok());
+
+    let markdown = "**bold answer**";
+    let mut projected = legacy_final("a2", "u2", 4, markdown);
+    projected.presentation = PersistedPresentation::NativeAnsi(vec![native_run(markdown)]);
+    assert!(projected.validate().is_ok());
+
+    let mut app = AppState::default();
+    let mut first_prompt = prompt("u1", "u1", 1, "first");
+    first_prompt.version = 1;
+    let mut second_prompt = prompt("u2", "u2", 3, "second");
+    second_prompt.version = 1;
+    app.hydrate_visible_history(vec![first_prompt, plain, second_prompt, projected]);
+
+    assert_eq!(
+        app.turns[0].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::NativeAnsi(StyledText {
+            text: "plain answer".into(),
+            runs,
+        })
+    );
+    assert_eq!(
+        app.turns[1].final_answer.as_ref().unwrap().presentation,
+        MessagePresentation::MarkdownFallback
+    );
+}
+
+#[test]
+fn v1_records_reject_v2_rendered_fields() {
+    let mut legacy = legacy_final("a1", "u1", 2, "plain answer");
+    legacy.presentation = PersistedPresentation::NativeAnsi(vec![native_run("plain answer")]);
+    legacy.rendered_text = Some("plain answer".into());
+    legacy.rendered_text_fingerprint = Some(fingerprint("plain answer"));
+
+    assert!(legacy.validate().is_err());
+}
+
+#[test]
+fn v1_native_records_reject_control_bytes_before_hydration() {
+    let text = "unsafe\u{1b}";
+    let mut legacy = legacy_final("a1", "u1", 2, text);
+    legacy.presentation = PersistedPresentation::NativeAnsi(Vec::new());
+
+    assert!(legacy.validate().is_err());
 }
 
 #[test]
@@ -265,12 +407,13 @@ fn invalid_upserts_do_not_poison_the_last_valid_record() {
     journal.append(&valid).unwrap();
 
     let mut invalid_version = valid.clone();
-    invalid_version.version = 2;
+    invalid_version.version = 3;
     append_json_line(journal.path(), &invalid_version);
     let mut invalid_fingerprint = valid.clone();
     invalid_fingerprint.text_fingerprint ^= 1;
     append_json_line(journal.path(), &invalid_fingerprint);
     let mut split_scalar = valid.clone();
+    set_native(&mut split_scalar, "a界b");
     split_scalar.presentation = PersistedPresentation::NativeAnsi(vec![StyleRun {
         start_byte: 1,
         end_byte: 2,
@@ -278,6 +421,7 @@ fn invalid_upserts_do_not_poison_the_last_valid_record() {
     }]);
     append_json_line(journal.path(), &split_scalar);
     let mut overlap = valid.clone();
+    set_native(&mut overlap, "a界b");
     overlap.presentation = PersistedPresentation::NativeAnsi(vec![
         StyleRun {
             start_byte: 0,

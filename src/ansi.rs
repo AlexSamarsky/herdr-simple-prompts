@@ -66,8 +66,12 @@ pub fn sanitize_ansi(input: &str) -> StyledText {
     }
 }
 
-pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Option<StyledText> {
-    if canonical.is_empty() || canonical.contains('\r') {
+pub fn extract_native_final(
+    ansi: &str,
+    expected_visible: &str,
+    kind: AgentKind,
+) -> Option<StyledText> {
+    if expected_visible.is_empty() || expected_visible.contains('\r') {
         return None;
     }
     let sanitized = sanitize_ansi(ansi);
@@ -76,7 +80,7 @@ pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Opt
         AgentKind::Codex => &CODEX_CHROME,
         AgentKind::Claude => &CLAUDE_CHROME,
     };
-    let canonical_lines: Vec<&str> = canonical.split('\n').collect();
+    let expected_visible_lines: Vec<&str> = expected_visible.split('\n').collect();
     let mut candidates = Vec::new();
 
     for boundary in 0..lines.len() {
@@ -87,7 +91,7 @@ pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Opt
             continue;
         }
         let first = boundary + 1;
-        let trailing = first + canonical_lines.len();
+        let trailing = first + expected_visible_lines.len();
         let composer = trailing + 1;
         if composer >= lines.len()
             || !is_trailing_boundary(line_text(&sanitized.text, lines[trailing]), chrome)
@@ -99,10 +103,10 @@ pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Opt
             continue;
         }
 
-        let mut mappings = Vec::with_capacity(canonical_lines.len() * 2);
+        let mut mappings = Vec::with_capacity(expected_visible_lines.len() * 2);
         let mut destination = 0;
         let mut exact = true;
-        for (offset, canonical_line) in canonical_lines.iter().enumerate() {
+        for (offset, expected_visible_line) in expected_visible_lines.iter().enumerate() {
             let range = lines[first + offset];
             let source_line = line_text(&sanitized.text, range);
             let prefixes = if offset == 0 {
@@ -110,7 +114,7 @@ pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Opt
             } else {
                 chrome.continuation_prefixes
             };
-            let prefix = if source_line.is_empty() && canonical_line.is_empty() {
+            let prefix = if source_line.is_empty() && expected_visible_line.is_empty() {
                 ""
             } else if let Some(prefix) = prefixes
                 .iter()
@@ -123,13 +127,13 @@ pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Opt
                 break;
             };
             let content_start = range.start + prefix.len();
-            if &sanitized.text[content_start..range.end] != *canonical_line {
+            if &sanitized.text[content_start..range.end] != *expected_visible_line {
                 exact = false;
                 break;
             }
             mappings.push((content_start, range.end, destination));
-            destination += canonical_line.len();
-            if offset + 1 < canonical_lines.len() {
+            destination += expected_visible_line.len();
+            if offset + 1 < expected_visible_lines.len() {
                 let newline_end = range.end.checked_add(1)?;
                 if sanitized.text.as_bytes().get(range.end) != Some(&b'\n') {
                     exact = false;
@@ -157,7 +161,7 @@ pub fn extract_native_final(ansi: &str, canonical: &str, kind: AgentKind) -> Opt
         return None;
     }
     Some(StyledText {
-        text: canonical.to_owned(),
+        text: expected_visible.to_owned(),
         runs,
     })
 }

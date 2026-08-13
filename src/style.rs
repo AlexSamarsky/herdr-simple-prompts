@@ -41,7 +41,7 @@ pub struct StyleRun {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MessagePresentation {
     Plain,
-    NativeAnsi(Vec<StyleRun>),
+    NativeAnsi(StyledText),
     MarkdownFallback,
 }
 
@@ -51,6 +51,17 @@ pub struct StyledText {
     pub runs: Vec<StyleRun>,
 }
 
+pub fn validate_styled_text(styled: &StyledText) -> Result<(), String> {
+    if styled
+        .text
+        .chars()
+        .any(|character| character != '\n' && character.is_control())
+    {
+        return Err("styled text contains a terminal control character".into());
+    }
+    validate_style_runs(&styled.text, &styled.runs)
+}
+
 pub fn validate_style_runs(text: &str, runs: &[StyleRun]) -> Result<(), String> {
     let mut previous_end = 0;
     for (index, run) in runs.iter().enumerate() {
@@ -58,7 +69,7 @@ pub fn validate_style_runs(text: &str, runs: &[StyleRun]) -> Result<(), String> 
             return Err(format!("style run {index} is empty or reversed"));
         }
         if run.end_byte > text.len() {
-            return Err(format!("style run {index} extends past canonical text"));
+            return Err(format!("style run {index} extends past styled text"));
         }
         if !text.is_char_boundary(run.start_byte) || !text.is_char_boundary(run.end_byte) {
             return Err(format!(

@@ -5,6 +5,7 @@ use herdr_simple_prompts::markdown::style_markdown;
 use herdr_simple_prompts::model::Message;
 use herdr_simple_prompts::style::{
     AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText, validate_style_runs,
+    validate_styled_text,
 };
 
 fn style_at(styled: &StyledText, byte: usize) -> Option<&StyleRun> {
@@ -15,7 +16,7 @@ fn style_at(styled: &StyledText, byte: usize) -> Option<&StyleRun> {
 }
 
 #[test]
-fn style_ranges_require_ordered_utf8_boundaries_inside_canonical_text() {
+fn style_ranges_require_ordered_utf8_boundaries_inside_styled_text() {
     let text = "a界b";
     let valid = vec![StyleRun {
         start_byte: 1,
@@ -42,10 +43,55 @@ fn style_ranges_require_ordered_utf8_boundaries_inside_canonical_text() {
 }
 
 #[test]
+fn styled_text_validation_rejects_controls_and_invalid_rendered_ranges() {
+    let valid = StyledText {
+        text: "safe\n界".into(),
+        runs: vec![StyleRun {
+            start_byte: "safe\n".len(),
+            end_byte: "safe\n界".len(),
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+    };
+    assert!(validate_styled_text(&valid).is_ok());
+
+    let control = StyledText {
+        text: "unsafe\u{1b}".into(),
+        runs: Vec::new(),
+    };
+    assert!(validate_styled_text(&control).is_err());
+
+    let beyond_rendered = StyledText {
+        text: "short".into(),
+        runs: vec![StyleRun {
+            start_byte: 0,
+            end_byte: 99,
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+    };
+    assert!(validate_styled_text(&beyond_rendered).is_err());
+
+    let split_scalar = StyledText {
+        text: "a界b".into(),
+        runs: vec![StyleRun {
+            start_byte: 1,
+            end_byte: 2,
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+    };
+    assert!(validate_styled_text(&split_scalar).is_err());
+}
+
+#[test]
 fn fallback_and_native_provenance_are_not_confused() {
     assert_ne!(
         MessagePresentation::MarkdownFallback,
-        MessagePresentation::NativeAnsi(vec![])
+        MessagePresentation::NativeAnsi(StyledText::default())
     );
 }
 
@@ -450,6 +496,38 @@ fn exact_codex_final_capture_removes_only_known_chrome_and_preserves_styles() {
         "Final heading"
     );
     assert!(validate_style_runs(&captured.text, &captured.runs).is_ok());
+}
+
+#[test]
+fn native_final_capture_matches_projected_visible_text_and_keeps_native_styles() {
+    let canonical = "# Final **heading**\nUse [docs](https://example.test) and `cargo test`.";
+    let projected = style_markdown(canonical);
+    assert_eq!(projected.text, "Final heading\nUse docs and cargo test.");
+    let ansi = concat!(
+        "tool output\n",
+        "────────\n",
+        "\u{1b}[1;36m• Final heading\u{1b}[0m\n",
+        "  Use \u{1b}[4;34mdocs\u{1b}[0m and \u{1b}[30;47mcargo test\u{1b}[0m.\n",
+        "────────\n",
+        "› Write a prompt",
+    );
+
+    let captured = extract_native_final(ansi, &projected.text, AgentKind::Codex).unwrap();
+
+    assert_eq!(captured.text, projected.text);
+    assert!(!captured.text.contains("https://example.test"));
+    assert!(!captured.text.contains('`'));
+    assert!(validate_styled_text(&captured).is_ok());
+
+    let heading = style_at(&captured, captured.text.find("Final heading").unwrap()).unwrap();
+    assert_eq!(heading.foreground, Some(AnsiColor::Cyan));
+    assert!(heading.modifiers.bold);
+    let docs = style_at(&captured, captured.text.find("docs").unwrap()).unwrap();
+    assert_eq!(docs.foreground, Some(AnsiColor::Blue));
+    assert!(docs.modifiers.underline);
+    let code = style_at(&captured, captured.text.find("cargo test").unwrap()).unwrap();
+    assert_eq!(code.foreground, Some(AnsiColor::Black));
+    assert_eq!(code.background, Some(AnsiColor::White));
 }
 
 #[test]

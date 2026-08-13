@@ -1,11 +1,12 @@
 use crate::ansi::sanitize_ansi;
+use crate::markdown::style_markdown;
 use crate::model::{Attachment, Message};
 use crate::paste::fingerprint;
 use crate::state::{
     ensure_private_directory, nofollow_flag, reject_symlink, safe_state_component,
     validate_private_directory, validate_regular_file,
 };
-use crate::style::{MessagePresentation, StyleRun, validate_style_runs};
+use crate::style::{MessagePresentation, StyleRun, StyledText, validate_styled_text};
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -18,7 +19,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const HISTORY_VERSION: u8 = 1;
+const HISTORY_VERSION: u8 = 2;
+const LEGACY_HISTORY_VERSION: u8 = 1;
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(2);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const WRITER_RETRY_BACKOFF: Duration = Duration::from_millis(100);
@@ -56,6 +58,10 @@ pub struct VisibleHistoryRecord {
     pub timestamp_ms: Option<u64>,
     pub text_fingerprint: u64,
     pub presentation: PersistedPresentation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_text_fingerprint: Option<u64>,
 }
 
 impl VisibleHistoryRecord {
@@ -72,6 +78,8 @@ impl VisibleHistoryRecord {
             message,
             order,
             PersistedPresentation::Plain,
+            None,
+            None,
         );
         record.validate()?;
         Ok(record)
@@ -82,11 +90,13 @@ impl VisibleHistoryRecord {
         turn_id: impl Into<String>,
         order: u64,
     ) -> AppResult<Self> {
-        let presentation = match &message.presentation {
-            MessagePresentation::NativeAnsi(runs) => {
-                PersistedPresentation::NativeAnsi(runs.clone())
-            }
-            MessagePresentation::MarkdownFallback => PersistedPresentation::Fallback,
+        let (presentation, rendered_text, rendered_text_fingerprint) = match &message.presentation {
+            MessagePresentation::NativeAnsi(styled) => (
+                PersistedPresentation::NativeAnsi(styled.runs.clone()),
+                Some(styled.text.clone()),
+                Some(fingerprint(&styled.text)),
+            ),
+            MessagePresentation::MarkdownFallback => (PersistedPresentation::Fallback, None, None),
             MessagePresentation::Plain => {
                 return Err(AppError::new(
                     "history journal",
@@ -100,13 +110,15 @@ impl VisibleHistoryRecord {
             message,
             order,
             presentation,
+            rendered_text,
+            rendered_text_fingerprint,
         );
         record.validate()?;
         Ok(record)
     }
 
     pub fn validate(&self) -> AppResult<()> {
-        if self.version != HISTORY_VERSION {
+        if !matches!(self.version, LEGACY_HISTORY_VERSION | HISTORY_VERSION) {
             return Err(AppError::new(
                 "history journal",
                 format!("unsupported record version {}", self.version),
@@ -126,10 +138,48 @@ impl VisibleHistoryRecord {
         }
         match (&self.role, &self.presentation) {
             (VisibleRole::Prompt, PersistedPresentation::Plain)
-            | (VisibleRole::Final, PersistedPresentation::Fallback) => {}
+            | (VisibleRole::Final, PersistedPresentation::Fallback) => {
+                if self.rendered_text.is_some() || self.rendered_text_fingerprint.is_some() {
+                    return Err(AppError::new(
+                        "history journal",
+                        "non-native presentation carries rendered text",
+                    ));
+                }
+            }
             (VisibleRole::Final, PersistedPresentation::NativeAnsi(runs)) => {
-                validate_style_runs(&self.text, runs)
+                if self.version == LEGACY_HISTORY_VERSION {
+                    if self.rendered_text.is_some() || self.rendered_text_fingerprint.is_some() {
+                        return Err(AppError::new(
+                            "history journal",
+                            "legacy native presentation carries rendered text",
+                        ));
+                    }
+                    validate_styled_text(&StyledText {
+                        text: self.text.clone(),
+                        runs: runs.clone(),
+                    })
                     .map_err(|error| AppError::new("history journal", error))?;
+                } else {
+                    let (Some(rendered_text), Some(rendered_text_fingerprint)) =
+                        (self.rendered_text.as_ref(), self.rendered_text_fingerprint)
+                    else {
+                        return Err(AppError::new(
+                            "history journal",
+                            "native presentation is missing rendered text",
+                        ));
+                    };
+                    if rendered_text_fingerprint != fingerprint(rendered_text) {
+                        return Err(AppError::new(
+                            "history journal",
+                            "rendered text fingerprint does not match",
+                        ));
+                    }
+                    validate_styled_text(&StyledText {
+                        text: rendered_text.clone(),
+                        runs: runs.clone(),
+                    })
+                    .map_err(|error| AppError::new("history journal", error))?;
+                }
             }
             (VisibleRole::Prompt, _) => {
                 return Err(AppError::new(
@@ -159,7 +209,21 @@ impl VisibleHistoryRecord {
     pub(crate) fn into_message(self) -> Message {
         let presentation = match self.presentation {
             PersistedPresentation::Plain => MessagePresentation::Plain,
-            PersistedPresentation::NativeAnsi(runs) => MessagePresentation::NativeAnsi(runs),
+            PersistedPresentation::NativeAnsi(runs) if self.version == HISTORY_VERSION => self
+                .rendered_text
+                .map(|text| MessagePresentation::NativeAnsi(StyledText { text, runs }))
+                .unwrap_or(MessagePresentation::MarkdownFallback),
+            PersistedPresentation::NativeAnsi(runs) => {
+                let projected = style_markdown(&self.text);
+                if projected.text == self.text {
+                    MessagePresentation::NativeAnsi(StyledText {
+                        text: self.text.clone(),
+                        runs,
+                    })
+                } else {
+                    MessagePresentation::MarkdownFallback
+                }
+            }
             PersistedPresentation::Fallback => MessagePresentation::MarkdownFallback,
         };
         Message::restored(
@@ -184,6 +248,8 @@ impl VisibleHistoryRecord {
         message: &Message,
         order: u64,
         presentation: PersistedPresentation,
+        rendered_text: Option<String>,
+        rendered_text_fingerprint: Option<u64>,
     ) -> Self {
         Self {
             version: HISTORY_VERSION,
@@ -203,6 +269,8 @@ impl VisibleHistoryRecord {
             timestamp_ms: message.timestamp_ms,
             text_fingerprint: fingerprint(&message.text),
             presentation,
+            rendered_text,
+            rendered_text_fingerprint,
         }
     }
 }
@@ -624,7 +692,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let journal = HistoryJournal::at(&root, "w1:p1", "session-1").unwrap();
         let first = VisibleHistoryRecord {
-            version: 1,
+            version: 2,
             role: VisibleRole::Prompt,
             stable_id: "u1".into(),
             turn_id: "u1".into(),
@@ -634,6 +702,8 @@ mod tests {
             timestamp_ms: Some(1),
             text_fingerprint: fingerprint("first"),
             presentation: PersistedPresentation::Plain,
+            rendered_text: None,
+            rendered_text_fingerprint: None,
         };
         journal.append(&first).unwrap();
         let locked_file = OpenOptions::new()

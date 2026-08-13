@@ -116,10 +116,13 @@ fn native_ansi_white_brightness_matches_ratatui_cells() {
     app.apply(AppEvent::NativeFinal(Message {
         stable_id: "a1".into(),
         text: "ab".into(),
-        presentation: MessagePresentation::NativeAnsi(vec![
-            style_run(0..1, Some(AnsiColor::White), Some(AnsiColor::BrightWhite)),
-            style_run(1..2, Some(AnsiColor::BrightWhite), Some(AnsiColor::White)),
-        ]),
+        presentation: MessagePresentation::NativeAnsi(StyledText {
+            text: "ab".into(),
+            runs: vec![
+                style_run(0..1, Some(AnsiColor::White), Some(AnsiColor::BrightWhite)),
+                style_run(1..2, Some(AnsiColor::BrightWhite), Some(AnsiColor::White)),
+            ],
+        }),
         attachments: Vec::new(),
         timestamp_ms: Some(2),
     }));
@@ -597,11 +600,21 @@ fn markdown_fallback_body_styles_flow_into_rendered_visual_rows() {
     )));
     app.apply(AppEvent::NativeFinal(Message::final_text(
         "a1",
-        "plain **Ω** and `λ`",
+        "# Heading [docs](https://example.test)\nplain **Ω** and `λ`",
         Some(2),
     )));
 
     let document = HistoryDocument::from_app(&app, 50);
+    let visible = document
+        .rows
+        .iter()
+        .map(VisualRow::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains("Heading docs"));
+    assert!(!visible.contains("https://example.test"));
+    assert!(!visible.contains("**"));
+    assert!(!visible.contains('`'));
     let omega = document
         .rows
         .iter()
@@ -621,6 +634,54 @@ fn markdown_fallback_body_styles_flow_into_rendered_visual_rows() {
         app.turns[0].final_answer.as_ref().unwrap().presentation,
         MessagePresentation::MarkdownFallback
     );
+}
+
+#[test]
+fn native_presentation_renders_owned_visible_text_not_canonical_markdown() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "show native",
+        Some(1),
+    )));
+    app.apply(AppEvent::NativeFinal(Message {
+        stable_id: "a1".into(),
+        text: "# [canonical](https://example.test)".into(),
+        presentation: MessagePresentation::NativeAnsi(StyledText {
+            text: "Native label".into(),
+            runs: vec![StyleRun {
+                start_byte: 0,
+                end_byte: "Native label".len(),
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers {
+                    bold: true,
+                    ..StyleModifiers::default()
+                },
+            }],
+        }),
+        attachments: Vec::new(),
+        timestamp_ms: Some(2),
+    }));
+
+    let document = HistoryDocument::from_app(&app, 50);
+    let rendered = render_to_string(&app, &Editor::default(), 50, 14);
+    let native = document
+        .rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .find(|span| span.text.contains("Native label"))
+        .expect("native rendered text should reach visual rows");
+    assert_eq!(native.style.foreground, Some(AnsiColor::Green));
+    assert!(native.style.modifiers.bold);
+    assert!(rendered.contains("Native label"));
+    assert!(!rendered.contains("canonical"));
+    assert!(!rendered.contains("https://example.test"));
+
+    let buffer = rendered_buffer(&app, 50, 14);
+    let cell = find_cell(&buffer, 50, 14, "N");
+    assert_eq!(buffer[cell].style().fg, Some(Color::Green));
+    assert!(buffer[cell].style().add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]

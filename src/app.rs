@@ -5,7 +5,7 @@ use crate::model::{Attachment, Delivery, Message, Turn};
 use crate::paste::fingerprint;
 use crate::paste::{CompactPromptOverride, canonicalize_compact_markers, marker_counts};
 use crate::status::StatusLine;
-use crate::style::{MessagePresentation, StyledText, validate_style_runs};
+use crate::style::{MessagePresentation, StyledText, validate_styled_text};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -164,7 +164,13 @@ impl AppState {
                 self.queue_prompt_upsert(index);
             }
             AppEvent::NativeFinal(mut message) => {
-                if message.presentation == MessagePresentation::Plain {
+                if message.presentation == MessagePresentation::Plain
+                    || matches!(
+                        &message.presentation,
+                        MessagePresentation::NativeAnsi(styled)
+                            if validate_styled_text(styled).is_err()
+                    )
+                {
                     message.presentation = MessagePresentation::MarkdownFallback;
                 }
                 if let Some(index) = self.reconcile_final(message) {
@@ -210,8 +216,8 @@ impl AppState {
                         .as_mut()
                         .expect("target contains a final answer");
                     let valid = match &presentation {
-                        MessagePresentation::NativeAnsi(runs) => {
-                            validate_style_runs(&message.text, runs).is_ok()
+                        MessagePresentation::NativeAnsi(styled) => {
+                            validate_styled_text(styled).is_ok()
                         }
                         MessagePresentation::MarkdownFallback => {
                             !matches!(message.presentation, MessagePresentation::NativeAnsi(_))

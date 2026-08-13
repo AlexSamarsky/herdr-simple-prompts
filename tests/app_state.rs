@@ -4,7 +4,9 @@ use herdr_simple_prompts::history::{PersistedPresentation, VisibleHistoryRecord,
 use herdr_simple_prompts::model::{Delivery, Message};
 use herdr_simple_prompts::paste::CompactPromptOverride;
 use herdr_simple_prompts::paste::fingerprint;
-use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
+use herdr_simple_prompts::style::{
+    AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText,
+};
 
 fn compact_submission(source: &str) -> EditorSubmission {
     let mut editor = Editor::default();
@@ -16,6 +18,13 @@ fn plain_submission(source: &str) -> EditorSubmission {
     let mut editor = Editor::default();
     editor.replace(source);
     editor.take_editor_submission()
+}
+
+fn native_presentation(text: &str, runs: Vec<StyleRun>) -> MessagePresentation {
+    MessagePresentation::NativeAnsi(StyledText {
+        text: text.into(),
+        runs,
+    })
 }
 
 #[test]
@@ -343,6 +352,8 @@ fn send_failure_restores_exact_snapshot_with_two_large_pastes() {
 
 #[test]
 fn final_presentation_applies_only_to_the_same_stable_id_and_text_fingerprint() {
+    let canonical = "**canonical** [docs](https://example.test)";
+    let rendered = "canonical docs";
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "prompt",
@@ -351,20 +362,23 @@ fn final_presentation_applies_only_to_the_same_stable_id_and_text_fingerprint() 
     )));
     app.apply(AppEvent::NativeFinal(Message::final_text(
         "answer",
-        "canonical",
+        canonical,
         Some(2),
     )));
-    let native = MessagePresentation::NativeAnsi(vec![StyleRun {
-        start_byte: 0,
-        end_byte: "canonical".len(),
-        foreground: Some(AnsiColor::Green),
-        background: None,
-        modifiers: StyleModifiers::default(),
-    }]);
+    let native = native_presentation(
+        rendered,
+        vec![StyleRun {
+            start_byte: 0,
+            end_byte: rendered.len(),
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+    );
 
     app.apply(AppEvent::FinalPresentation {
         stable_id: "other".into(),
-        text_fingerprint: fingerprint("canonical"),
+        text_fingerprint: fingerprint(canonical),
         presentation: native.clone(),
     });
     app.apply(AppEvent::FinalPresentation {
@@ -379,7 +393,7 @@ fn final_presentation_applies_only_to_the_same_stable_id_and_text_fingerprint() 
 
     app.apply(AppEvent::FinalPresentation {
         stable_id: "answer".into(),
-        text_fingerprint: fingerprint("canonical"),
+        text_fingerprint: fingerprint(canonical),
         presentation: native.clone(),
     });
 
@@ -390,7 +404,50 @@ fn final_presentation_applies_only_to_the_same_stable_id_and_text_fingerprint() 
 }
 
 #[test]
-fn final_presentation_rejects_invalid_native_style_ranges_for_current_text() {
+fn final_presentation_rejects_controls_and_ranges_invalid_for_rendered_text() {
+    let canonical = "x".repeat(120);
+    let invalid = [
+        native_presentation("unsafe\u{1b}", Vec::new()),
+        native_presentation(
+            "short",
+            vec![StyleRun {
+                start_byte: 0,
+                end_byte: 99,
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers::default(),
+            }],
+        ),
+    ];
+
+    for presentation in invalid {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text(
+            "prompt",
+            "question",
+            Some(1),
+        )));
+        app.apply(AppEvent::NativeFinal(Message::final_text(
+            "answer",
+            canonical.clone(),
+            Some(2),
+        )));
+
+        app.apply(AppEvent::FinalPresentation {
+            stable_id: "answer".into(),
+            text_fingerprint: fingerprint(&canonical),
+            presentation,
+        });
+
+        assert_eq!(
+            app.turns[0].final_answer.as_ref().unwrap().presentation,
+            MessagePresentation::MarkdownFallback
+        );
+    }
+}
+
+#[test]
+fn final_presentation_rejects_overlapping_or_non_utf8_rendered_ranges() {
     let invalid_runs = [
         vec![StyleRun {
             start_byte: 0,
@@ -440,7 +497,7 @@ fn final_presentation_rejects_invalid_native_style_ranges_for_current_text() {
         app.apply(AppEvent::FinalPresentation {
             stable_id: "answer".into(),
             text_fingerprint: fingerprint("a界b"),
-            presentation: MessagePresentation::NativeAnsi(runs),
+            presentation: native_presentation("a界b", runs),
         });
 
         assert_eq!(
@@ -451,14 +508,50 @@ fn final_presentation_rejects_invalid_native_style_ranges_for_current_text() {
 }
 
 #[test]
+fn native_final_event_downgrades_invalid_owned_presentation() {
+    for presentation in [
+        native_presentation("unsafe\u{1b}", Vec::new()),
+        native_presentation(
+            "short",
+            vec![StyleRun {
+                start_byte: 0,
+                end_byte: 99,
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers::default(),
+            }],
+        ),
+    ] {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text(
+            "prompt",
+            "question",
+            Some(1),
+        )));
+        let mut final_answer = Message::final_text("answer", "canonical", Some(2));
+        final_answer.presentation = presentation;
+
+        app.apply(AppEvent::NativeFinal(final_answer));
+
+        assert_eq!(
+            app.turns[0].final_answer.as_ref().unwrap().presentation,
+            MessagePresentation::MarkdownFallback
+        );
+    }
+}
+
+#[test]
 fn capture_fallback_never_downgrades_an_existing_native_presentation() {
-    let native = MessagePresentation::NativeAnsi(vec![StyleRun {
-        start_byte: 0,
-        end_byte: "answer".len(),
-        foreground: Some(AnsiColor::Green),
-        background: None,
-        modifiers: StyleModifiers::default(),
-    }]);
+    let native = native_presentation(
+        "answer",
+        vec![StyleRun {
+            start_byte: 0,
+            end_byte: "answer".len(),
+            foreground: Some(AnsiColor::Green),
+            background: None,
+            modifiers: StyleModifiers::default(),
+        }],
+    );
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "prompt",
@@ -497,7 +590,7 @@ fn hydrated_record(
     presentation: PersistedPresentation,
 ) -> VisibleHistoryRecord {
     VisibleHistoryRecord {
-        version: 1,
+        version: 2,
         role,
         stable_id: stable_id.into(),
         turn_id: turn_id.into(),
@@ -507,7 +600,30 @@ fn hydrated_record(
         timestamp_ms: Some(order),
         text_fingerprint: fingerprint(text),
         presentation,
+        rendered_text: None,
+        rendered_text_fingerprint: None,
     }
+}
+
+fn hydrated_native_record(
+    stable_id: &str,
+    turn_id: &str,
+    order: u64,
+    canonical: &str,
+    rendered: &str,
+    runs: Vec<StyleRun>,
+) -> VisibleHistoryRecord {
+    let mut record = hydrated_record(
+        VisibleRole::Final,
+        stable_id,
+        turn_id,
+        order,
+        canonical,
+        PersistedPresentation::NativeAnsi(runs),
+    );
+    record.rendered_text = Some(rendered.into());
+    record.rendered_text_fingerprint = Some(fingerprint(rendered));
+    record
 }
 
 #[test]
@@ -520,14 +636,7 @@ fn hydration_restores_ordered_native_turns_and_saved_presentation() {
         modifiers: StyleModifiers::default(),
     }];
     let records = vec![
-        hydrated_record(
-            VisibleRole::Final,
-            "a1",
-            "u1",
-            2,
-            "answer",
-            PersistedPresentation::NativeAnsi(native.clone()),
-        ),
+        hydrated_native_record("a1", "u1", 2, "answer", "answer", native.clone()),
         hydrated_record(
             VisibleRole::Prompt,
             "u1",
@@ -554,7 +663,7 @@ fn hydration_restores_ordered_native_turns_and_saved_presentation() {
     assert_eq!(app.turns[0].delivery, Delivery::Native);
     assert_eq!(
         app.turns[0].final_answer.as_ref().unwrap().presentation,
-        MessagePresentation::NativeAnsi(native)
+        native_presentation("answer", native)
     );
     assert_eq!(app.turns[1].prompt.stable_id, "u2");
     assert!(app.drain_history_upserts().is_empty());
@@ -603,9 +712,11 @@ fn replay_moves_existing_ids_in_native_order_and_retains_missing_saved_turns() {
 
 #[test]
 fn replayed_final_preserves_matching_saved_native_style_but_not_stale_style() {
+    let canonical = "**answer** [docs](https://example.test)";
+    let rendered = "answer docs";
     let native = vec![StyleRun {
         start_byte: 0,
-        end_byte: 6,
+        end_byte: rendered.len(),
         foreground: Some(AnsiColor::Cyan),
         background: None,
         modifiers: StyleModifiers::default(),
@@ -620,14 +731,7 @@ fn replayed_final_preserves_matching_saved_native_style_but_not_stale_style() {
             "question",
             PersistedPresentation::Plain,
         ),
-        hydrated_record(
-            VisibleRole::Final,
-            "a1",
-            "u1",
-            2,
-            "answer",
-            PersistedPresentation::NativeAnsi(native.clone()),
-        ),
+        hydrated_native_record("a1", "u1", 2, canonical, rendered, native.clone()),
     ]);
 
     app.apply(AppEvent::TranscriptReloaded);
@@ -638,13 +742,14 @@ fn replayed_final_preserves_matching_saved_native_style_but_not_stale_style() {
     )));
     app.apply(AppEvent::NativeFinal(Message::final_text(
         "a1",
-        "answer",
+        canonical,
         Some(11),
     )));
     assert_eq!(
         app.turns[0].final_answer.as_ref().unwrap().presentation,
-        MessagePresentation::NativeAnsi(native)
+        native_presentation(rendered, native)
     );
+    assert_eq!(app.turns[0].final_answer.as_ref().unwrap().text, canonical);
 
     app.apply(AppEvent::TranscriptReloaded);
     app.apply(AppEvent::NativeUser(Message::text(
@@ -693,13 +798,16 @@ fn native_events_queue_monotonic_upserts_and_style_refresh_reuses_order() {
     app.apply(AppEvent::FinalPresentation {
         stable_id: "a1".into(),
         text_fingerprint: fingerprint("answer"),
-        presentation: MessagePresentation::NativeAnsi(vec![StyleRun {
-            start_byte: 0,
-            end_byte: 6,
-            foreground: Some(AnsiColor::Green),
-            background: None,
-            modifiers: StyleModifiers::default(),
-        }]),
+        presentation: native_presentation(
+            "answer",
+            vec![StyleRun {
+                start_byte: 0,
+                end_byte: 6,
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers::default(),
+            }],
+        ),
     });
     let styled = app.drain_history_upserts();
     assert_eq!(styled.len(), 1);
@@ -708,6 +816,12 @@ fn native_events_queue_monotonic_upserts_and_style_refresh_reuses_order() {
         styled[0].presentation,
         PersistedPresentation::NativeAnsi(_)
     ));
+    assert_eq!(styled[0].version, 2);
+    assert_eq!(styled[0].rendered_text.as_deref(), Some("answer"));
+    assert_eq!(
+        styled[0].rendered_text_fingerprint,
+        Some(fingerprint("answer"))
+    );
 }
 
 #[test]

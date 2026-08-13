@@ -701,7 +701,7 @@ mod tests {
         let mut app = AppState::default();
         app.hydrate_visible_history(vec![
             VisibleHistoryRecord {
-                version: 1,
+                version: 2,
                 role: VisibleRole::Prompt,
                 stable_id: "prompt-2".into(),
                 turn_id: "prompt-2".into(),
@@ -711,9 +711,11 @@ mod tests {
                 timestamp_ms: Some(1),
                 text_fingerprint: fingerprint("saved prompt 2"),
                 presentation: PersistedPresentation::Plain,
+                rendered_text: None,
+                rendered_text_fingerprint: None,
             },
             VisibleHistoryRecord {
-                version: 1,
+                version: 2,
                 role: VisibleRole::Prompt,
                 stable_id: "saved-missing".into(),
                 turn_id: "saved-missing".into(),
@@ -723,6 +725,8 @@ mod tests {
                 timestamp_ms: Some(2),
                 text_fingerprint: fingerprint("retain me"),
                 presentation: PersistedPresentation::Plain,
+                rendered_text: None,
+                rendered_text_fingerprint: None,
             },
         ]);
         let mut cache = render::HistoryRenderCache::default();
