@@ -1,4 +1,4 @@
-use crate::agent::agent_identity;
+use crate::agent::{agent_identity, agent_identity_from_response};
 use crate::herdr::HerdrClient;
 use crate::state::StateStore;
 use crate::{AppError, AppResult};
@@ -7,9 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> AppResult<()> {
     if let Some(source) = state.source_for_overlay(current_pane)? {
-        client
-            .pane_get(current_pane)
-            .map_err(|error| AppError::new("toggle", error.to_string()))?;
+        match client.pane_get(current_pane) {
+            Ok(_) => {}
+            Err(error) if error.api_code() == Some("not_found") => {
+                return recover_stale_overlay_context(client, state, &source);
+            }
+            Err(error) => return Err(AppError::new("toggle", error.to_string())),
+        }
         client
             .plugin_pane_close(current_pane)
             .map_err(|error| AppError::new("toggle", error.to_string()))?;
@@ -35,11 +39,67 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
         }
     }
 
-    let identity = agent_identity(client, current_pane)?;
+    open_overlay(client, state, current_pane)
+}
+
+fn recover_stale_overlay_context(
+    client: &HerdrClient,
+    state: &StateStore,
+    source: &str,
+) -> AppResult<()> {
+    match client.pane_get(source) {
+        Ok(_) => {}
+        Err(error) if error.api_code() == Some("not_found") => {
+            state.remove_source(source)?;
+            return Err(AppError::new(
+                "toggle",
+                format!("source pane {source} no longer exists"),
+            ));
+        }
+        Err(error) => return Err(AppError::new("toggle", error.to_string())),
+    }
+    let identity_response = match client.agent_get(source) {
+        Ok(response) => response,
+        Err(error) if error.api_code() == Some("not_found") => {
+            return remove_missing_source_mapping(state, source);
+        }
+        Err(error) => return Err(AppError::new("agent", error.to_string())),
+    };
+    let identity = agent_identity_from_response(&identity_response, source)?;
+    match client.pane_focus(source) {
+        Ok(_) => {}
+        Err(error) if error.api_code() == Some("not_found") => {
+            return remove_missing_source_mapping(state, source);
+        }
+        Err(error) => return Err(AppError::new("toggle", error.to_string())),
+    }
+    state.remove_source(source)?;
+    open_verified_overlay(client, state, source, &identity.session_id)
+}
+
+fn remove_missing_source_mapping(state: &StateStore, source: &str) -> AppResult<()> {
+    state.remove_source(source)?;
+    Err(AppError::new(
+        "toggle",
+        format!("source pane {source} no longer exists"),
+    ))
+}
+
+fn open_overlay(client: &HerdrClient, state: &StateStore, source: &str) -> AppResult<()> {
+    let identity = agent_identity(client, source)?;
+    open_verified_overlay(client, state, source, &identity.session_id)
+}
+
+fn open_verified_overlay(
+    client: &HerdrClient,
+    state: &StateStore,
+    source: &str,
+    session_id: &str,
+) -> AppResult<()> {
     let overlay = client
-        .plugin_pane_open(current_pane)
+        .plugin_pane_open(source)
         .map_err(|error| AppError::new("toggle", error.to_string()))?;
-    if let Err(save_error) = state.save_overlay(current_pane, &overlay) {
+    if let Err(save_error) = state.save_overlay(source, &overlay) {
         if let Err(close_error) = client.plugin_pane_close(&overlay) {
             return Err(AppError::new(
                 "toggle",
@@ -50,10 +110,8 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
         }
         return Err(save_error);
     }
-    if let Err(bind_error) =
-        state.bind_verified_namespace(current_pane, &identity.session_id, now_ms())
-    {
-        let _ = state.remove_source(current_pane);
+    if let Err(bind_error) = state.bind_verified_namespace(source, session_id, now_ms()) {
+        let _ = state.remove_source(source);
         let _ = client.plugin_pane_close(&overlay);
         return Err(bind_error);
     }

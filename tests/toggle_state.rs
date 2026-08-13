@@ -304,6 +304,275 @@ fn toggle_from_overlay_closes_and_refocuses_source() {
 }
 
 #[test]
+fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
+    let directory = test_state_directory("toggle-stale-action-context");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    store.save_overlay("w1:p2", "w1:other").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(agent_info("w1:p1", "session-1")),
+        Ok(json!({"type":"pane_focused"})),
+        Ok(json!({"plugin_pane":{"pane":{"pane_id":"w1:new"}}})),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    toggle(&client, &store, "w1:stale").unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "pane.get",
+            "pane.get",
+            "agent.get",
+            "pane.focus",
+            "plugin.pane.open"
+        ]
+    );
+    assert_eq!(requests[1]["params"]["pane_id"], "w1:p1");
+    assert_eq!(requests[3]["params"]["pane_id"], "w1:p1");
+    assert_eq!(
+        requests[4]["params"]["env"]["HERDR_SIMPLE_PROMPTS_SOURCE_PANE"],
+        "w1:p1"
+    );
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:new")
+    );
+    assert_eq!(
+        store.overlay_for_source("w1:p2").unwrap().as_deref(),
+        Some("w1:other")
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn missing_stale_overlay_and_source_remove_only_the_exact_mapping() {
+    let directory = test_state_directory("toggle-missing-overlay-source");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    store.save_overlay("w1:p2", "w1:other").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"not_found","message":"source missing"})),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let error = toggle(&client, &store, "w1:stale").unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("source pane w1:p1 no longer exists")
+    );
+    assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
+    assert_eq!(
+        store.overlay_for_source("w1:p2").unwrap().as_deref(),
+        Some("w1:other")
+    );
+    assert_eq!(fake.requests().len(), 2);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn transient_stale_overlay_probe_error_preserves_the_mapping() {
+    let directory = test_state_directory("toggle-transient-overlay-probe");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![Err(json!({
+        "code":"permission_denied",
+        "message":"not allowed"
+    }))]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(toggle(&client, &store, "w1:stale").is_err());
+
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:stale")
+    );
+    assert_eq!(fake.requests().len(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn transient_source_probe_error_preserves_the_stale_mapping() {
+    let directory = test_state_directory("toggle-transient-source-probe");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({
+            "code":"temporarily_unavailable",
+            "message":"retry later"
+        })),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(toggle(&client, &store, "w1:stale").is_err());
+
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:stale")
+    );
+    assert_eq!(fake.requests().len(), 2);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn transient_agent_probe_error_preserves_the_stale_mapping() {
+    let directory = test_state_directory("toggle-transient-agent-probe");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Err(json!({
+            "code":"temporarily_unavailable",
+            "message":"agent retry later"
+        })),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(toggle(&client, &store, "w1:stale").is_err());
+
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:stale")
+    );
+    assert_eq!(fake.requests().len(), 3);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn source_disappearing_during_agent_probe_removes_only_the_stale_mapping() {
+    let directory = test_state_directory("toggle-source-agent-race");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    store.save_overlay("w1:p2", "w1:other").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Err(json!({"code":"not_found","message":"source agent missing"})),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let error = toggle(&client, &store, "w1:stale").unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("source pane w1:p1 no longer exists")
+    );
+    assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
+    assert_eq!(
+        store.overlay_for_source("w1:p2").unwrap().as_deref(),
+        Some("w1:other")
+    );
+    assert_eq!(fake.requests().len(), 3);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn stale_overlay_focus_failure_preserves_the_mapping() {
+    let directory = test_state_directory("toggle-stale-focus-failure");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(agent_info("w1:p1", "session-1")),
+        Err(json!({
+            "code":"temporarily_unavailable",
+            "message":"focus retry later"
+        })),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(toggle(&client, &store, "w1:stale").is_err());
+
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:stale")
+    );
+    assert_eq!(fake.requests().len(), 4);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn source_disappearing_during_focus_removes_only_the_stale_mapping() {
+    let directory = test_state_directory("toggle-source-focus-race");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    store.save_overlay("w1:p2", "w1:other").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(agent_info("w1:p1", "session-1")),
+        Err(json!({"code":"not_found","message":"source focus missing"})),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let error = toggle(&client, &store, "w1:stale").unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("source pane w1:p1 no longer exists")
+    );
+    assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
+    assert_eq!(
+        store.overlay_for_source("w1:p2").unwrap().as_deref(),
+        Some("w1:other")
+    );
+    assert_eq!(fake.requests().len(), 4);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn replacement_open_failure_keeps_stale_cleanup_and_unrelated_mapping() {
+    let directory = test_state_directory("toggle-replacement-open-failure");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:stale").unwrap();
+    store.save_overlay("w1:p2", "w1:other").unwrap();
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(agent_info("w1:p1", "session-1")),
+        Ok(json!({"type":"pane_focused"})),
+        Err(json!({
+            "code":"temporarily_unavailable",
+            "message":"open retry later"
+        })),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(toggle(&client, &store, "w1:stale").is_err());
+
+    assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
+    assert_eq!(
+        store.overlay_for_source("w1:p2").unwrap().as_deref(),
+        Some("w1:other")
+    );
+    assert_eq!(fake.requests().len(), 5);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn failed_registry_write_closes_the_new_overlay() {
     let directory = std::env::temp_dir().join(format!(
         "herdr-simple-prompts-toggle-save-failure-{}",

@@ -115,6 +115,13 @@ pub fn agent_identity(client: &HerdrClient, pane_id: &str) -> AppResult<AgentIde
     let result = client
         .agent_get(pane_id)
         .map_err(|error| AppError::new("agent", error.to_string()))?;
+    agent_identity_from_response(&result, pane_id)
+}
+
+pub(crate) fn agent_identity_from_response(
+    result: &Value,
+    pane_id: &str,
+) -> AppResult<AgentIdentity> {
     let agent = result
         .get("agent")
         .ok_or_else(|| AppError::new("agent", "Herdr response has no agent record"))?;
