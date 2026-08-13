@@ -128,6 +128,11 @@ impl HistoryDocument {
             document.rows.push(filled_empty_row(prompt_fill()));
 
             if let Some(answer) = &turn.final_answer {
+                if let Some(timestamp) = format_timestamp(answer.timestamp_ms) {
+                    document
+                        .rows
+                        .push(filled_timestamp_row(Some(timestamp.as_str()), None, width));
+                }
                 for line in &answer_lines(answer) {
                     push_styled_rows(&mut document.rows, line, None, width);
                 }

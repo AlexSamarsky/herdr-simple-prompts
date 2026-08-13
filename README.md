@@ -86,8 +86,10 @@ terminal widget.
   row shows the prompt's local `DD.MM.YYYY HH:MM` timestamp, and one blank gray
   row remains below the text. There is no `YOU` label. Legacy records without a
   valid timestamp keep the top row blank.
-- Each final answer begins directly with its styled text on the normal terminal
-  surface. There is no `ANSWER` label or answer box.
+- Each final answer begins with its local `DD.MM.YYYY HH:MM` timestamp on one
+  dim, unboxed row on the normal terminal surface, followed immediately by the
+  styled answer text. There is no `ANSWER` label or answer box. Legacy records
+  without a valid timestamp add no metadata row or empty gap.
 - After a prompt scrolls out of its natural position, at most its first two
   wrapped content rows stay at the top. The gray top padding stays with them
   when the viewport has room. The next prompt pushes the old block away one row
@@ -219,8 +221,8 @@ validated native style ranges or fallback/plain presentation provenance. A
 repeated stable id is an append-only upsert whose latest valid record wins, so
 later exact native ANSI can replace fallback presentation.
 
-Prompt timestamps were already present in the journal before the date/time row
-was added, so existing history needs no migration.
+Prompt and final-answer timestamps were already present in the journal before
+their date/time rows were added, so existing history needs no migration.
 
 The journal never stores reasoning, commentary, tool calls or results, system
 context, subagent traffic, blocked interaction surfaces, native attachment
@@ -294,12 +296,13 @@ sequence with synthetic, non-sensitive input:
    and one blank gray row below, without `YOU` or `ANSWER` labels.
 2. Request a long final answer containing a Markdown heading, bold and
    emphasized text, inline code, fenced code, and a Markdown link. Compare the
-   native pane with Simple Prompts: confirm the same visible words appear in the
-   same order; supported delimiters and the link destination are absent; native
-   colors and emphasis remain when exact capture succeeds; and the last line is
-   reachable by scrolling. Also confirm `PageUp`/`PageDown` and the mouse wheel
-   scroll, and the first two prompt rows stick and are pushed away by the
-   following prompt.
+   native pane with Simple Prompts: confirm one dim local timestamp row appears
+   immediately above the answer without gray fill or a box; the same visible
+   words appear in the same order; supported delimiters and the link destination
+   are absent; native colors and emphasis remain when exact capture succeeds;
+   and the last line is reachable by scrolling. Also confirm
+   `PageUp`/`PageDown` and the mouse wheel scroll, and the first two prompt rows
+   stick and are pushed away by the following prompt.
 3. Paste 1,000 or more characters. Confirm the composer and saved prompt show
    only the compact marker while the native agent receives the complete text.
 4. Use a workflow that asks a question or permission. Confirm
