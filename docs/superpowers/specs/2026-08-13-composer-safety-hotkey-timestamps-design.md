@@ -119,10 +119,11 @@ Toggle routing distinguishes a live overlay from a stale overlay identifier:
 2. If the context names a live overlay, close it, focus its source, and remove
    the registry entry as today.
 3. If the context names a missing overlay, remove the stale mapping, verify the
-   source pane and its native session, and continue the same invocation as a
-   source-side open.
-4. Open and persist a new overlay for that source. If the source is also gone,
-   remove only its scoped plugin state and return a precise error.
+   source pane and its native session, explicitly focus that source because
+   Herdr's `plugin.pane.open` is active-pane scoped, and continue the same
+   invocation as a source-side open.
+4. Open and persist a new overlay for that now-active source. If the source is
+   also gone, remove only its scoped plugin state and return a precise error.
 
 A stale overlay mapping discovered from the live source side continues to use
 the existing replacement behavior. Recovery never closes or mutates unrelated
