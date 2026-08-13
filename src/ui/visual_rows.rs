@@ -470,11 +470,7 @@ fn filled_timestamp_row(
             vec![VisualSpan {
                 text: timestamp,
                 style: CellStyle {
-                    foreground: Some(AnsiColor::BrightBlack),
-                    modifiers: StyleModifiers {
-                        dim: true,
-                        ..StyleModifiers::default()
-                    },
+                    foreground: Some(AnsiColor::White),
                     ..CellStyle::default()
                 },
             }]

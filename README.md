@@ -87,9 +87,9 @@ terminal widget.
   row remains below the text. There is no `YOU` label. Legacy records without a
   valid timestamp keep the top row blank.
 - Each final answer begins with its local `DD.MM.YYYY HH:MM` timestamp on one
-  dim, unboxed row on the normal terminal surface, followed immediately by the
-  styled answer text. There is no `ANSWER` label or answer box. Legacy records
-  without a valid timestamp add no metadata row or empty gap.
+  light-gray, unboxed row on the normal terminal surface, followed immediately
+  by the styled answer text. There is no `ANSWER` label or answer box. Legacy
+  records without a valid timestamp add no metadata row or empty gap.
 - After a prompt scrolls out of its natural position, at most its first two
   wrapped content rows stay at the top. The gray top padding stays with them
   when the viewport has room. The next prompt pushes the old block away one row
@@ -296,11 +296,11 @@ sequence with synthetic, non-sensitive input:
    and one blank gray row below, without `YOU` or `ANSWER` labels.
 2. Request a long final answer containing a Markdown heading, bold and
    emphasized text, inline code, fenced code, and a Markdown link. Compare the
-   native pane with Simple Prompts: confirm one dim local timestamp row appears
-   immediately above the answer without gray fill or a box; the same visible
-   words appear in the same order; supported delimiters and the link destination
-   are absent; native colors and emphasis remain when exact capture succeeds;
-   and the last line is reachable by scrolling. Also confirm
+   native pane with Simple Prompts: confirm one light-gray local timestamp row
+   appears immediately above the answer without background fill or a box; the
+   same visible words appear in the same order; supported delimiters and the
+   link destination are absent; native colors and emphasis remain when exact
+   capture succeeds; and the last line is reachable by scrolling. Also confirm
    `PageUp`/`PageDown` and the mouse wheel scroll, and the first two prompt rows
    stick and are pushed away by the following prompt.
 3. Paste 1,000 or more characters. Confirm the composer and saved prompt show
