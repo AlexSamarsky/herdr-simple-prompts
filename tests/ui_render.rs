@@ -29,7 +29,7 @@ fn prompt_is_a_label_free_gray_block_and_answer_is_unboxed() {
     app.apply(AppEvent::NativeFinal(Message::text(
         "a1",
         "zone is pending",
-        Some(2),
+        None,
     )));
 
     let rendered = render_to_string(&app, &Editor::default(), 50, 14);
@@ -58,7 +58,7 @@ fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
     app.apply(AppEvent::NativeFinal(Message::text(
         "a1",
         "zone is pending",
-        Some(1_786_638_721_000),
+        None,
     )));
 
     let document =
@@ -76,6 +76,135 @@ fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
         Some(AnsiColor::BrightBlack)
     );
     assert!(document.rows[0].spans[0].style.modifiers.dim);
+}
+
+#[test]
+fn answer_timestamp_is_a_dim_unboxed_row_above_the_styled_body() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "show native",
+        None,
+    )));
+    app.apply(AppEvent::NativeFinal(Message {
+        stable_id: "a1".into(),
+        text: "Native answer".into(),
+        presentation: MessagePresentation::NativeAnsi(StyledText {
+            text: "Native answer".into(),
+            runs: vec![StyleRun {
+                start_byte: 0,
+                end_byte: "Native answer".len(),
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers {
+                    bold: true,
+                    ..StyleModifiers::default()
+                },
+            }],
+        }),
+        attachments: Vec::new(),
+        timestamp_ms: Some(1_786_638_720_000),
+    }));
+
+    let document =
+        HistoryDocument::from_app_at_offset(&app, 50, FixedOffset::east_opt(3 * 60 * 60).unwrap());
+
+    assert_eq!(document.rows.len(), 6);
+    assert_eq!(document.rows[3].plain_text(), "13.08.2026 19:32");
+    assert!(document.rows[3].fill.is_none());
+    assert_eq!(
+        document.rows[3].spans[0].style.foreground,
+        Some(AnsiColor::BrightBlack)
+    );
+    assert!(document.rows[3].spans[0].style.modifiers.dim);
+    assert_eq!(document.rows[4].plain_text(), "Native answer");
+    assert_eq!(
+        document.rows[4].spans[0].style.foreground,
+        Some(AnsiColor::Green)
+    );
+    assert!(document.rows[4].spans[0].style.modifiers.bold);
+}
+
+#[test]
+fn answer_timestamp_is_clipped_to_one_visual_row() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+    app.apply(AppEvent::NativeFinal(Message::text(
+        "a1",
+        "done",
+        Some(1_786_638_720_000),
+    )));
+
+    let document =
+        HistoryDocument::from_app_at_offset(&app, 8, FixedOffset::east_opt(3 * 60 * 60).unwrap());
+
+    assert_eq!(document.rows[3].plain_text(), "13.08.20");
+    assert_eq!(document.rows[3].cell_width(), 8);
+    assert_eq!(document.rows[4].plain_text(), "done");
+}
+
+#[test]
+fn answer_timestamp_is_omitted_without_a_valid_value() {
+    for timestamp_ms in [None, Some(u64::MAX)] {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+        app.apply(AppEvent::NativeFinal(Message::text(
+            "a1",
+            "answer",
+            timestamp_ms,
+        )));
+
+        let document = HistoryDocument::from_app_at_offset(
+            &app,
+            50,
+            FixedOffset::east_opt(3 * 60 * 60).unwrap(),
+        );
+
+        assert_eq!(document.rows.len(), 5);
+        assert_eq!(document.rows[3].plain_text(), "answer");
+        assert_eq!(document.rows[4].plain_text(), "");
+    }
+}
+
+#[test]
+fn answer_timestamp_survives_visible_history_hydration() {
+    let mut app = AppState::default();
+    app.hydrate_visible_history(vec![
+        VisibleHistoryRecord {
+            version: 2,
+            role: VisibleRole::Prompt,
+            stable_id: "saved-prompt".into(),
+            turn_id: "saved-prompt".into(),
+            order: 1,
+            text: "hydrated prompt".into(),
+            attachments: Vec::new(),
+            timestamp_ms: None,
+            text_fingerprint: fingerprint("hydrated prompt"),
+            presentation: PersistedPresentation::Plain,
+            rendered_text: None,
+            rendered_text_fingerprint: None,
+        },
+        VisibleHistoryRecord {
+            version: 2,
+            role: VisibleRole::Final,
+            stable_id: "saved-answer".into(),
+            turn_id: "saved-prompt".into(),
+            order: 2,
+            text: "hydrated answer".into(),
+            attachments: Vec::new(),
+            timestamp_ms: Some(1_786_638_720_000),
+            text_fingerprint: fingerprint("hydrated answer"),
+            presentation: PersistedPresentation::Fallback,
+            rendered_text: None,
+            rendered_text_fingerprint: None,
+        },
+    ]);
+
+    let document =
+        HistoryDocument::from_app_at_offset(&app, 50, FixedOffset::east_opt(3 * 60 * 60).unwrap());
+
+    assert_eq!(document.rows[3].plain_text(), "13.08.2026 19:32");
+    assert_eq!(document.rows[4].plain_text(), "hydrated answer");
 }
 
 #[test]
