@@ -44,8 +44,8 @@ Herdr's default `prefix+p` binding for the previous tab.
 - Forward text, multiline paste, large paste, image paste, and interrupt actions
   to the native agent input path.
 - Resume existing session history when the overlay opens.
-- Preserve the visible styling of newly observed Codex and Claude final answers
-  and restore that styling when the overlay is reopened.
+- Preserve the visible text projection and styling of newly observed Codex and
+  Claude final answers and restore both when the overlay is reopened.
 - Keep visible prompt/final history in a pane-and-session-scoped private journal
   whose lifecycle follows the source pane.
 - Let native questions, choices, and approval surfaces remain usable without
@@ -164,17 +164,32 @@ owns the header.
 ### Styled final answers
 
 Styled output is the primary final-answer representation, not an optional
-decoration over a plain renderer. After the transcript adapter emits a real
-final answer, the runtime asks Herdr for the source agent's recent unwrapped
-terminal output in ANSI format. It locates the final-answer block by comparing
-the ANSI-stripped candidate with the canonical transcript text, removes only
-known Codex/Claude presentation chrome around that block, and converts the
-remaining SGR state into styled message spans.
+decoration over a plain renderer. Transcript Markdown and native terminal text
+are deliberately separate: the transcript remains the canonical semantic value
+used for identity and reconciliation, while the presentation owns the text and
+styles actually rendered by Simple Prompts.
+
+The dependency-free Markdown projector produces the expected visible text from
+the canonical transcript before ANSI capture. It removes recognized heading,
+emphasis, inline-code, and fenced-code delimiters, renders a Markdown link as
+its label without the destination, preserves paragraph and list content, and
+leaves malformed or unsupported syntax literal. It produces style ranges over
+the projected text, not over discarded Markdown bytes. This projected styled
+text is also the deterministic fallback.
+
+After the transcript adapter emits a real final answer, the runtime asks Herdr
+for the source agent's recent unwrapped terminal output in ANSI format. It
+locates the final-answer block by comparing the ANSI-stripped candidate with
+the Markdown-projected visible text, removes only known Codex/Claude
+presentation chrome around that block, and converts the remaining SGR state
+into a native styled-text presentation.
 
 Because transcript append and terminal paint can arrive in either order, ANSI
 capture retries for a short bounded window after the final event. It accepts a
-capture only after exact canonical-text matching; timing alone never selects a
-terminal block.
+capture only when exactly one known Codex/Claude final-answer boundary contains
+text equal to the deterministic visible projection; timing alone never selects
+a terminal block. Hidden OSC hyperlink destinations do not participate in the
+comparison because the sanitizer discards them before matching.
 
 The sanitizer accepts printable text plus a conservative SGR subset: named,
 indexed, and RGB foreground/background colors and the bold, dim, italic, and
@@ -188,12 +203,11 @@ rest of history. Style runs split safely at UTF-8 boundaries and survive
 Unicode-aware wrapping.
 
 If an old final answer is no longer present in Herdr's scrollback and has no
-saved styled record, the plugin renders the canonical transcript text with a
-small built-in styled-Markdown fallback. The fallback covers paragraphs,
-headings, lists, inline code, fenced code, emphasis, and links without adding a
-runtime dependency. It is deterministic fallback presentation and is never
-recorded as if it were native ANSI. Every newly observed answer is captured and
-persisted as the exact sanitized styled representation, so it is not
+saved native styled record, the plugin renders the same deterministic Markdown
+projection. The fallback covers paragraphs, headings, lists, inline code,
+fenced code, emphasis, and links without adding a runtime dependency. It is
+never recorded as if it were native ANSI. Every newly observed native answer is
+persisted with its exact sanitized display text and style ranges, so neither is
 reconstructed on a later overlay open.
 
 ### Interactive blocked mode
@@ -359,10 +373,17 @@ Turn {
 
 Message {
   stable_id: String,
-  text: String,
+  text: String, // canonical transcript text
   attachments: Vec<Attachment>,
   timestamp: Option<Timestamp>,
-  presentation: NativeAnsi(Vec<StyleRun>) | MarkdownFallback,
+  presentation: Plain
+    | NativeAnsi(StyledText)
+    | MarkdownFallback,
+}
+
+StyledText {
+  text: String, // visible display projection
+  runs: Vec<StyleRun>,
 }
 
 StyleRun {
@@ -375,14 +396,19 @@ StyleRun {
 ```
 
 The UI renders only `Turn`. Raw transcript event variants do not reach the view
-layer. `Message.text` is always the display-safe representation. The complete
-text and editor snapshot exist only on a local optimistic delivery so they can
-support transport reconciliation and lossless failure recovery.
+layer. `Message.text` is sanitized canonical transcript text. A final answer
+renders the `StyledText` stored by `NativeAnsi`, or the `StyledText`
+deterministically projected from `Message.text` by `MarkdownFallback`. Prompts
+continue to render `Message.text` directly. The complete prompt text and editor
+snapshot exist only on a local optimistic delivery so they can support
+transport reconciliation and lossless failure recovery.
 
-Transcript text remains the canonical semantic value. Style runs only annotate
-byte ranges in that exact text and are accepted only when their text
-fingerprint, UTF-8 boundaries, ordering, and bounds validate. Styled capture
-never changes message identity or reconciliation.
+The canonical transcript text remains the semantic value and owns the stable
+fingerprint used to attach a presentation update. Native style runs annotate
+byte ranges in the native presentation's own display text and are accepted only
+when that display text is control-free and its fingerprint, UTF-8 boundaries,
+ordering, and bounds validate. A presentation may change visible Markdown
+syntax but never message identity, turn ordering, or reconciliation.
 
 ### Editor and compact-paste model
 
@@ -482,9 +508,9 @@ or quota values.
   against the new session.
 - **Socket disconnected:** retain visible history and draft, retry read-only
   connection with bounded backoff, and disable sends until revalidated.
-- **ANSI capture mismatch:** retain the canonical final text, render the
-  styled-Markdown fallback, and never attach styles from a different terminal
-  block.
+- **ANSI capture mismatch:** retain the canonical final text, render its
+  deterministic display projection with fallback styles, and never attach text
+  or styles from a different terminal block.
 - **Blocked snapshot unavailable:** keep the draft untouched, show a concise
   error, and direct the user to the unchanged source pane with `prefix+m`.
 - **Transcript unavailable:** keep the composer usable only after native agent
@@ -514,14 +540,16 @@ history/<safe-source-pane-id>/<native-session-id>.jsonl
 ```
 
 Each record is versioned and keyed by the native stable message id. It stores
-only the display-safe user prompt or visible final-answer text, sanitized
-attachment labels, timestamp/order data, a text fingerprint, and validated
-style ranges. Repeating a stable id appends an upsert whose latest valid record
-wins, allowing a Markdown fallback to be replaced by later native ANSI capture
-without rewriting earlier bytes. It never stores reasoning, commentary, tool
-traffic, tool results, system context, native interaction surfaces, or hidden
-large-paste bodies. A user prompt containing a large paste is journaled only
-with its compact marker.
+only the display-safe user prompt or canonical visible final-answer text,
+sanitized attachment labels, timestamp/order data, and a canonical text
+fingerprint. A native final-answer record additionally stores its sanitized
+rendered text, rendered-text fingerprint, and style ranges validated against
+that rendered text. Repeating a stable id appends an upsert whose latest valid
+record wins, allowing a Markdown fallback to be replaced by later native ANSI
+capture without rewriting earlier bytes. It never stores reasoning,
+commentary, tool traffic, tool results, system context, native interaction
+surfaces, OSC hyperlink destinations, or hidden large-paste bodies. A user
+prompt containing a large paste is journaled only with its compact marker.
 
 This journal is an intentional private copy of the visible conversation subset
 so the plugin can restore exactly what it previously showed instead of
@@ -529,10 +557,18 @@ reconstructing presentation on every open. It is not a global conversation
 database and cannot be queried across panes from the UI.
 
 On reopen, journal records are loaded first and then reconciled with the native
-transcript by session and stable message id. A journal record supplies the exact
-previous display text and styles; transcript-only messages are added without
-duplicating recorded messages and use native capture when still available or
-the explicit Markdown fallback otherwise.
+transcript by session and stable message id. A current-version native record
+supplies the exact previous rendered text and styles; transcript-only messages
+are added without duplicating recorded messages and use native capture when
+still available or the explicit Markdown fallback otherwise.
+
+Journal version 2 adds optional rendered-text fields while retaining read
+compatibility with version 1. A version-1 native record can retain its old
+styles only when the new deterministic projection is byte-for-byte identical
+to the canonical text against which those ranges were validated. If projection
+changes the text, the record safely downgrades to the new Markdown fallback and
+may be upgraded by a later exact native recapture. New native upserts always use
+version 2 and include both rendered-text integrity fields.
 
 Compact-paste history metadata is scoped by native session and message id and
 contains only paste ranges, character counts, and a deterministic integrity
@@ -624,13 +660,17 @@ scope.
   rendering, including narrow multiword answers.
 - Safe ANSI fixtures cover named, indexed, and RGB colors plus supported text
   modifiers; cursor/OSC/clipboard/title/control sequences are discarded.
-- Exact final-answer matching never borrows ANSI styles from commentary, a tool
-  result, a neighboring final answer, or the native composer.
-- Styled-Markdown fallback fixtures cover paragraphs, headings, lists, code,
-  emphasis, and links without claiming native provenance.
-- Journal reload reproduces the same styled spans, rejects invalid
-  fingerprints/ranges, never contains a hidden pasted body, and keeps no
-  reasoning or interaction snapshot.
+- Exact final-answer matching compares the sanitized native candidate with the
+  deterministic rendered-text projection and never borrows text or ANSI styles
+  from commentary, a tool result, a neighboring final answer, or the native
+  composer.
+- Styled-Markdown projection fixtures cover paragraphs, headings, lists, code,
+  emphasis, links, malformed syntax, Unicode byte boundaries, and removal of
+  hidden link destinations without claiming native provenance.
+- Journal reload reproduces native rendered text and styled spans, migrates
+  compatible version-1 records, downgrades incompatible version-1 records,
+  rejects invalid canonical/rendered fingerprints or ranges, never contains a
+  hidden pasted body, and keeps no reasoning or interaction snapshot.
 - Sticky prompt rows for short, long, wrapped, Unicode, image-only, and
   constrained-height histories, with padding excluded from the two-row content
   limit and the top gray padding retained when space allows.
@@ -643,8 +683,9 @@ Fixtures are synthetic and contain no real user transcript data.
 
 - Fake Herdr Unix socket for request ordering, subscriptions, errors, and
   reconnection.
-- Fake Herdr ANSI reads for exact final capture, unavailable scrollback,
-  mismatch fallback, and blocked-surface refresh.
+- Fake Herdr ANSI reads for exact projected-text final capture, Markdown links
+  with discarded OSC destinations, unavailable scrollback, mismatch fallback,
+  and blocked-surface refresh.
 - Temporary transcript files for initial load, append, partial JSON line,
   truncation, and replacement.
 - Pseudo-terminal harness for raw-mode restoration, bracketed paste, resize,
@@ -670,7 +711,8 @@ cargo build --locked --release
 
 A manual smoke matrix then covers local and remote Herdr sessions with current
 Codex and Claude versions, including text, large paste, image paste, working
-state, interruption, styled final answers, long-answer bottom scrolling,
+state, interruption, native-parity links/code/emphasis in styled final answers,
+long-answer bottom scrolling,
 full-width padded prompt bands without role labels, blocked
 questions/approvals, overlay toggle, source
 pane deletion cleanup, and returning to the unchanged native pane.
