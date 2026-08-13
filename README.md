@@ -1,10 +1,11 @@
 # Herdr Simple Prompts
 
-Herdr Simple Prompts is a terminal overlay for [Herdr](https://herdr.dev) that
-keeps an agent conversation intentionally quiet. It shows real user prompts,
-final answers, the current native `Working`/status area, a multiline composer,
-and a compact status footer. Reasoning, commentary, tool calls, tool results,
-system context, and subagent traffic stay in the native agent pane.
+Herdr Simple Prompts is a full-pane terminal view for
+[Herdr](https://herdr.dev) that keeps an agent conversation intentionally quiet.
+It shows real user prompts, final answers, the current native `Working`/status
+area, a multiline composer, and a compact status footer. Reasoning, commentary,
+tool calls, tool results, system context, and subagent traffic stay in the
+native agent pane.
 
 Version 0.1 supports Codex CLI and Claude Code on macOS and Linux.
 
@@ -69,8 +70,14 @@ herdr server reload-config
 ```
 
 Focus a running Codex or Claude pane and press the Herdr prefix (normally
-`ctrl+b`) followed by `m`. The same binding closes the overlay and restores the
+`ctrl+b`) followed by `m`. The same binding closes the view and restores the
 unchanged native agent pane.
+
+Simple Prompts opens as a targeted zoomed plugin pane next to the exact source
+pane and immediately fills that source tab. This uses Herdr's explicit
+`target_pane_id` path, so a concurrent focus change cannot move the view to a
+different pane. Closing Simple Prompts removes its temporary split and restores
+the original source layout.
 
 `prefix+p` is intentionally not used because Herdr assigns it to the previous
 tab by default.
@@ -173,7 +180,7 @@ the native composer between that read and `agent.prompt`.
 
 ## Native questions and approvals
 
-When Herdr reports that the source agent is blocked, the overlay temporarily
+When Herdr reports that the source agent is blocked, Simple Prompts temporarily
 shows `INTERACTION REQUIRED` and a refreshed, sanitized view of the native
 Codex or Claude question, choice, permission, or approval surface. Conversation
 history and the composer are hidden during this mode, but their contents remain
@@ -186,13 +193,13 @@ unsupported control keys are ignored. Mouse interaction is not mapped in
 version 0.1.
 
 If the native interaction cannot be read, Simple Prompts shows an error instead
-of guessing the question or its answer. Press `prefix+m` to close the overlay
+of guessing the question or its answer. Press `prefix+m` to close Simple Prompts
 and answer directly in the unchanged native pane.
 
 ## Images and remote attach
 
 For local sessions, `Ctrl+V` is forwarded to the native Codex or Claude composer.
-The overlay records the attachment only after the native pane exposes its image
+The view records the attachment only after the native pane exposes its image
 marker.
 
 During remote attach, Herdr stages a locally pasted image in its private remote
@@ -205,13 +212,13 @@ does not render or copy their pixels.
 
 Simple Prompts never modifies the native Codex or Claude transcript. It does
 keep an intentional private copy of the visible prompt/final-answer subset so
-reopening the overlay can reproduce what it previously showed. This is scoped
+reopening the view can reproduce what it previously showed. This is scoped
 to one source pane and one native session; it is not a global conversation
 database or cross-pane browser.
 
 The Herdr-managed state directory contains:
 
-- the source-to-overlay pane registry;
+- the source-to-plugin-pane registry;
 - the current draft and local attachment placeholders;
 - compact-paste display ranges, character counts, and integrity fingerprints;
 - the pane/session visible-history journal.
@@ -242,7 +249,7 @@ State directories use mode `0700`; registry, draft, namespace, and journal files
 use mode `0600`. Journal writes are asynchronous, append newline-terminated
 records, and ignore an incomplete final line during recovery.
 
-State retention follows the source pane rather than the overlay:
+State retention follows the source pane rather than the Simple Prompts view:
 
 | Event | Result |
 |---|---|
@@ -318,15 +325,15 @@ sequence with synthetic, non-sensitive input:
 4. Use a workflow that asks a question or permission. Confirm
    `INTERACTION REQUIRED`, exercise the supported keys, and confirm the
    unchanged draft returns afterward.
-5. Close and reopen only the overlay with `prefix+m`; confirm the exact rendered
-   text and styles from step 2 are restored. Then close the native source pane
-   and confirm its private pane state is removed.
+5. Close and reopen only Simple Prompts with `prefix+m`; confirm the exact
+   rendered text and styles from step 2 are restored. Then close the native
+   source pane and confirm its private pane state is removed.
 6. Type synthetic text in the native composer without submitting it, open Simple
    Prompts, and confirm editing is blocked without changing either draft. Clear
    the native draft and confirm one subsequent submission produces one prompt.
-7. Remove an open overlay pane, then press `prefix+m` from that stale action
-   context and confirm one invocation focuses the still-live source and opens a
-   replacement overlay.
+7. Remove an open Simple Prompts pane, then press `prefix+m` from that stale
+   action context and confirm one invocation targets the still-live source and
+   opens a replacement view on the original source tab.
 
 Repeat steps 1, 2, 4, 5, and 6 in a current Claude Code pane. Include one
 tool-using prompt and confirm thinking, tool use/results, and progress remain in
@@ -360,11 +367,11 @@ Confirm the binding is present, then reload Herdr configuration:
 herdr server reload-config
 ```
 
-If the plugin action log reports `pane_not_found` for a removed overlay, press
-`prefix+m` again. Simple Prompts now validates the mapped source, focuses it,
-removes only the stale source/overlay pair, and opens a replacement overlay in
-the same toggle invocation. Temporary permission, transport, or timeout errors
-preserve the mapping for a later retry.
+If the plugin action log reports `pane_not_found` for a removed Simple Prompts
+pane, press `prefix+m` again. Simple Prompts now validates the mapped source,
+removes only the stale source/plugin-pane pair, and targets a replacement view
+to that source in the same toggle invocation. Temporary permission, transport,
+or timeout errors preserve the mapping for a later retry.
 
 ### An image is not attached
 
@@ -393,7 +400,7 @@ herdr plugin uninstall herdr.simple-prompts
 - Windows is not supported.
 - The view belongs to the currently focused native session; it is not a global
   conversation browser.
-- Image pixels are not rendered inside the overlay.
+- Image pixels are not rendered inside the Simple Prompts view.
 - Agent footer extraction is best-effort and intentionally conservative.
 
 ## Publishing to the Herdr marketplace

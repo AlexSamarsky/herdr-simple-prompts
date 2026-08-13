@@ -1,55 +1,81 @@
-# Anchor Simple Prompts Overlay to Its Source Pane
+# Anchor Simple Prompts to Its Source Pane
 
 ## Problem
 
-The toggle action knows the source pane, but `plugin.pane.open` currently sends
-only `placement = "overlay"`. Herdr therefore has to infer the target workspace
-and pane from mutable UI focus. If focus changes while the action runs, Simple
-Prompts can cover a different pane, including a pane on the right, instead of
-replacing the source agent pane.
+The toggle action knows the exact source pane, but Simple Prompts uses Herdr's
+`overlay` placement. Herdr 0.7.5 deliberately rejects `target_pane_id` and
+`workspace_id` for overlay panes and always derives their context from the
+currently active pane. If focus changes while the action process is starting,
+Simple Prompts can therefore cover a different pane.
+
+The first implementation attempted to add both targeting fields to an overlay
+request. Read-only review against the official Herdr 0.7.5 source showed that
+this request is invalid: the API validation says that overlay panes target the
+active pane, and `open_plugin_overlay_pane` never consumes either field.
 
 ## Options Considered
 
-1. **Anchor the open request to the source pane (recommended).** Read the
-   source pane metadata immediately before opening, then pass both its
-   `workspace_id` and `target_pane_id` to `plugin.pane.open`. This uses the
-   targeting fields already exposed by Herdr 0.7.5 and removes dependence on
-   ambient focus.
-2. **Focus the source pane before opening.** This still leaves a race between
-   the focus request and the open request and causes an extra visible focus
-   transition.
-3. **Rely on manifest placement only.** The manifest controls the placement
-   kind but does not identify which pane or workspace must own the overlay, so
-   it does not solve the intermittent behavior.
+1. **Use Herdr's targeted `zoomed` placement (selected).** A zoomed plugin pane
+   is created as a split next to an exact `target_pane_id`, then Herdr zooms the
+   new pane to the full tab. The visible result remains a replacement view, but
+   targeting no longer depends on mutable focus. When the plugin pane closes,
+   Herdr removes the split and clears the tab's zoomed state.
+2. **Add explicit overlay targeting to Herdr.** This would preserve the overlay
+   implementation internally, but requires an upstream Herdr change, a release,
+   and a higher `min_herdr_version` before the source-only plugin can rely on it.
+3. **Focus the source before opening an overlay.** This retains the same race
+   between the focus request and the overlay request and can visibly switch
+   panes before opening.
 
 ## Design
 
-`toggle` will continue to validate the source agent and session exactly as it
-does now. Before opening the overlay, it will read the source pane with
-`pane.get`, require a non-empty `workspace_id`, and pass a small target value to
-`HerdrClient::plugin_pane_open`.
+`toggle` will continue to validate the exact source agent and session. Opening
+Simple Prompts will call `plugin.pane.open` with:
 
-The open request will contain:
+- `placement: "zoomed"`;
+- `target_pane_id`: the verified source pane ID;
+- the existing source-pane environment variable;
+- `focus: true`.
 
-- `placement: "overlay"`;
-- `target_pane_id`: the validated source pane ID;
-- `workspace_id`: the workspace returned for that source pane;
-- the existing source-pane environment variable and `focus: true`.
+The request will not send `workspace_id`: Herdr 0.7.5 explicitly rejects it for
+`split` and `zoomed` placement and resolves the workspace from the target pane.
+The manifest will also declare `placement = "zoomed"` so its default matches
+the runtime request.
 
-No fallback to active focus is allowed. If Herdr returns no usable workspace
-for the source, the toggle fails without opening a pane. Existing stale-overlay
-recovery uses the same anchored open path.
+Ordinary opening no longer needs an extra `pane.get` just to recover workspace
+metadata. Stale-pane recovery still probes the source with `pane.get` before
+reopening, but it no longer focuses the source first: the targeted zoomed open
+selects the source tab and focuses the new plugin pane atomically inside Herdr.
+
+The persisted source-to-plugin-pane mapping remains unchanged. Closing the
+plugin pane through the existing toggle path removes the temporary split;
+Herdr's `Tab::detach_pane` clears `zoomed`, after which the plugin explicitly
+focuses the unchanged source pane.
+
+## Evidence
+
+The official Herdr 0.7.5 implementation establishes the host contract:
+
+- `handle_plugin_pane_open` rejects target fields for `overlay`, but accepts
+  `target_pane_id` for `zoomed`;
+- `open_plugin_split_pane` resolves the exact target pane and sets `tab.zoomed`;
+- `Tab::detach_pane`, reached by `plugin.pane.close`, resets `zoomed` to false.
+
+Plugin tests cover the request and manifest contracts. The host-side behavior
+is not reimplemented or simulated as proof of Herdr layout semantics.
 
 ## Testing
 
-The Herdr client contract test will first fail against the current request,
-then prove that `plugin.pane.open` contains the explicit source target and
-workspace. Toggle tests will prove that both ordinary opening and stale-overlay
-recovery obtain the source metadata and use the anchored request. The full
-Rust formatting, Clippy, test, and release-build gates remain required.
+Client tests will first fail while the request still uses `overlay` and
+`workspace_id`, then prove the exact `zoomed` request. Manifest tests will first
+fail while the default remains `overlay`. Toggle tests will prove that ordinary
+opening uses no focus-sensitive workspace lookup and stale recovery targets the
+source without an intermediate `pane.focus`. The complete Rust formatting,
+Clippy, test, and release-build gates remain required.
 
 ## Non-goals
 
-- No layout, rendering, history, composer, or hotkey changes.
+- No Herdr host patch.
+- No rendering, history, composer, or hotkey changes.
 - No new dependency or persisted state.
 - No automatic migration of unrelated stale registry entries.

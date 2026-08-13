@@ -304,7 +304,7 @@ fn toggle_from_overlay_closes_and_refocuses_source() {
 }
 
 #[test]
-fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
+fn stale_plugin_pane_action_context_reopens_targeted_view_in_one_toggle() {
     let directory = test_state_directory("toggle-stale-action-context");
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
@@ -312,9 +312,8 @@ fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
-        Ok(json!({"type":"pane_focused"})),
         Ok(json!({"plugin_pane":{"pane":{"pane_id":"w1:new"}}})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
@@ -327,22 +326,16 @@ fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
             .iter()
             .map(|request| request["method"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        [
-            "pane.get",
-            "pane.get",
-            "agent.get",
-            "pane.focus",
-            "plugin.pane.open"
-        ]
+        ["pane.get", "pane.get", "agent.get", "plugin.pane.open"]
     );
     assert_eq!(requests[1]["params"]["pane_id"], "w1:p1");
-    assert_eq!(requests[3]["params"]["pane_id"], "w1:p1");
     assert_eq!(
-        requests[4]["params"]["env"]["HERDR_SIMPLE_PROMPTS_SOURCE_PANE"],
+        requests[3]["params"]["env"]["HERDR_SIMPLE_PROMPTS_SOURCE_PANE"],
         "w1:p1"
     );
-    assert_eq!(requests[4]["params"]["target_pane_id"], "w1:p1");
-    assert_eq!(requests[4]["params"]["workspace_id"], "w1");
+    assert_eq!(requests[3]["params"]["placement"], "zoomed");
+    assert_eq!(requests[3]["params"]["target_pane_id"], "w1:p1");
+    assert!(requests[3]["params"].get("workspace_id").is_none());
     assert_eq!(
         store.overlay_for_source("w1:p1").unwrap().as_deref(),
         Some("w1:new")
@@ -487,54 +480,23 @@ fn source_disappearing_during_agent_probe_removes_only_the_stale_mapping() {
 }
 
 #[test]
-fn stale_overlay_focus_failure_preserves_the_mapping() {
-    let directory = test_state_directory("toggle-stale-focus-failure");
-    let _ = std::fs::remove_dir_all(&directory);
-    let store = StateStore::at(&directory);
-    store.save_overlay("w1:p1", "w1:stale").unwrap();
-    let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
-        Ok(agent_info("w1:p1", "session-1")),
-        Err(json!({
-            "code":"temporarily_unavailable",
-            "message":"focus retry later"
-        })),
-    ]);
-    let client = HerdrClient::connect(fake.socket_path()).unwrap();
-
-    assert!(toggle(&client, &store, "w1:stale").is_err());
-
-    assert_eq!(
-        store.overlay_for_source("w1:p1").unwrap().as_deref(),
-        Some("w1:stale")
-    );
-    assert_eq!(fake.requests().len(), 4);
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn source_disappearing_during_focus_removes_only_the_stale_mapping() {
-    let directory = test_state_directory("toggle-source-focus-race");
+fn source_disappearing_during_targeted_open_removes_only_the_stale_mapping() {
+    let directory = test_state_directory("toggle-source-target-race");
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
-        Err(json!({"code":"pane_not_found","message":"source focus missing"})),
+        Err(json!({"code":"pane_not_found","message":"source target missing"})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
     let error = toggle(&client, &store, "w1:stale").unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("source pane w1:p1 no longer exists")
-    );
+    assert!(error.to_string().contains("source target missing"));
     assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
     assert_eq!(
         store.overlay_for_source("w1:p2").unwrap().as_deref(),
@@ -553,9 +515,8 @@ fn replacement_open_failure_keeps_stale_cleanup_and_unrelated_mapping() {
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
-        Ok(json!({"type":"pane_focused"})),
         Err(json!({
             "code":"temporarily_unavailable",
             "message":"open retry later"
@@ -570,7 +531,7 @@ fn replacement_open_failure_keeps_stale_cleanup_and_unrelated_mapping() {
         store.overlay_for_source("w1:p2").unwrap().as_deref(),
         Some("w1:other")
     );
-    assert_eq!(fake.requests().len(), 5);
+    assert_eq!(fake.requests().len(), 4);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -593,7 +554,6 @@ fn failed_registry_write_closes_the_new_overlay() {
                 "agent_session":{"kind":"id","agent":"codex","value":"session-1"}
             }
         }),
-        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}),
         json!({"plugin_pane":{"pane":{"pane_id":"w1:p9"}}}),
         json!({"type":"plugin_pane_closed"}),
     ]);
@@ -608,12 +568,7 @@ fn failed_registry_write_closes_the_new_overlay() {
         .collect::<Vec<_>>();
     assert_eq!(
         methods,
-        [
-            "agent.get",
-            "pane.get",
-            "plugin.pane.open",
-            "plugin.pane.close"
-        ]
+        ["agent.get", "plugin.pane.open", "plugin.pane.close"]
     );
     std::fs::remove_file(directory).unwrap();
 }
@@ -639,7 +594,6 @@ fn stale_overlay_is_replaced_without_disturbing_other_sources() {
                 "agent_session":{"kind":"id","agent":"codex","value":"session-1"}
             }
         })),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Ok(json!({"plugin_pane":{"pane":{"pane_id":"w1:new"}}})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
@@ -925,13 +879,12 @@ fn binding_a_verified_namespace_rewrites_a_v2_draft_as_bound_v3() {
 }
 
 #[test]
-fn opening_an_overlay_persists_verified_session_namespace() {
+fn opening_targeted_view_persists_verified_session_namespace() {
     let directory = test_state_directory("toggle-binds-namespace");
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
     let fake = support::ScriptedHerdr::start(vec![
         agent_info("w1:p1", "session-1"),
-        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}),
         json!({"plugin_pane":{"pane":{"pane_id":"w1:p9"}}}),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
@@ -939,9 +892,11 @@ fn opening_an_overlay_persists_verified_session_namespace() {
     toggle(&client, &store, "w1:p1").unwrap();
 
     let requests = fake.requests();
-    assert_eq!(requests[1]["method"], "pane.get");
-    assert_eq!(requests[2]["params"]["target_pane_id"], "w1:p1");
-    assert_eq!(requests[2]["params"]["workspace_id"], "w1");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["method"], "plugin.pane.open");
+    assert_eq!(requests[1]["params"]["placement"], "zoomed");
+    assert_eq!(requests[1]["params"]["target_pane_id"], "w1:p1");
+    assert!(requests[1]["params"].get("workspace_id").is_none());
 
     let namespace: serde_json::Value =
         serde_json::from_slice(&std::fs::read(namespace_path(&directory, "w1:p1")).unwrap())

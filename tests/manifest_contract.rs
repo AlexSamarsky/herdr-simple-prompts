@@ -1,5 +1,5 @@
 #[test]
-fn manifest_is_source_only_and_registers_toggle_overlay() {
+fn manifest_is_source_only_and_registers_targeted_zoomed_view() {
     let manifest = std::fs::read_to_string("herdr-plugin.toml").unwrap();
     let parsed: toml::Value = toml::from_str(&manifest).unwrap();
 
@@ -15,7 +15,7 @@ fn manifest_is_source_only_and_registers_toggle_overlay() {
         vec!["./target/release/herdr-simple-prompts", "toggle"]
     );
     assert_eq!(parsed["panes"][0]["id"].as_str(), Some("simple-prompts"));
-    assert_eq!(parsed["panes"][0]["placement"].as_str(), Some("overlay"));
+    assert_eq!(parsed["panes"][0]["placement"].as_str(), Some("zoomed"));
     assert_eq!(
         strings(&parsed["panes"][0]["command"]),
         vec!["./target/release/herdr-simple-prompts", "ui"]

@@ -66,12 +66,12 @@ fn pane_not_found_is_classified_from_the_exact_herdr_api_code() {
 }
 
 #[test]
-fn overlay_open_is_anchored_to_the_source_pane_and_workspace() {
+fn zoomed_open_targets_the_exact_source_pane_without_workspace_context() {
     let fake = support::FakeHerdr::start(|request| {
         assert_eq!(request["method"], "plugin.pane.open");
-        assert_eq!(request["params"]["placement"], "overlay");
+        assert_eq!(request["params"]["placement"], "zoomed");
         assert_eq!(request["params"]["target_pane_id"], "w1:p1");
-        assert_eq!(request["params"]["workspace_id"], "w1");
+        assert!(request["params"].get("workspace_id").is_none());
         assert_eq!(
             request["params"]["env"]["HERDR_SIMPLE_PROMPTS_SOURCE_PANE"],
             "w1:p1"
@@ -83,30 +83,9 @@ fn overlay_open_is_anchored_to_the_source_pane_and_workspace() {
     });
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
-    let overlay = client.plugin_pane_open_anchored("w1:p1", "w1").unwrap();
+    let overlay = client.plugin_pane_open_targeted("w1:p1").unwrap();
 
     assert_eq!(overlay, "w1:p9");
-}
-
-#[test]
-fn pane_workspace_id_requires_non_empty_source_metadata() {
-    let valid = support::ScriptedHerdr::start(vec![serde_json::json!({
-        "pane": {"pane_id": "w1:p1", "workspace_id": "w1"}
-    })]);
-    let valid_client = HerdrClient::connect(valid.socket_path()).unwrap();
-    assert_eq!(valid_client.pane_workspace_id("w1:p1").unwrap(), "w1");
-
-    let missing = support::ScriptedHerdr::start(vec![serde_json::json!({
-        "pane": {"pane_id": "w1:p1"}
-    })]);
-    let missing_client = HerdrClient::connect(missing.socket_path()).unwrap();
-    assert!(missing_client.pane_workspace_id("w1:p1").is_err());
-
-    let mismatched = support::ScriptedHerdr::start(vec![serde_json::json!({
-        "pane": {"pane_id": "w2:p1", "workspace_id": "w2"}
-    })]);
-    let mismatched_client = HerdrClient::connect(mismatched.socket_path()).unwrap();
-    assert!(mismatched_client.pane_workspace_id("w1:p1").is_err());
 }
 
 #[test]

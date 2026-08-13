@@ -17,5 +17,5 @@ command = ["./target/release/herdr-simple-prompts", "toggle"]
 [[panes]]
 id = "simple-prompts"
 title = "Simple Prompts"
-placement = "overlay"
+placement = "zoomed"
 command = ["./target/release/herdr-simple-prompts", "ui"]

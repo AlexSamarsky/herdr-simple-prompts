@@ -47,8 +47,8 @@ fn recover_stale_overlay_context(
     state: &StateStore,
     source: &str,
 ) -> AppResult<()> {
-    let workspace_id = match client.pane_workspace_id(source) {
-        Ok(workspace_id) => workspace_id,
+    match client.pane_get(source) {
+        Ok(_) => {}
         Err(error) if error.is_pane_not_found() => {
             state.remove_source(source)?;
             return Err(AppError::new(
@@ -57,7 +57,7 @@ fn recover_stale_overlay_context(
             ));
         }
         Err(error) => return Err(AppError::new("toggle", error.to_string())),
-    };
+    }
     let identity_response = match client.agent_get(source) {
         Ok(response) => response,
         Err(error) if error.is_pane_not_found() => {
@@ -66,15 +66,8 @@ fn recover_stale_overlay_context(
         Err(error) => return Err(AppError::new("agent", error.to_string())),
     };
     let identity = agent_identity_from_response(&identity_response, source)?;
-    match client.pane_focus(source) {
-        Ok(_) => {}
-        Err(error) if error.is_pane_not_found() => {
-            return remove_missing_source_mapping(state, source);
-        }
-        Err(error) => return Err(AppError::new("toggle", error.to_string())),
-    }
     state.remove_source(source)?;
-    open_verified_overlay(client, state, source, &identity.session_id, &workspace_id)
+    open_verified_overlay(client, state, source, &identity.session_id)
 }
 
 fn remove_missing_source_mapping(state: &StateStore, source: &str) -> AppResult<()> {
@@ -87,10 +80,7 @@ fn remove_missing_source_mapping(state: &StateStore, source: &str) -> AppResult<
 
 fn open_overlay(client: &HerdrClient, state: &StateStore, source: &str) -> AppResult<()> {
     let identity = agent_identity(client, source)?;
-    let workspace_id = client
-        .pane_workspace_id(source)
-        .map_err(|error| AppError::new("toggle", error.to_string()))?;
-    open_verified_overlay(client, state, source, &identity.session_id, &workspace_id)
+    open_verified_overlay(client, state, source, &identity.session_id)
 }
 
 fn open_verified_overlay(
@@ -98,10 +88,9 @@ fn open_verified_overlay(
     state: &StateStore,
     source: &str,
     session_id: &str,
-    workspace_id: &str,
 ) -> AppResult<()> {
     let overlay = client
-        .plugin_pane_open_anchored(source, workspace_id)
+        .plugin_pane_open_targeted(source)
         .map_err(|error| AppError::new("toggle", error.to_string()))?;
     if let Err(save_error) = state.save_overlay(source, &overlay) {
         if let Err(close_error) = client.plugin_pane_close(&overlay) {
