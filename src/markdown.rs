@@ -282,7 +282,7 @@ fn style_inline_code(
                 content_start,
                 range.close,
                 INLINE_CODE_PRIORITY,
-                code_style(),
+                inline_code_style(),
             );
         }
         discard_if_allowed(
@@ -501,5 +501,13 @@ fn code_style() -> StyleState {
         foreground: Some(AnsiColor::White),
         background: Some(AnsiColor::BrightBlack),
         modifiers: StyleModifiers::default(),
+    }
+}
+
+fn inline_code_style() -> StyleState {
+    StyleState {
+        foreground: Some(AnsiColor::Cyan),
+        modifiers: StyleModifiers::default(),
+        ..Default::default()
     }
 }

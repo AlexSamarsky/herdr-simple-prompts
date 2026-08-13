@@ -264,8 +264,8 @@ fn markdown_projection_removes_supported_delimiters_and_rebases_styles() {
         (
             "inline code",
             "inline",
-            Some(AnsiColor::White),
-            Some(AnsiColor::BrightBlack),
+            Some(AnsiColor::Cyan),
+            None,
             false,
             false,
             false,
@@ -366,7 +366,8 @@ fn markdown_inline_constructs_never_cross_newlines_and_precedence_is_determinist
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
     let code_bold_words = styled.text.find("not bold").unwrap();
     let code_style = style_at(&styled, code_bold_words).unwrap();
-    assert_eq!(code_style.background, Some(AnsiColor::BrightBlack));
+    assert_eq!(code_style.foreground, Some(AnsiColor::Cyan));
+    assert_eq!(code_style.background, None);
     assert!(!code_style.modifiers.bold);
     assert!(!code_style.modifiers.italic);
     assert!(!code_style.modifiers.underline);
@@ -461,8 +462,8 @@ fn markdown_inline_code_outranks_a_valid_link_label() {
     }
 
     let code_style = style_at(&styled, styled.text.find("code").unwrap()).unwrap();
-    assert_eq!(code_style.foreground, Some(AnsiColor::White));
-    assert_eq!(code_style.background, Some(AnsiColor::BrightBlack));
+    assert_eq!(code_style.foreground, Some(AnsiColor::Cyan));
+    assert_eq!(code_style.background, None);
     assert!(!code_style.modifiers.underline);
 }
 

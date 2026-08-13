@@ -930,8 +930,8 @@ fn markdown_fallback_body_styles_flow_into_rendered_visual_rows() {
         .flat_map(|row| &row.spans)
         .find(|span| span.text.contains('λ'))
         .expect("inline code Markdown contents should reach visual rows");
-    assert_eq!(lambda.style.foreground, Some(AnsiColor::White));
-    assert_eq!(lambda.style.background, Some(AnsiColor::BrightBlack));
+    assert_eq!(lambda.style.foreground, Some(AnsiColor::Cyan));
+    assert_eq!(lambda.style.background, None);
     assert_eq!(
         app.turns[0].final_answer.as_ref().unwrap().presentation,
         MessagePresentation::MarkdownFallback
