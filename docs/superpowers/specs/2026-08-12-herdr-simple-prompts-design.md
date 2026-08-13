@@ -118,19 +118,25 @@ prompt row is filled to the right edge.
 
 ### Message hierarchy and sticky prompt context
 
-User prompts use a full-width, neutral raised band with a compact `YOU` label.
-Final agent answers remain unboxed and start with a compact green `ANSWER`
-label. The distinction therefore does not depend on color alone: role labels,
-surface treatment, and spacing all identify message ownership. The palette uses
-the terminal theme's existing colors and avoids fixed RGB backgrounds that
-could become unreadable in light or customized terminal themes.
+User prompts use one full-width neutral-gray block. The block contains one
+empty gray visual row above the prompt text and one empty gray visual row below
+it. Prompt text has no plugin-owned `YOU` label. Final agent answers remain
+unboxed and have no plugin-owned `ANSWER` label. Ownership is conveyed by the
+prompt-only surface and vertical spacing: every gray row belongs to the user
+prompt, while the following unboxed styled text belongs to the agent. The
+palette uses the terminal theme's existing colors and avoids fixed RGB
+backgrounds that could become unreadable in light or customized terminal
+themes.
 
 While history scrolls through a turn, the start of that turn's user prompt acts
 as a sticky section header:
 
-- At most the first two visual rows remain at the top of the history viewport.
-  A visual row is measured after Unicode-aware wrapping to the current history
-  width, not by newline-delimited source lines.
+- At most the first two prompt-content visual rows remain at the top of the
+  history viewport. A visual row is measured after Unicode-aware wrapping to
+  the current history width, not by newline-delimited source lines. The gray
+  top-padding row remains immediately above the sticky content when space
+  allows; the bottom-padding row remains part of the natural prompt block and
+  is not counted as sticky content.
 - The two-row limit applies only to the sticky copy. Ordinary prompt text in
   the natural history entry remains complete and scrollable. When Codex or
   Claude represents a large paste with its native compact marker (for example,
@@ -176,9 +182,9 @@ underline modifiers. Cursor movement, alternate-screen commands, OSC/title
 commands, hyperlinks, clipboard commands, and all other terminal controls are
 discarded. No ANSI command is ever replayed into the user's terminal.
 
-The green `ANSWER` role label remains plugin-owned. The answer body retains the
-source agent's colors and emphasis and is reflowed by the same visual-row engine
-as the rest of history. Style runs split safely at UTF-8 boundaries and survive
+The answer body begins directly with the source agent's visible text, retains
+its colors and emphasis, and is reflowed by the same visual-row engine as the
+rest of history. Style runs split safely at UTF-8 boundaries and survive
 Unicode-aware wrapping.
 
 If an old final answer is no longer present in Herdr's scrollback and has no
@@ -611,7 +617,8 @@ scope.
 - Reducer state transitions for working, done, interruption, disconnect,
   session replacement, and send failure.
 - Status extraction fixtures for supported Codex and Claude layouts.
-- Message-role hierarchy remains visible without relying on color alone.
+- Prompt ownership remains visible through its full-width three-part gray block
+  (top padding, content, bottom padding), without `YOU` or `ANSWER` labels.
 - Visual rows preserve Unicode cell widths, span styles, explicit newlines, and
   full-width prompt backgrounds; row count is identical for geometry and
   rendering, including narrow multiword answers.
@@ -625,7 +632,8 @@ scope.
   fingerprints/ranges, never contains a hidden pasted body, and keeps no
   reasoning or interaction snapshot.
 - Sticky prompt rows for short, long, wrapped, Unicode, image-only, and
-  constrained-height histories.
+  constrained-height histories, with padding excluded from the two-row content
+  limit and the top gray padding retained when space allows.
 - The next prompt pushes the previous sticky context out one visual row at a
   time without overlap or duplication.
 
@@ -663,7 +671,8 @@ cargo build --locked --release
 A manual smoke matrix then covers local and remote Herdr sessions with current
 Codex and Claude versions, including text, large paste, image paste, working
 state, interruption, styled final answers, long-answer bottom scrolling,
-full-width prompt bands, blocked questions/approvals, overlay toggle, source
+full-width padded prompt bands without role labels, blocked
+questions/approvals, overlay toggle, source
 pane deletion cleanup, and returning to the unchanged native pane.
 
 ## Repository deliverables
