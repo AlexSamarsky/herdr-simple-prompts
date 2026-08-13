@@ -178,6 +178,25 @@ impl HerdrClient {
         self.call("pane.get", json!({"pane_id": pane_id}))
     }
 
+    pub fn pane_workspace_id(&self, pane_id: &str) -> Result<String, HerdrError> {
+        let result = self.pane_get(pane_id)?;
+        if result.pointer("/pane/pane_id").and_then(Value::as_str) != Some(pane_id) {
+            return Err(HerdrError::Protocol(format!(
+                "pane.get response does not match requested pane {pane_id}"
+            )));
+        }
+        result
+            .pointer("/pane/workspace_id")
+            .and_then(Value::as_str)
+            .filter(|workspace_id| !workspace_id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                HerdrError::Protocol(format!(
+                    "pane.get response for {pane_id} has no workspace id"
+                ))
+            })
+    }
+
     pub fn pane_focus(&self, pane_id: &str) -> Result<Value, HerdrError> {
         self.call("pane.focus", json!({"pane_id": pane_id}))
     }
@@ -259,13 +278,19 @@ impl HerdrClient {
         self.call("pane.send_input", params)
     }
 
-    pub fn plugin_pane_open(&self, source: &str) -> Result<String, HerdrError> {
+    pub fn plugin_pane_open_anchored(
+        &self,
+        source: &str,
+        workspace_id: &str,
+    ) -> Result<String, HerdrError> {
         let result = self.call(
             "plugin.pane.open",
             json!({
                 "plugin_id": "herdr.simple-prompts",
                 "entrypoint": "simple-prompts",
                 "placement": "overlay",
+                "target_pane_id": source,
+                "workspace_id": workspace_id,
                 "env": {"HERDR_SIMPLE_PROMPTS_SOURCE_PANE": source},
                 "focus": true
             }),

@@ -44,7 +44,9 @@ fn overlay_open_is_anchored_to_the_source_pane_and_workspace() {
     });
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
-    let overlay = client.plugin_pane_open("w1:p1", "w1").unwrap();
+    let overlay = client
+        .plugin_pane_open_anchored("w1:p1", "w1")
+        .unwrap();
 
     assert_eq!(overlay, "w1:p9");
 }
@@ -78,7 +80,8 @@ cargo test --test herdr_client overlay_open_is_anchored_to_the_source_pane_and_w
 cargo test --test herdr_client pane_workspace_id_requires_non_empty_source_metadata -- --exact
 ```
 
-Expected: compilation fails because `plugin_pane_open` lacks the workspace argument and `pane_workspace_id` does not exist.
+Expected: compilation fails because `plugin_pane_open_anchored` and
+`pane_workspace_id` do not exist.
 
 - [ ] **Step 3: Write the minimal Herdr client contract**
 
@@ -87,6 +90,11 @@ Add a typed workspace extractor:
 ```rust
 pub fn pane_workspace_id(&self, pane_id: &str) -> Result<String, HerdrError> {
     let result = self.pane_get(pane_id)?;
+    if result.pointer("/pane/pane_id").and_then(Value::as_str) != Some(pane_id) {
+        return Err(HerdrError::Protocol(format!(
+            "pane.get response does not match requested pane {pane_id}"
+        )));
+    }
     result
         .pointer("/pane/workspace_id")
         .and_then(Value::as_str)
@@ -100,10 +108,11 @@ pub fn pane_workspace_id(&self, pane_id: &str) -> Result<String, HerdrError> {
 }
 ```
 
-Change the open method signature and request:
+Add the anchored open method and keep the existing one-argument method only
+until Task 2 has a failing integration test:
 
 ```rust
-pub fn plugin_pane_open(
+pub fn plugin_pane_open_anchored(
     &self,
     source: &str,
     workspace_id: &str,
@@ -221,9 +230,12 @@ Change that function to accept `workspace_id: &str` and call:
 
 ```rust
 let overlay = client
-    .plugin_pane_open(source, workspace_id)
+    .plugin_pane_open_anchored(source, workspace_id)
     .map_err(|error| AppError::new("toggle", error.to_string()))?;
 ```
+
+After all toggle callers use the anchored method, delete the old unanchored
+`plugin_pane_open(&self, source)` method so no fallback path remains.
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 

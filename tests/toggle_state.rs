@@ -312,7 +312,7 @@ fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Ok(json!({"type":"pane_focused"})),
         Ok(json!({"plugin_pane":{"pane":{"pane_id":"w1:new"}}})),
@@ -341,6 +341,8 @@ fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
         requests[4]["params"]["env"]["HERDR_SIMPLE_PROMPTS_SOURCE_PANE"],
         "w1:p1"
     );
+    assert_eq!(requests[4]["params"]["target_pane_id"], "w1:p1");
+    assert_eq!(requests[4]["params"]["workspace_id"], "w1");
     assert_eq!(
         store.overlay_for_source("w1:p1").unwrap().as_deref(),
         Some("w1:new")
@@ -436,7 +438,7 @@ fn transient_agent_probe_error_preserves_the_stale_mapping() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Err(json!({
             "code":"temporarily_unavailable",
             "message":"agent retry later"
@@ -463,7 +465,7 @@ fn source_disappearing_during_agent_probe_removes_only_the_stale_mapping() {
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Err(json!({"code":"pane_not_found","message":"source agent missing"})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
@@ -492,7 +494,7 @@ fn stale_overlay_focus_failure_preserves_the_mapping() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Err(json!({
             "code":"temporarily_unavailable",
@@ -520,7 +522,7 @@ fn source_disappearing_during_focus_removes_only_the_stale_mapping() {
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Err(json!({"code":"pane_not_found","message":"source focus missing"})),
     ]);
@@ -551,7 +553,7 @@ fn replacement_open_failure_keeps_stale_cleanup_and_unrelated_mapping() {
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
-        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Ok(json!({"type":"pane_focused"})),
         Err(json!({
@@ -591,6 +593,7 @@ fn failed_registry_write_closes_the_new_overlay() {
                 "agent_session":{"kind":"id","agent":"codex","value":"session-1"}
             }
         }),
+        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}),
         json!({"plugin_pane":{"pane":{"pane_id":"w1:p9"}}}),
         json!({"type":"plugin_pane_closed"}),
     ]);
@@ -605,7 +608,12 @@ fn failed_registry_write_closes_the_new_overlay() {
         .collect::<Vec<_>>();
     assert_eq!(
         methods,
-        ["agent.get", "plugin.pane.open", "plugin.pane.close"]
+        [
+            "agent.get",
+            "pane.get",
+            "plugin.pane.open",
+            "plugin.pane.close"
+        ]
     );
     std::fs::remove_file(directory).unwrap();
 }
@@ -631,6 +639,7 @@ fn stale_overlay_is_replaced_without_disturbing_other_sources() {
                 "agent_session":{"kind":"id","agent":"codex","value":"session-1"}
             }
         })),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
         Ok(json!({"plugin_pane":{"pane":{"pane_id":"w1:new"}}})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
@@ -922,11 +931,17 @@ fn opening_an_overlay_persists_verified_session_namespace() {
     let store = StateStore::at(&directory);
     let fake = support::ScriptedHerdr::start(vec![
         agent_info("w1:p1", "session-1"),
+        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}),
         json!({"plugin_pane":{"pane":{"pane_id":"w1:p9"}}}),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
     toggle(&client, &store, "w1:p1").unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests[1]["method"], "pane.get");
+    assert_eq!(requests[2]["params"]["target_pane_id"], "w1:p1");
+    assert_eq!(requests[2]["params"]["workspace_id"], "w1");
 
     let namespace: serde_json::Value =
         serde_json::from_slice(&std::fs::read(namespace_path(&directory, "w1:p1")).unwrap())
