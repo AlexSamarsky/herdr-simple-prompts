@@ -352,18 +352,25 @@ pub(crate) fn draw_terminal<B: Backend>(
 fn plain_cells(buffer: &Buffer, areas: &[HyperlinkArea]) -> Vec<(u16, u16, Cell)> {
     let mut cells = Vec::new();
     for area in areas {
-        let end = area.x.saturating_add(area.width);
-        let mut x = area.x;
+        let start = area.x.max(buffer.area.x);
+        let end = area.x.saturating_add(area.width).min(buffer.area.right());
+        let mut x = buffer.area.x;
         while x < end {
             let position = Position::new(x, area.y);
-            let Some(cell) = buffer.cell(position).filter(|cell| !cell.skip) else {
-                x = x.saturating_add(1);
-                continue;
+            let Some(cell) = buffer.cell(position) else {
+                break;
             };
-            cells.push((x, area.y, cell.clone()));
             let width = u16::try_from(UnicodeWidthStr::width(cell.symbol()))
                 .unwrap_or(u16::MAX)
                 .max(1);
+            if x < start || cell.skip {
+                x = x.saturating_add(width);
+                continue;
+            }
+            if x >= end {
+                break;
+            }
+            cells.push((x, area.y, cell.clone()));
             x = x.saturating_add(width);
         }
     }
@@ -833,6 +840,19 @@ mod tests {
             vec![(0, 0, "界")]
         );
         assert_eq!(buffer[(2, 0)].symbol(), "X");
+
+        let continuation_only = plain_cells(
+            &buffer,
+            &[HyperlinkArea {
+                x: 1,
+                y: 0,
+                width: 1,
+            }],
+        );
+        assert!(
+            continuation_only.is_empty(),
+            "a stale area starting inside a wide glyph must not erase it"
+        );
     }
 
     #[test]
