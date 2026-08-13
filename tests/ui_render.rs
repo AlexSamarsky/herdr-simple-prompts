@@ -9,7 +9,9 @@ use herdr_simple_prompts::model::Message;
 use herdr_simple_prompts::paste::fingerprint;
 use herdr_simple_prompts::style::StyledText;
 use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
-use herdr_simple_prompts::ui::render::{render_to_buffer, render_to_string};
+use herdr_simple_prompts::ui::render::{
+    render_terminal_to_buffer, render_to_buffer, render_to_string,
+};
 use herdr_simple_prompts::ui::visual_rows::{
     CellStyle, HistoryDocument, PromptSection, StickyRows, VisualRow, sticky_overlay, wrap_styled,
 };
@@ -936,6 +938,140 @@ fn markdown_fallback_body_styles_flow_into_rendered_visual_rows() {
         app.turns[0].final_answer.as_ref().unwrap().presentation,
         MessagePresentation::MarkdownFallback
     );
+}
+
+#[test]
+fn markdown_hyperlinks_survive_unicode_wrapping_as_ephemeral_spans() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "show links",
+        None,
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "до [документы](https://example.test/путь) после",
+        None,
+    )));
+
+    let document = HistoryDocument::from_app(&app, 7);
+    let linked = document
+        .rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .filter(|span| span.hyperlink.is_some())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        linked
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>(),
+        "документы"
+    );
+    assert!(linked.iter().all(|span| {
+        span.hyperlink.as_deref() == Some("https://example.test/путь")
+            && span.style.foreground == Some(AnsiColor::Cyan)
+            && span.style.modifiers.underline
+    }));
+}
+
+#[test]
+fn unsupported_markdown_schemes_render_as_ordinary_answer_text() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "show links",
+        None,
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "[mail](mailto:user@example.test)",
+        None,
+    )));
+
+    let document = HistoryDocument::from_app(&app, 50);
+    let mail = document
+        .rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .find(|span| span.text.contains("mail"))
+        .expect("plain Markdown label should reach visual rows");
+
+    assert_eq!(mail.text, "mail");
+    assert_eq!(mail.hyperlink, None);
+    assert_eq!(mail.style.foreground, Some(AnsiColor::BrightWhite));
+    assert!(!mail.style.modifiers.underline);
+}
+
+#[test]
+fn exact_native_presentation_adds_link_target_without_replacing_native_style() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "show native",
+        None,
+    )));
+    app.apply(AppEvent::NativeFinal(Message {
+        stable_id: "a1".into(),
+        text: "[docs](https://example.test)".into(),
+        presentation: MessagePresentation::NativeAnsi(StyledText {
+            text: "docs".into(),
+            runs: vec![StyleRun {
+                start_byte: 0,
+                end_byte: "docs".len(),
+                foreground: Some(AnsiColor::Green),
+                background: None,
+                modifiers: StyleModifiers {
+                    bold: true,
+                    ..StyleModifiers::default()
+                },
+            }],
+        }),
+        attachments: Vec::new(),
+        timestamp_ms: None,
+    }));
+
+    let document = HistoryDocument::from_app(&app, 50);
+    let docs = document
+        .rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .find(|span| span.text.contains("docs"))
+        .expect("native link label should reach visual rows");
+
+    assert_eq!(docs.hyperlink.as_deref(), Some("https://example.test"));
+    assert_eq!(docs.style.foreground, Some(AnsiColor::Green));
+    assert!(docs.style.modifiers.bold);
+}
+
+#[test]
+fn terminal_draw_emits_balanced_osc_8_and_restores_the_composer_cursor() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text("u1", "show link", None)));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "[OpenAI](https://openai.com)",
+        None,
+    )));
+
+    let (buffer, cursor) = render_terminal_to_buffer(&app, &Editor::default(), 50, 14);
+    let expected = "\u{1b}]8;;https://openai.com\u{7}OpenAI\u{1b}]8;;\u{7}";
+    let symbols = buffer
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<Vec<_>>();
+
+    assert!(symbols.contains(&expected));
+    assert_eq!(
+        symbols
+            .iter()
+            .filter(|symbol| symbol.contains("https://openai.com"))
+            .count(),
+        1
+    );
+    assert_eq!(cursor, (0, 11));
 }
 
 #[test]

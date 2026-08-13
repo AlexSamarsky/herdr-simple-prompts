@@ -32,8 +32,29 @@ struct LinkCandidate {
     open: usize,
     label_start: usize,
     label_end: usize,
+    url_start: usize,
     close: usize,
     valid: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HyperlinkRange {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkdownProjection {
+    pub styled: StyledText,
+    pub hyperlinks: Vec<HyperlinkRange>,
+}
+
+#[derive(Debug)]
+struct SourceHyperlink<'a> {
+    label_start: usize,
+    label_end: usize,
+    url: &'a str,
 }
 
 #[derive(Debug)]
@@ -62,8 +83,13 @@ impl LinkOwnership {
 }
 
 pub fn style_markdown(text: &str) -> StyledText {
+    style_markdown_with_links(text).styled
+}
+
+pub fn style_markdown_with_links(text: &str) -> MarkdownProjection {
     let mut slots = vec![StyleSlot::default(); text.len()];
     let mut visible = vec![true; text.len()];
+    let mut hyperlinks = Vec::new();
     let lines = line_ranges(text);
     let mut line_index = 0;
 
@@ -117,11 +143,12 @@ pub fn style_markdown(text: &str) -> StyledText {
             line_range.end,
             &mut slots,
             &mut visible,
+            &mut hyperlinks,
         );
         line_index += 1;
     }
 
-    project_visible(text, &slots, &visible)
+    project_visible(text, &slots, &visible, &hyperlinks)
 }
 
 fn line_ranges(text: &str) -> Vec<LineRange> {
@@ -145,28 +172,52 @@ fn line_ranges(text: &str) -> Vec<LineRange> {
     ranges
 }
 
-fn project_visible(text: &str, slots: &[StyleSlot], visible: &[bool]) -> StyledText {
+fn project_visible(
+    text: &str,
+    slots: &[StyleSlot],
+    visible: &[bool],
+    source_hyperlinks: &[SourceHyperlink<'_>],
+) -> MarkdownProjection {
     let mut projected = String::with_capacity(text.len());
     let mut builder = StyleRunBuilder::new();
+    let mut projected_offsets = vec![None; text.len() + 1];
     for (byte, character) in text.char_indices() {
+        projected_offsets[byte] = Some(projected.len());
         if visible[byte] {
             builder.set_style(slots[byte].style, projected.len());
             projected.push(character);
         }
+        projected_offsets[byte + character.len_utf8()] = Some(projected.len());
     }
     let runs = builder.finish(projected.len());
-    StyledText {
-        text: projected,
-        runs,
+    let hyperlinks = source_hyperlinks
+        .iter()
+        .filter_map(|link| {
+            let start_byte = projected_offsets[link.label_start]?;
+            let end_byte = projected_offsets[link.label_end]?;
+            (start_byte < end_byte).then(|| HyperlinkRange {
+                start_byte,
+                end_byte,
+                url: link.url.to_owned(),
+            })
+        })
+        .collect();
+    MarkdownProjection {
+        styled: StyledText {
+            text: projected,
+            runs,
+        },
+        hyperlinks,
     }
 }
 
-fn style_inline(
-    text: &str,
+fn style_inline<'a>(
+    text: &'a str,
     start: usize,
     end: usize,
     slots: &mut [StyleSlot],
     visible: &mut [bool],
+    hyperlinks: &mut Vec<SourceHyperlink<'a>>,
 ) {
     if start >= end {
         return;
@@ -174,7 +225,7 @@ fn style_inline(
     let inline_code = inline_code_ranges(text, start, end);
     let (links, link_owned) = link_candidates(text, start, end, &inline_code);
     style_inline_code(&inline_code, slots, visible, &link_owned);
-    style_links(&links, slots, visible);
+    style_links(text, &links, slots, visible, hyperlinks);
     style_strong(text, start, end, slots, visible, &link_owned);
     style_emphasis(text, start, end, slots, visible, &link_owned);
 }
@@ -237,6 +288,7 @@ fn link_candidates(
                 open,
                 label_start,
                 label_end,
+                url_start,
                 close,
                 valid,
             });
@@ -294,7 +346,13 @@ fn style_inline_code(
     }
 }
 
-fn style_links(candidates: &[LinkCandidate], slots: &mut [StyleSlot], visible: &mut [bool]) {
+fn style_links<'a>(
+    text: &'a str,
+    candidates: &[LinkCandidate],
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+    hyperlinks: &mut Vec<SourceHyperlink<'a>>,
+) {
     for candidate in candidates.iter().filter(|candidate| candidate.valid) {
         apply_style(
             slots,
@@ -303,16 +361,44 @@ fn style_links(candidates: &[LinkCandidate], slots: &mut [StyleSlot], visible: &
             LINK_PRIORITY,
             StyleState::default(),
         );
-        apply_style(
-            slots,
-            candidate.label_start,
-            candidate.label_end,
-            LINK_LABEL_PRIORITY,
-            link_style(),
-        );
+        let url = &text[candidate.url_start..candidate.close];
+        if is_safe_http_url(url) {
+            apply_style(
+                slots,
+                candidate.label_start,
+                candidate.label_end,
+                LINK_LABEL_PRIORITY,
+                link_style(),
+            );
+            hyperlinks.push(SourceHyperlink {
+                label_start: candidate.label_start,
+                label_end: candidate.label_end,
+                url,
+            });
+        }
         discard(visible, candidate.open, candidate.label_start);
         discard(visible, candidate.label_end, candidate.close + 1);
     }
+}
+
+pub(crate) fn is_safe_http_url(url: &str) -> bool {
+    let remainder = if url
+        .get(.."https://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    {
+        &url["https://".len()..]
+    } else if url
+        .get(.."http://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+    {
+        &url["http://".len()..]
+    } else {
+        return false;
+    };
+    !remainder.is_empty()
+        && !url
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
 }
 
 fn style_strong(

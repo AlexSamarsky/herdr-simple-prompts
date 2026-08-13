@@ -103,8 +103,10 @@ For every final answer, the transcript's `Message.text` remains the
 canonical Markdown value used for identity and replay. Simple Prompts separately
 projects that Markdown into the visible text a terminal renderer shows:
 supported heading, emphasis, inline-code, and fenced-code delimiters are
-removed, and a Markdown link is shown as its label without the destination.
-Malformed or unsupported syntax remains literal.
+removed. A Markdown `http://` or `https://` link is shown as a cyan, underlined
+label without the visible destination and is clickable in terminals that
+support OSC 8. Other syntactically valid schemes are shown as ordinary labels;
+malformed syntax remains literal.
 
 For a newly observed final answer, Simple Prompts reads recent ANSI output from
 the source agent and accepts a styled block only when its sanitized visible text
@@ -112,7 +114,10 @@ exactly matches that deterministic projection at one unique known Codex or
 Claude final-answer boundary. The captured presentation owns both the visible
 text and safe SGR colors, bold, dim, italic, and underline styles. Cursor
 movement, alternate-screen commands, OSC titles, hyperlinks, clipboard
-commands, and other terminal controls are discarded and never replayed.
+commands, and other terminal controls are discarded and never replayed. Any
+clickable link is rebuilt only from the canonical, control-free HTTP(S)
+Markdown destination after the visible text matches exactly; a captured OSC
+sequence can never become link metadata.
 
 When exact native ANSI is unavailable, the same dependency-free projected text
 is shown with deterministic fallback styles. Captured native visible text and
@@ -301,7 +306,9 @@ sequence with synthetic, non-sensitive input:
    row appears immediately above the answer without background fill or a box;
    the same visible words appear in the same order; supported delimiters and the
    link destination are absent; native colors and emphasis remain when exact
-   capture succeeds; and the last line is reachable by scrolling. Also confirm
+   capture succeeds; the link label opens its HTTP(S) destination in an OSC
+   8-capable terminal; and the last line is reachable by scrolling. Also
+   confirm a `mailto:` fixture remains an ordinary non-clickable label,
    `PageUp`/`PageDown` and the mouse wheel scroll, and the first two prompt rows
    stick and are pushed away by the following prompt.
 3. Paste 1,000 or more characters. Confirm the composer and saved prompt show
@@ -378,6 +385,9 @@ herdr plugin uninstall herdr.simple-prompts
 ## Limitations
 
 - Only Codex and Claude are supported in version 0.1.
+- Clickable labels require OSC 8 support in the terminal emulator; unsupported
+  terminals still show the same cyan, underlined HTTP(S) label as plain styled
+  text.
 - Windows is not supported.
 - The view belongs to the currently focused native session; it is not a global
   conversation browser.

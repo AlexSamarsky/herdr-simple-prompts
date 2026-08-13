@@ -15,8 +15,9 @@ clickable because Ratatui styles do not carry a hyperlink target.
 - Safe links keep the existing cyan, underlined presentation.
 - Destinations with any other scheme are projected to their label as ordinary
   answer text without underline or hyperlink behavior.
-- A destination containing whitespace or terminal control characters is not a
-  valid clickable target.
+- A destination containing terminal control characters is not a valid
+  clickable target. Whitespace continues to make the whole Markdown candidate
+  malformed and therefore literal, matching the existing parser contract.
 
 ## Architecture
 
@@ -40,9 +41,10 @@ plain label width. The input cursor is restored after the hyperlink redraw.
 
 Only control-free `http://` and `https://` targets enter an OSC sequence. The
 renderer never treats persisted ANSI/control bytes as link metadata and never
-persists URLs separately. Unsupported or unsafe destinations degrade to plain
-labels, so a malformed link cannot inject terminal commands or leave an OSC 8
-link open across following text.
+persists URLs separately. Syntactically valid unsupported or unsafe
+destinations degrade to plain labels; malformed Markdown remains literal. A
+candidate cannot inject terminal commands or leave an OSC 8 link open across
+following text.
 
 ## Testing
 
