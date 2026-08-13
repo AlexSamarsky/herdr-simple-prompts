@@ -82,12 +82,14 @@ drive rendering, bottom alignment, scrolling, and sticky prompt context, so a
 long answer remains reachable instead of being wrapped a second time by the
 terminal widget.
 
-- Each user prompt starts with `YOU` and fills every wrapped row to the pane's
-  right edge with a neutral band.
-- Each final answer starts with `ANSWER` and remains unboxed.
+- Each user prompt is a full-width neutral-gray block with one gray blank row
+  above and below its text. There is no `YOU` label.
+- Each final answer begins directly with its styled text on the normal terminal
+  surface. There is no `ANSWER` label or answer box.
 - After a prompt scrolls out of its natural position, at most its first two
-  wrapped rows stay at the top. The next prompt pushes those rows away one at a
-  time. The sticky copy never replaces or truncates the complete prompt in
+  wrapped content rows stay at the top. The gray top padding stays with them
+  when the viewport has room. The next prompt pushes the old block away one row
+  at a time. The sticky copy never replaces or truncates the complete prompt in
   ordinary history.
 - `PageUp`, `PageDown`, and the mouse wheel scroll the conversation. Returning
   the offset to the bottom resumes live bottom-following.
@@ -250,7 +252,9 @@ herdr server reload-config
 For Codex, focus a current native Codex pane and press `prefix+m`. Verify this
 sequence with synthetic, non-sensitive input:
 
-1. Submit a normal prompt and confirm it appears above the native `Working` row.
+1. Submit a normal prompt and confirm it appears above the native `Working` row
+   as a full-width gray block with one blank gray row above and below, without
+   `YOU` or `ANSWER` labels.
 2. Request a long answer containing a heading, list, emphasis, inline code, and
    fenced code. Confirm the bottom is reachable, `PageUp`/`PageDown` and the
    mouse wheel scroll, and the first two prompt rows stick and are pushed away
