@@ -2,9 +2,9 @@
 
 Herdr Simple Prompts is a terminal overlay for [Herdr](https://herdr.dev) that
 keeps an agent conversation intentionally quiet. It shows real user prompts,
-final answers, the current `Working` state, a multiline composer, and a compact
-status footer. Reasoning, commentary, tool calls, tool results, system context,
-and subagent traffic stay in the native agent pane.
+final answers, the current native `Working`/status area, a multiline composer,
+and a compact status footer. Reasoning, commentary, tool calls, tool results,
+system context, and subagent traffic stay in the native agent pane.
 
 Version 0.1 supports Codex CLI and Claude Code on macOS and Linux.
 
@@ -82,8 +82,10 @@ drive rendering, bottom alignment, scrolling, and sticky prompt context, so a
 long answer remains reachable instead of being wrapped a second time by the
 terminal widget.
 
-- Each user prompt is a full-width neutral-gray block with one gray blank row
-  above and below its text. There is no `YOU` label.
+- Each user prompt is a full-width neutral-gray block. Its existing top gray
+  row shows the prompt's local `DD.MM.YYYY HH:MM` timestamp, and one blank gray
+  row remains below the text. There is no `YOU` label. Legacy records without a
+  valid timestamp keep the top row blank.
 - Each final answer begins directly with its styled text on the normal terminal
   surface. There is no `ANSWER` label or answer box.
 - After a prompt scrolls out of its natural position, at most its first two
@@ -135,6 +137,29 @@ cursor skips each token and deletion removes it as a whole. The plugin imposes
 no arbitrary prompt-length truncation. Any Herdr or agent-side rejection is
 shown and the exact draft, including the hidden source behind compact tokens,
 is restored.
+
+## Native composer protection
+
+Simple Prompts keeps its editor separate from the native Codex or Claude
+composer. Before editing and again immediately before submission, it checks the
+recognized native composer surface:
+
+- unsent native text disables Simple Prompts editing/submission and asks you to
+  press `prefix+m`; both the native draft and the complete plugin draft remain
+  unchanged;
+- native image placeholders are accepted only when their count exactly matches
+  images attached by Simple Prompts;
+- an unrecognized or incomplete composer layout is blocked conservatively
+  instead of guessing that it is empty.
+
+The check returns only a coarse state and attachment count. Native draft text
+and native attachment paths are never copied into plugin state, the history
+journal, logs, or error messages.
+
+Herdr 0.7.5 does not provide one atomic "inspect and submit" operation. The
+authoritative final preflight prevents the reported single-client draft
+concatenation path, but cannot guarantee atomicity if another client writes to
+the native composer between that read and `agent.prompt`.
 
 ## Native questions and approvals
 
@@ -193,6 +218,9 @@ attachment IDs, timestamp and display order, a text fingerprint, and either
 validated native style ranges or fallback/plain presentation provenance. A
 repeated stable id is an append-only upsert whose latest valid record wins, so
 later exact native ANSI can replace fallback presentation.
+
+Prompt timestamps were already present in the journal before the date/time row
+was added, so existing history needs no migration.
 
 The journal never stores reasoning, commentary, tool calls or results, system
 context, subagent traffic, blocked interaction surfaces, native attachment
@@ -262,8 +290,8 @@ For Codex, focus a current native Codex pane and press `prefix+m`. Verify this
 sequence with synthetic, non-sensitive input:
 
 1. Submit a normal prompt and confirm it appears above the native `Working` row
-   as a full-width gray block with one blank gray row above and below, without
-   `YOU` or `ANSWER` labels.
+   as a full-width gray block with local `DD.MM.YYYY HH:MM` in its top gray row
+   and one blank gray row below, without `YOU` or `ANSWER` labels.
 2. Request a long final answer containing a Markdown heading, bold and
    emphasized text, inline code, fenced code, and a Markdown link. Compare the
    native pane with Simple Prompts: confirm the same visible words appear in the
@@ -280,8 +308,14 @@ sequence with synthetic, non-sensitive input:
 5. Close and reopen only the overlay with `prefix+m`; confirm the exact rendered
    text and styles from step 2 are restored. Then close the native source pane
    and confirm its private pane state is removed.
+6. Type synthetic text in the native composer without submitting it, open Simple
+   Prompts, and confirm editing is blocked without changing either draft. Clear
+   the native draft and confirm one subsequent submission produces one prompt.
+7. Remove an open overlay pane, then press `prefix+m` from that stale action
+   context and confirm one invocation focuses the still-live source and opens a
+   replacement overlay.
 
-Repeat steps 1, 2, 4, and 5 in a current Claude Code pane. Include one
+Repeat steps 1, 2, 4, 5, and 6 in a current Claude Code pane. Include one
 tool-using prompt and confirm thinking, tool use/results, and progress remain in
 the native pane while only the final visible answer appears in Simple Prompts.
 If no live Claude session is available, report that prerequisite as missing;
@@ -298,6 +332,26 @@ herdr integration install codex
 # or
 herdr integration install claude
 ```
+
+A bulk command that filters `herdr agent list` with
+`agent_session == null` is only a one-off repair for panes missing native
+integration metadata. It intentionally prints nothing when every live agent
+already has session metadata, and it is not a general Simple Prompts hotkey
+activation or repair command.
+
+### `prefix+m` does not open Simple Prompts
+
+Confirm the binding is present, then reload Herdr configuration:
+
+```bash
+herdr server reload-config
+```
+
+If the plugin action log reports `pane_not_found` for a removed overlay, press
+`prefix+m` again. Simple Prompts now validates the mapped source, focuses it,
+removes only the stale source/overlay pair, and opens a replacement overlay in
+the same toggle invocation. Temporary permission, transport, or timeout errors
+preserve the mapping for a later retry.
 
 ### An image is not attached
 

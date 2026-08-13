@@ -311,7 +311,7 @@ fn stale_overlay_action_context_refocuses_source_and_reopens_in_one_toggle() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Ok(json!({"type":"pane_focused"})),
@@ -360,8 +360,8 @@ fn missing_stale_overlay_and_source_remove_only_the_exact_mapping() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
-        Err(json!({"code":"not_found","message":"source missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"source missing"})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
@@ -410,7 +410,7 @@ fn transient_source_probe_error_preserves_the_stale_mapping() {
     let store = StateStore::at(&directory);
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Err(json!({
             "code":"temporarily_unavailable",
             "message":"retry later"
@@ -435,7 +435,7 @@ fn transient_agent_probe_error_preserves_the_stale_mapping() {
     let store = StateStore::at(&directory);
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Err(json!({
             "code":"temporarily_unavailable",
@@ -462,9 +462,9 @@ fn source_disappearing_during_agent_probe_removes_only_the_stale_mapping() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
-        Err(json!({"code":"not_found","message":"source agent missing"})),
+        Err(json!({"code":"pane_not_found","message":"source agent missing"})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
@@ -491,7 +491,7 @@ fn stale_overlay_focus_failure_preserves_the_mapping() {
     let store = StateStore::at(&directory);
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Err(json!({
@@ -519,10 +519,10 @@ fn source_disappearing_during_focus_removes_only_the_stale_mapping() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
-        Err(json!({"code":"not_found","message":"source focus missing"})),
+        Err(json!({"code":"pane_not_found","message":"source focus missing"})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
@@ -550,7 +550,7 @@ fn replacement_open_failure_keeps_stale_cleanup_and_unrelated_mapping() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"overlay missing"})),
+        Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
         Ok(agent_info("w1:p1", "session-1")),
         Ok(json!({"type":"pane_focused"})),
@@ -621,7 +621,7 @@ fn stale_overlay_is_replaced_without_disturbing_other_sources() {
     store.save_overlay("w1:p1", "w1:stale").unwrap();
     store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
-        Err(json!({"code":"not_found","message":"pane missing"})),
+        Err(json!({"code":"pane_not_found","message":"pane missing"})),
         Ok(json!({
             "type":"agent_info",
             "agent": {
@@ -710,7 +710,7 @@ fn namespace_validation_removes_state_only_for_proven_not_found() {
     let store = StateStore::at(&directory);
     let journal = create_scoped_state(&store, &directory, "w1:p1", "session-1");
     let fake = support::ScriptedHerdr::start_responses(vec![Err(json!({
-        "code": "not_found",
+        "code": "pane_not_found",
         "message": "pane missing"
     }))]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();

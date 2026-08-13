@@ -261,7 +261,7 @@ fn spawn_lifecycle_worker(
 fn source_pane_is_gone(client: &HerdrClient, source_pane: &str) -> bool {
     matches!(
         client.agent_get(source_pane),
-        Err(error) if error.api_code() == Some("not_found")
+        Err(error) if error.is_pane_not_found()
     )
 }
 
@@ -678,7 +678,7 @@ mod tests {
                 "code": "timeout",
                 "message": "timed out waiting for event match"
             })),
-            Err(serde_json::json!({"code": "not_found", "message": "pane missing"})),
+            Err(serde_json::json!({"code": "pane_not_found", "message": "pane missing"})),
         ]);
         let client = HerdrClient::connect(&socket).unwrap();
         let stop = Arc::new(AtomicBool::new(false));

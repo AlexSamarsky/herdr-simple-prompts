@@ -320,7 +320,7 @@ impl StateStore {
                     }
                     Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
                 },
-                Err(error) if error.api_code() == Some("not_found") => {
+                Err(error) if error.is_pane_not_found() => {
                     self.remove_pane_state(&namespace.source_pane)?;
                 }
                 Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,

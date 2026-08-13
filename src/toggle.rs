@@ -9,7 +9,7 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
     if let Some(source) = state.source_for_overlay(current_pane)? {
         match client.pane_get(current_pane) {
             Ok(_) => {}
-            Err(error) if error.api_code() == Some("not_found") => {
+            Err(error) if error.is_pane_not_found() => {
                 return recover_stale_overlay_context(client, state, &source);
             }
             Err(error) => return Err(AppError::new("toggle", error.to_string())),
@@ -32,7 +32,7 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
                     .map_err(|error| AppError::new("toggle", error.to_string()))?;
                 return Ok(());
             }
-            Err(error) if error.api_code() == Some("not_found") => {
+            Err(error) if error.is_pane_not_found() => {
                 state.remove_source(current_pane)?;
             }
             Err(error) => return Err(AppError::new("toggle", error.to_string())),
@@ -49,7 +49,7 @@ fn recover_stale_overlay_context(
 ) -> AppResult<()> {
     match client.pane_get(source) {
         Ok(_) => {}
-        Err(error) if error.api_code() == Some("not_found") => {
+        Err(error) if error.is_pane_not_found() => {
             state.remove_source(source)?;
             return Err(AppError::new(
                 "toggle",
@@ -60,7 +60,7 @@ fn recover_stale_overlay_context(
     }
     let identity_response = match client.agent_get(source) {
         Ok(response) => response,
-        Err(error) if error.api_code() == Some("not_found") => {
+        Err(error) if error.is_pane_not_found() => {
             return remove_missing_source_mapping(state, source);
         }
         Err(error) => return Err(AppError::new("agent", error.to_string())),
@@ -68,7 +68,7 @@ fn recover_stale_overlay_context(
     let identity = agent_identity_from_response(&identity_response, source)?;
     match client.pane_focus(source) {
         Ok(_) => {}
-        Err(error) if error.api_code() == Some("not_found") => {
+        Err(error) if error.is_pane_not_found() => {
             return remove_missing_source_mapping(state, source);
         }
         Err(error) => return Err(AppError::new("toggle", error.to_string())),

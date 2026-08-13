@@ -49,7 +49,20 @@ fn call_preserves_structured_api_error() {
         .unwrap_err();
 
     assert_eq!(error.api_code(), Some("not_found"));
+    assert!(!error.is_pane_not_found());
     assert!(error.to_string().contains("pane not found"));
+}
+
+#[test]
+fn pane_not_found_is_classified_from_the_exact_herdr_api_code() {
+    let fake = support::FakeHerdr::error("pane_not_found", "pane not found");
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let error = client
+        .call("pane.get", serde_json::json!({"pane_id":"missing"}))
+        .unwrap_err();
+
+    assert!(error.is_pane_not_found());
 }
 
 #[test]
