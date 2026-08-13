@@ -1,7 +1,13 @@
 use crate::app::AppState;
 use crate::local_time::{format_local_timestamp, format_timestamp_at_offset};
+use crate::markdown::{
+    HyperlinkRange, MarkdownProjection, NonClickableLinkRange, style_markdown_with_links,
+};
 use crate::model::{Delivery, Message};
-use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
+use crate::style::{
+    AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyleRunBuilder, StyleState,
+    StyledText,
+};
 use chrono::FixedOffset;
 use unicode_width::UnicodeWidthChar;
 
@@ -26,6 +32,7 @@ impl From<&StyleRun> for CellStyle {
 pub struct VisualSpan {
     pub text: String,
     pub style: CellStyle,
+    pub hyperlink: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,6 +47,7 @@ impl VisualRow {
             spans: vec![VisualSpan {
                 text: text.into(),
                 style: CellStyle::default(),
+                hyperlink: None,
             }],
             fill: None,
         }
@@ -57,15 +65,20 @@ impl VisualRow {
         self.spans.iter().map(|span| span.text.as_str()).collect()
     }
 
-    fn push_char(&mut self, character: char, style: CellStyle) {
+    fn push_char(&mut self, character: char, style: CellStyle, hyperlink: Option<&str>) {
         if let Some(previous) = self.spans.last_mut()
             && previous.style == style
+            && previous.hyperlink.as_deref() == hyperlink
         {
             previous.text.push(character);
         } else {
             let mut text = String::with_capacity(character.len_utf8());
             text.push(character);
-            self.spans.push(VisualSpan { text, style });
+            self.spans.push(VisualSpan {
+                text,
+                style,
+                hyperlink: hyperlink.map(str::to_owned),
+            });
         }
     }
 }
@@ -208,10 +221,19 @@ pub fn sticky_overlay(sections: &[PromptSection], top: usize, height: usize) -> 
 }
 
 pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
+    wrap_styled_with_hyperlinks(source, &[], width)
+}
+
+fn wrap_styled_with_hyperlinks(
+    source: &StyledText,
+    hyperlinks: &[HyperlinkRange],
+    width: usize,
+) -> Vec<VisualRow> {
     let width = width.max(1);
     let runs = valid_runs(source);
     let mut rows = Vec::new();
     let mut styles = StyleCursor::new(&runs);
+    let mut links = HyperlinkCursor::new(hyperlinks);
     let mut row = empty_row();
     let mut row_width = 0;
     let mut token_start = 0;
@@ -235,13 +257,14 @@ pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
             for (word_offset, character) in word.char_indices() {
                 let byte = token_start + offset + word_offset;
                 let style = styles.style_at(byte);
+                let hyperlink = links.url_at(byte);
                 let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
                 if character_width > 0 && row_width > 0 && row_width + character_width > width {
                     rows.push(row);
                     row = empty_row();
                     row_width = 0;
                 }
-                row.push_char(character, style);
+                row.push_char(character, style, hyperlink);
                 row_width += character_width;
             }
         }
@@ -255,6 +278,31 @@ pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
     }
     rows.push(row);
     rows
+}
+
+struct HyperlinkCursor<'a> {
+    ranges: &'a [HyperlinkRange],
+    index: usize,
+}
+
+impl<'a> HyperlinkCursor<'a> {
+    fn new(ranges: &'a [HyperlinkRange]) -> Self {
+        Self { ranges, index: 0 }
+    }
+
+    fn url_at(&mut self, byte: usize) -> Option<&'a str> {
+        while self
+            .ranges
+            .get(self.index)
+            .is_some_and(|range| byte >= range.end_byte)
+        {
+            self.index += 1;
+        }
+        self.ranges
+            .get(self.index)
+            .filter(|range| range.start_byte <= byte)
+            .map(|range| range.url.as_str())
+    }
 }
 
 struct WordBoundaries<'a> {
@@ -374,19 +422,88 @@ fn prompt_lines(message: &Message, delivery: &Delivery) -> Vec<StyledText> {
     lines
 }
 
-fn answer_lines(message: &Message) -> Vec<StyledText> {
-    let source = match &message.presentation {
-        MessagePresentation::NativeAnsi(styled) => styled.clone(),
-        MessagePresentation::MarkdownFallback => crate::markdown::style_markdown(&message.text),
-        MessagePresentation::Plain => StyledText {
-            text: message.text.clone(),
-            runs: Vec::new(),
-        },
-    };
-    split_styled_lines(&source)
+struct AnswerLine {
+    styled: StyledText,
+    hyperlinks: Vec<HyperlinkRange>,
 }
 
-fn split_styled_lines(source: &StyledText) -> Vec<StyledText> {
+fn answer_lines(message: &Message) -> Vec<AnswerLine> {
+    let MarkdownProjection {
+        styled: markdown_styled,
+        hyperlinks: markdown_hyperlinks,
+        non_clickable_links,
+    } = style_markdown_with_links(&message.text);
+    let (source, hyperlinks) = match &message.presentation {
+        MessagePresentation::NativeAnsi(styled) => {
+            if styled.text == markdown_styled.text {
+                (
+                    suppress_link_underlines(styled, &non_clickable_links),
+                    markdown_hyperlinks,
+                )
+            } else {
+                (styled.clone(), Vec::new())
+            }
+        }
+        MessagePresentation::MarkdownFallback => (markdown_styled, markdown_hyperlinks),
+        MessagePresentation::Plain => (
+            StyledText {
+                text: message.text.clone(),
+                runs: Vec::new(),
+            },
+            Vec::new(),
+        ),
+    };
+    split_answer_lines(&source, &hyperlinks)
+}
+
+fn suppress_link_underlines(source: &StyledText, ranges: &[NonClickableLinkRange]) -> StyledText {
+    let runs = valid_runs(source);
+    let mut styles = StyleCursor::new(&runs);
+    let mut ranges = TextRangeCursor::new(ranges);
+    let mut builder = StyleRunBuilder::new();
+    for (byte, _) in source.text.char_indices() {
+        let style = styles.style_at(byte);
+        let mut state = StyleState {
+            foreground: style.foreground,
+            background: style.background,
+            modifiers: style.modifiers,
+        };
+        if ranges.contains(byte) {
+            state.modifiers.underline = false;
+        }
+        builder.set_style(state, byte);
+    }
+    StyledText {
+        text: source.text.clone(),
+        runs: builder.finish(source.text.len()),
+    }
+}
+
+struct TextRangeCursor<'a> {
+    ranges: &'a [NonClickableLinkRange],
+    index: usize,
+}
+
+impl<'a> TextRangeCursor<'a> {
+    fn new(ranges: &'a [NonClickableLinkRange]) -> Self {
+        Self { ranges, index: 0 }
+    }
+
+    fn contains(&mut self, byte: usize) -> bool {
+        while self
+            .ranges
+            .get(self.index)
+            .is_some_and(|range| byte >= range.end_byte)
+        {
+            self.index += 1;
+        }
+        self.ranges
+            .get(self.index)
+            .is_some_and(|range| range.start_byte <= byte)
+    }
+}
+
+fn split_answer_lines(source: &StyledText, hyperlinks: &[HyperlinkRange]) -> Vec<AnswerLine> {
     let mut lines = Vec::new();
     let mut start = 0;
     for end in source
@@ -411,7 +528,22 @@ fn split_styled_lines(source: &StyledText) -> Vec<StyledText> {
                 })
             })
             .collect();
-        lines.push(StyledText { text, runs });
+        let hyperlinks = hyperlinks
+            .iter()
+            .filter_map(|link| {
+                let from = link.start_byte.max(start);
+                let to = link.end_byte.min(end);
+                (from < to).then(|| HyperlinkRange {
+                    start_byte: from - start,
+                    end_byte: to - start,
+                    url: link.url.clone(),
+                })
+            })
+            .collect();
+        lines.push(AnswerLine {
+            styled: StyledText { text, runs },
+            hyperlinks,
+        });
         start = end.saturating_add(1);
     }
     lines
@@ -429,8 +561,8 @@ fn push_styled_rows(
     }
 }
 
-fn push_answer_rows(rows: &mut Vec<VisualRow>, source: &StyledText, width: usize) {
-    for mut row in wrap_styled(source, width) {
+fn push_answer_rows(rows: &mut Vec<VisualRow>, source: &AnswerLine, width: usize) {
+    for mut row in wrap_styled_with_hyperlinks(&source.styled, &source.hyperlinks, width) {
         for span in &mut row.spans {
             if span.style.foreground.is_none() {
                 span.style.foreground = Some(AnsiColor::BrightWhite);
@@ -482,6 +614,7 @@ fn filled_timestamp_row(
                     },
                     ..CellStyle::default()
                 },
+                hyperlink: None,
             }]
         })
         .unwrap_or_default();

@@ -1,7 +1,7 @@
 use herdr_simple_prompts::agent::AgentKind;
 use herdr_simple_prompts::ansi::{extract_native_final, sanitize_ansi};
 use herdr_simple_prompts::app::{AppEvent, AppState};
-use herdr_simple_prompts::markdown::style_markdown;
+use herdr_simple_prompts::markdown::{style_markdown, style_markdown_with_links};
 use herdr_simple_prompts::model::Message;
 use herdr_simple_prompts::style::{
     AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText, validate_style_runs,
@@ -308,6 +308,51 @@ fn markdown_projection_removes_supported_delimiters_and_rebases_styles() {
 }
 
 #[test]
+fn markdown_hyperlink_projection_accepts_only_safe_http_targets() {
+    let text = concat!(
+        "до [документы](https://example.test/путь) после\n",
+        "[HTTP](HTTP://example.test) [mail](mailto:user@example.test)\n",
+        "[unsafe](https://example.test/\u{1b}]8;;injected)",
+    );
+
+    let projected = style_markdown_with_links(text);
+
+    assert_eq!(
+        projected.styled.text,
+        "до документы после\nHTTP mail\nunsafe"
+    );
+    assert_eq!(projected.hyperlinks.len(), 2);
+
+    let documents = projected.styled.text.find("документы").unwrap();
+    assert_eq!(projected.hyperlinks[0].start_byte, documents);
+    assert_eq!(
+        projected.hyperlinks[0].end_byte,
+        documents + "документы".len()
+    );
+    assert_eq!(projected.hyperlinks[0].url, "https://example.test/путь");
+    let http = projected.styled.text.find("HTTP").unwrap();
+    assert_eq!(projected.hyperlinks[1].start_byte, http);
+    assert_eq!(projected.hyperlinks[1].end_byte, http + "HTTP".len());
+    assert_eq!(projected.hyperlinks[1].url, "HTTP://example.test");
+
+    for label in ["документы", "HTTP"] {
+        let style = style_at(
+            &projected.styled,
+            projected.styled.text.find(label).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(style.foreground, Some(AnsiColor::Cyan));
+        assert!(style.modifiers.underline);
+    }
+    for label in ["mail", "unsafe"] {
+        let byte = projected.styled.text.find(label).unwrap();
+        assert!(style_at(&projected.styled, byte).is_none());
+    }
+    assert!(!projected.styled.text.contains("mailto:"));
+    assert!(!projected.styled.text.contains("injected"));
+}
+
+#[test]
 fn markdown_projection_keeps_malformed_constructs_literal() {
     let text = concat!(
         "unclosed **strong\n",
@@ -443,9 +488,7 @@ fn markdown_valid_link_owns_inline_like_destination_syntax() {
 
     assert_eq!(styled.text, "label");
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
-    let label_style = style_at(&styled, 0).unwrap();
-    assert_eq!(label_style.foreground, Some(AnsiColor::Cyan));
-    assert!(label_style.modifiers.underline);
+    assert!(style_at(&styled, 0).is_none());
 }
 
 #[test]
@@ -456,9 +499,7 @@ fn markdown_inline_code_outranks_a_valid_link_label() {
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
 
     for label_part in ["left", "right"] {
-        let label_style = style_at(&styled, styled.text.find(label_part).unwrap()).unwrap();
-        assert_eq!(label_style.foreground, Some(AnsiColor::Cyan));
-        assert!(label_style.modifiers.underline);
+        assert!(style_at(&styled, styled.text.find(label_part).unwrap()).is_none());
     }
 
     let code_style = style_at(&styled, styled.text.find("code").unwrap()).unwrap();

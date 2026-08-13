@@ -2,17 +2,40 @@ use crate::agent::AgentStatus;
 use crate::app::AppState;
 use crate::composer::ComposerAccess;
 use crate::editor::Editor;
+use crate::markdown::is_safe_http_url;
 use crate::style::AnsiColor;
 use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow, wrap_styled};
 use ratatui::Frame;
 use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::backend::{Backend, TestBackend};
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use std::io;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HyperlinkArea {
+    x: u16,
+    y: u16,
+    width: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HyperlinkPatch {
+    area: HyperlinkArea,
+    text: String,
+    url: String,
+}
+
+#[derive(Default)]
+struct RenderEffects {
+    hyperlinks: Vec<HyperlinkPatch>,
+    cursor: Option<Position>,
+}
 
 #[derive(Default)]
 pub(crate) struct HistoryRenderCache {
@@ -24,6 +47,7 @@ pub(crate) struct HistoryRenderCache {
     maximum_offset: usize,
     viewport_height: Option<usize>,
     viewport_initialized: bool,
+    terminal_hyperlinks: Vec<HyperlinkArea>,
     #[cfg(test)]
     rebuilds: usize,
 }
@@ -105,15 +129,15 @@ impl HistoryRenderCache {
     }
 }
 
-pub(crate) fn render(
+fn render(
     frame: &mut Frame<'_>,
     app: &AppState,
     editor: &Editor,
     history_cache: &mut HistoryRenderCache,
-) {
+) -> RenderEffects {
     if app.agent_status == AgentStatus::Blocked {
         render_blocked(frame, app);
-        return;
+        return RenderEffects::default();
     }
     let area = frame.area();
     let display_text = editor.display_text();
@@ -152,9 +176,14 @@ pub(crate) fn render(
         ])
         .split(area);
 
+    let history_rows =
+        history_cache.viewport_rows(app, areas[0].width, usize::from(areas[0].height));
+    let mut effects = RenderEffects {
+        hyperlinks: hyperlink_patches(&history_rows, areas[0]),
+        cursor: None,
+    };
     let history = Text::from(
-        history_cache
-            .viewport_rows(app, areas[0].width, usize::from(areas[0].height))
+        history_rows
             .iter()
             .map(|row| visual_row_line(row, areas[0].width))
             .collect::<Vec<_>>(),
@@ -242,8 +271,126 @@ pub(crate) fn render(
     if app.input_enabled && composer_guard.is_none() {
         let (cursor_row, cursor_column) =
             editor_cursor(areas[3], cursor_content_row, editor_column, composer_scroll);
-        frame.set_cursor_position((cursor_column, cursor_row));
+        let cursor = Position::new(cursor_column, cursor_row);
+        frame.set_cursor_position(cursor);
+        effects.cursor = Some(cursor);
     }
+    effects
+}
+
+fn hyperlink_patches(rows: &[VisualRow], area: Rect) -> Vec<HyperlinkPatch> {
+    let mut patches = Vec::new();
+    for (row_offset, row) in rows.iter().enumerate() {
+        let Ok(row_offset) = u16::try_from(row_offset) else {
+            break;
+        };
+        let Some(y) = area
+            .y
+            .checked_add(row_offset)
+            .filter(|y| *y < area.bottom())
+        else {
+            break;
+        };
+        let mut x = area.x;
+        for span in &row.spans {
+            let width = u16::try_from(UnicodeWidthStr::width(span.text.as_str()))
+                .unwrap_or(u16::MAX)
+                .min(area.right().saturating_sub(x));
+            if let Some(url) = span.hyperlink.as_deref()
+                && width > 0
+                && is_safe_http_url(url)
+                && !span.text.chars().any(char::is_control)
+            {
+                patches.push(HyperlinkPatch {
+                    area: HyperlinkArea { x, y, width },
+                    text: span.text.clone(),
+                    url: url.to_owned(),
+                });
+            }
+            x = x.saturating_add(width);
+            if x >= area.right() {
+                break;
+            }
+        }
+    }
+    patches
+}
+
+pub(crate) fn draw_terminal<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &AppState,
+    editor: &Editor,
+    history_cache: &mut HistoryRenderCache,
+) -> io::Result<()> {
+    let mut effects = RenderEffects::default();
+    let cells = {
+        let completed = terminal.draw(|frame| {
+            effects = render(frame, app, editor, history_cache);
+        })?;
+        let mut cells = plain_cells(completed.buffer, &history_cache.terminal_hyperlinks);
+        cells.extend(hyperlink_cells(completed.buffer, &effects.hyperlinks));
+        cells
+    };
+
+    history_cache.terminal_hyperlinks = effects
+        .hyperlinks
+        .iter()
+        .map(|patch| patch.area.clone())
+        .collect();
+    if cells.is_empty() {
+        return Ok(());
+    }
+    terminal
+        .backend_mut()
+        .draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))?;
+    if let Some(cursor) = effects.cursor {
+        terminal.set_cursor_position(cursor)?;
+    }
+    terminal.backend_mut().flush()
+}
+
+fn plain_cells(buffer: &Buffer, areas: &[HyperlinkArea]) -> Vec<(u16, u16, Cell)> {
+    let mut cells = Vec::new();
+    for area in areas {
+        let start = area.x.max(buffer.area.x);
+        let end = area.x.saturating_add(area.width).min(buffer.area.right());
+        let mut x = buffer.area.x;
+        while x < end {
+            let position = Position::new(x, area.y);
+            let Some(cell) = buffer.cell(position) else {
+                break;
+            };
+            let width = u16::try_from(UnicodeWidthStr::width(cell.symbol()))
+                .unwrap_or(u16::MAX)
+                .max(1);
+            if x < start || cell.skip {
+                x = x.saturating_add(width);
+                continue;
+            }
+            if x >= end {
+                break;
+            }
+            cells.push((x, area.y, cell.clone()));
+            x = x.saturating_add(width);
+        }
+    }
+    cells
+}
+
+fn hyperlink_cells(buffer: &Buffer, patches: &[HyperlinkPatch]) -> Vec<(u16, u16, Cell)> {
+    patches
+        .iter()
+        .filter_map(|patch| {
+            let mut cell = buffer
+                .cell(Position::new(patch.area.x, patch.area.y))?
+                .clone();
+            cell.set_symbol(&format!(
+                "\u{1b}]8;;{}\u{7}{}\u{1b}]8;;\u{7}",
+                patch.url, patch.text
+            ));
+            Some((patch.area.x, patch.area.y, cell))
+        })
+        .collect()
 }
 
 fn render_blocked(frame: &mut Frame<'_>, app: &AppState) {
@@ -454,9 +601,25 @@ pub fn render_to_buffer(app: &AppState, editor: &Editor, width: u16, height: u16
     let mut terminal = Terminal::new(backend).unwrap();
     let mut history_cache = HistoryRenderCache::default();
     terminal
-        .draw(|frame| render(frame, app, editor, &mut history_cache))
+        .draw(|frame| {
+            render(frame, app, editor, &mut history_cache);
+        })
         .unwrap();
     terminal.backend().buffer().clone()
+}
+
+pub fn render_terminal_to_buffer(
+    app: &AppState,
+    editor: &Editor,
+    width: u16,
+    height: u16,
+) -> (Buffer, (u16, u16)) {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut history_cache = HistoryRenderCache::default();
+    draw_terminal(&mut terminal, app, editor, &mut history_cache).unwrap();
+    let cursor = terminal.get_cursor_position().unwrap();
+    (terminal.backend().buffer().clone(), (cursor.x, cursor.y))
 }
 
 pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16) -> String {
@@ -473,9 +636,38 @@ pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryRenderCache, editor_visual_cursor, wrapped_text_height};
+    use super::{
+        HistoryRenderCache, HyperlinkArea, editor_visual_cursor, plain_cells, wrapped_text_height,
+    };
     use crate::app::{AppEvent, AppState};
     use crate::model::Message;
+    use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
+    use ratatui::Terminal;
+    use ratatui::backend::{CrosstermBackend, TestBackend};
+    use ratatui::layout::Rect;
+    use ratatui::{TerminalOptions, Viewport};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl RecordingWriter {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn wrapped_cursor_uses_display_rows_and_columns() {
@@ -574,5 +766,129 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn terminal_draw_clears_a_stale_link_when_metadata_disappears() {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+        app.apply(AppEvent::NativeFinal(Message {
+            stable_id: "a1".into(),
+            text: "[docs](https://example.test)".into(),
+            presentation: MessagePresentation::NativeAnsi(StyledText {
+                text: "docs".into(),
+                runs: vec![StyleRun {
+                    start_byte: 0,
+                    end_byte: 4,
+                    foreground: Some(AnsiColor::Blue),
+                    background: None,
+                    modifiers: StyleModifiers {
+                        underline: true,
+                        ..StyleModifiers::default()
+                    },
+                }],
+            }),
+            attachments: Vec::new(),
+            timestamp_ms: None,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut cache = HistoryRenderCache::default();
+
+        super::draw_terminal(&mut terminal, &app, &Default::default(), &mut cache).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains("https://example.test"))
+        );
+
+        app.turns[0].final_answer.as_mut().unwrap().text =
+            "[docs](mailto:user@example.test)".into();
+        cache.invalidate();
+        super::draw_terminal(&mut terminal, &app, &Default::default(), &mut cache).unwrap();
+
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| !cell.symbol().contains("\u{1b}]8;;"))
+        );
+    }
+
+    #[test]
+    fn stale_link_reset_skips_wide_glyph_continuation_cells() {
+        let buffer = ratatui::buffer::Buffer::with_lines(["界X"]);
+
+        let cells = plain_cells(
+            &buffer,
+            &[HyperlinkArea {
+                x: 0,
+                y: 0,
+                width: 2,
+            }],
+        );
+
+        assert_eq!(
+            cells
+                .iter()
+                .map(|(x, y, cell)| (*x, *y, cell.symbol()))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, "界")]
+        );
+        assert_eq!(buffer[(2, 0)].symbol(), "X");
+
+        let continuation_only = plain_cells(
+            &buffer,
+            &[HyperlinkArea {
+                x: 1,
+                y: 0,
+                width: 1,
+            }],
+        );
+        assert!(
+            continuation_only.is_empty(),
+            "a stale area starting inside a wide glyph must not erase it"
+        );
+    }
+
+    #[test]
+    fn crossterm_bytes_close_osc_before_restoring_the_composer_cursor() {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+        app.apply(AppEvent::NativeFinal(Message::final_text(
+            "a1",
+            "[OpenAI](https://openai.com)",
+            None,
+        )));
+        let writer = RecordingWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 50, 14)),
+            },
+        )
+        .unwrap();
+        let mut cache = HistoryRenderCache::default();
+
+        super::draw_terminal(&mut terminal, &app, &Default::default(), &mut cache).unwrap();
+
+        let bytes = writer.bytes();
+        let osc = b"\x1b]8;;https://openai.com\x07OpenAI\x1b]8;;\x07";
+        let osc_end = bytes
+            .windows(osc.len())
+            .position(|window| window == osc)
+            .expect("backend should emit the exact balanced OSC 8 sequence")
+            + osc.len();
+        assert!(
+            bytes[osc_end..]
+                .windows(b"\x1b[12;1H".len())
+                .any(|window| window == b"\x1b[12;1H"),
+            "cursor restoration must be emitted after the OSC close"
+        );
     }
 }

@@ -167,7 +167,7 @@ pub fn run_from_env() -> AppResult<()> {
             app.send_error = Some(error);
         }
 
-        terminal.draw(|frame| render::render(frame, &app, &editor, &mut history_cache))?;
+        render::draw_terminal(&mut terminal, &app, &editor, &mut history_cache)?;
         if !event::poll(Duration::from_millis(50))? {
             continue;
         }
