@@ -5,6 +5,19 @@ use std::io::Write;
 use std::time::Duration;
 
 #[test]
+fn client_can_be_constructed_for_an_unavailable_socket_and_fails_on_call() {
+    let socket = std::env::temp_dir().join(format!(
+        "herdr-simple-prompts-missing-socket-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket);
+
+    let client = HerdrClient::connect(&socket).unwrap();
+
+    assert!(client.call("ping", serde_json::json!({})).is_err());
+}
+
+#[test]
 fn call_sends_one_json_line_and_matches_response_id() {
     let fake = support::FakeHerdr::start(|request| {
         assert_eq!(request["method"], "agent.prompt");
@@ -212,4 +225,78 @@ fn pane_input_uses_exact_text_and_key_contracts() {
         requests[1]["params"],
         serde_json::json!({"pane_id":"w1:p1","keys":["shift+tab"]})
     );
+}
+
+#[test]
+fn wait_for_pane_closed_sends_exact_contract_and_accepts_exact_match() {
+    let fake = support::ScriptedHerdr::start(vec![serde_json::json!({
+        "type": "wait_matched",
+        "event": {
+            "event": "pane_closed",
+            "data": {"pane_id": "w1:p1"}
+        }
+    })]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(
+        client
+            .wait_for_pane_closed("w1:p1", Duration::from_millis(1_000))
+            .unwrap()
+    );
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "events.wait");
+    assert_eq!(
+        requests[0]["params"],
+        serde_json::json!({
+            "match_event": {"event": "pane_closed", "pane_id": "w1:p1"},
+            "timeout_ms": 1_000
+        })
+    );
+}
+
+#[test]
+fn wait_for_pane_closed_treats_only_wait_timeout_as_no_match() {
+    let fake = support::ScriptedHerdr::start_responses(vec![Err(serde_json::json!({
+        "code": "timeout",
+        "message": "event wait timed out"
+    }))]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(
+        !client
+            .wait_for_pane_closed("w1:p1", Duration::from_millis(1_000))
+            .unwrap()
+    );
+}
+
+#[test]
+fn wait_for_pane_closed_rejects_mismatched_success_envelopes() {
+    for response in [
+        serde_json::json!({
+            "type": "wait_matched",
+            "event": {"event": "pane_closed", "data": {"pane_id": "w1:p2"}}
+        }),
+        serde_json::json!({
+            "type": "wait_matched",
+            "event": {"event": "pane_focused", "data": {"pane_id": "w1:p1"}}
+        }),
+        serde_json::json!({
+            "type": "pane_closed",
+            "event": {"event": "pane_closed", "data": {"pane_id": "w1:p1"}}
+        }),
+    ] {
+        let fake = support::ScriptedHerdr::start(vec![response]);
+        let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+        let error = client
+            .wait_for_pane_closed("w1:p1", Duration::from_millis(1_000))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            herdr_simple_prompts::herdr::HerdrError::Protocol(_)
+        ));
+    }
 }

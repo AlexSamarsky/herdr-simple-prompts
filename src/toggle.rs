@@ -3,6 +3,7 @@ use crate::herdr::HerdrClient;
 use crate::state::StateStore;
 use crate::{AppError, AppResult};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> AppResult<()> {
     if let Some(source) = state.source_for_overlay(current_pane)? {
@@ -34,7 +35,7 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
         }
     }
 
-    agent_identity(client, current_pane)?;
+    let identity = agent_identity(client, current_pane)?;
     let overlay = client
         .plugin_pane_open(current_pane)
         .map_err(|error| AppError::new("toggle", error.to_string()))?;
@@ -49,6 +50,13 @@ pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> A
         }
         return Err(save_error);
     }
+    if let Err(bind_error) =
+        state.bind_verified_namespace(current_pane, &identity.session_id, now_ms())
+    {
+        let _ = state.remove_source(current_pane);
+        let _ = client.plugin_pane_close(&overlay);
+        return Err(bind_error);
+    }
     Ok(())
 }
 
@@ -58,7 +66,18 @@ pub fn run_from_env() -> AppResult<()> {
     let current_pane = required_env("HERDR_PANE_ID")?;
     let client = HerdrClient::connect(Path::new(&socket))
         .map_err(|error| AppError::new("toggle", error.to_string()))?;
-    toggle(&client, &StateStore::at(state_root), &current_pane)
+    let state = StateStore::at(state_root);
+    state.validate_saved_namespaces(&client, now_ms())?;
+    toggle(&client, &state, &current_pane)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn required_env(name: &'static str) -> AppResult<String> {

@@ -49,6 +49,7 @@ pub struct AppState {
     pub send_error: Option<String>,
     pub blocked_surface: Option<Result<StyledText, String>>,
     pub interaction_error: Option<String>,
+    pub source_pane_closed: bool,
     pub input_enabled: bool,
     pub scroll_from_bottom: usize,
     #[doc(hidden)]
@@ -78,6 +79,7 @@ impl Default for AppState {
             send_error: None,
             blocked_surface: None,
             interaction_error: None,
+            source_pane_closed: false,
             input_enabled: true,
             scroll_from_bottom: 0,
             replay_insert_at: None,
@@ -89,6 +91,16 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn source_pane_closed(&mut self) {
+        self.source_pane_closed = true;
+        self.agent_status = AgentStatus::Unknown;
+        self.working_since = None;
+        self.input_enabled = false;
+        self.blocked_surface = None;
+        self.interaction_error = None;
+        self.connection_error = Some("Source pane closed · prefix+m to return".to_owned());
+    }
+
     pub fn update_blocked_surface(
         &mut self,
         status: AgentStatus,

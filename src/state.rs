@@ -1,4 +1,5 @@
 use crate::editor::EditorSnapshot;
+use crate::herdr::HerdrClient;
 use crate::history::HistoryJournal;
 use crate::model::Attachment;
 use crate::paste::CompactPromptOverride;
@@ -12,6 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
+const PANE_NAMESPACE_VERSION: u8 = 1;
+const DRAFT_VERSION: u8 = 3;
+const ORPHAN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
 #[derive(Default, Deserialize, Serialize)]
 struct OverlayRegistry {
     overlays: BTreeMap<String, String>,
@@ -19,6 +24,7 @@ struct OverlayRegistry {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DraftState {
+    pub session_id: Option<String>,
     pub text: String,
     pub editor: EditorSnapshot,
     pub attachments: Vec<Attachment>,
@@ -28,6 +34,8 @@ pub struct DraftState {
 #[derive(Deserialize, Serialize)]
 struct PersistedDraft {
     version: u8,
+    #[serde(default)]
+    session_id: Option<String>,
     editor: EditorSnapshot,
     attachments: Vec<PersistedAttachment>,
     #[serde(default)]
@@ -49,6 +57,15 @@ enum ReadDraft {
 struct PersistedAttachment {
     id: String,
     display: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PaneNamespaceState {
+    version: u8,
+    source_pane: String,
+    session_id: String,
+    last_verified_ms: u64,
+    orphaned_since_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -75,7 +92,7 @@ pub struct DraftWriter {
 }
 
 impl DraftWriter {
-    pub fn spawn(store: StateStore, pane_id: String) -> Self {
+    pub fn spawn(store: StateStore, pane_id: String, session_id: Option<String>) -> Self {
         let slot = Arc::new((Mutex::new(DraftSlot::default()), Condvar::new()));
         let error = Arc::new(Mutex::new(None));
         let worker_slot = Arc::clone(&slot);
@@ -98,6 +115,7 @@ impl DraftWriter {
                 };
                 if let Err(save_error) = store.save_editor_draft(
                     &pane_id,
+                    session_id.as_deref(),
                     &snapshot.editor,
                     &snapshot.attachments,
                     &snapshot.prompt_displays,
@@ -186,6 +204,112 @@ impl StateStore {
         self.save_registry(&registry)
     }
 
+    pub fn remove_pane_state(&self, source_pane: &str) -> AppResult<()> {
+        let safe = checked_pane_component(source_pane)?;
+        let draft = self.root.join(format!("draft-{safe}.json"));
+        let history_root = self.root.join("history");
+        let history = history_root.join(&safe);
+        let panes_root = self.root.join("panes");
+        let namespace = panes_root.join(format!("{safe}.json"));
+
+        require_exact_parent(&draft, &self.root)?;
+        require_exact_parent(&history, &history_root)?;
+        require_exact_parent(&namespace, &panes_root)?;
+        reject_symlink(&history_root)?;
+        reject_symlink(&panes_root)?;
+        reject_symlink(&draft)?;
+        reject_symlink(&history)?;
+        reject_symlink(&namespace)?;
+
+        remove_file_if_present(&draft)?;
+        remove_directory_if_present(&history)?;
+        self.remove_source(source_pane)?;
+        remove_file_if_present(&namespace)?;
+        Ok(())
+    }
+
+    pub fn bind_verified_namespace(
+        &self,
+        source_pane: &str,
+        session_id: &str,
+        now_ms: u64,
+    ) -> AppResult<()> {
+        let safe = checked_pane_component(source_pane)?;
+        if session_id.is_empty() || session_id.chars().any(char::is_control) {
+            return Err(AppError::new(
+                "plugin state",
+                "session id must be non-empty printable text",
+            ));
+        }
+        let panes = self.root.join("panes");
+        ensure_private_directory(&panes)?;
+        let destination = panes.join(format!("{safe}.json"));
+        require_exact_parent(&destination, &panes)?;
+        reject_symlink(&destination)?;
+        self.bind_draft_after_verification(source_pane, session_id)?;
+        atomic_write(
+            &self.root,
+            &destination,
+            serde_json::to_vec(&PaneNamespaceState {
+                version: PANE_NAMESPACE_VERSION,
+                source_pane: source_pane.to_owned(),
+                session_id: session_id.to_owned(),
+                last_verified_ms: now_ms,
+                orphaned_since_ms: None,
+            })?,
+        )
+    }
+
+    pub fn validate_saved_namespaces(&self, client: &HerdrClient, now_ms: u64) -> AppResult<()> {
+        let panes = self.root.join("panes");
+        if !panes.exists() {
+            return Ok(());
+        }
+        reject_symlink(&panes)?;
+        let mut paths = std::fs::read_dir(&panes)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        for path in paths {
+            require_exact_parent(&path, &panes)?;
+            reject_symlink(&path)?;
+            let mut namespace: PaneNamespaceState = serde_json::from_slice(&std::fs::read(&path)?)?;
+            let safe = checked_pane_component(&namespace.source_pane)?;
+            if namespace.version != PANE_NAMESPACE_VERSION
+                || path.file_name().and_then(|value| value.to_str())
+                    != Some(&format!("{safe}.json"))
+            {
+                return Err(AppError::new(
+                    "plugin state",
+                    format!("invalid pane namespace metadata: {}", path.display()),
+                ));
+            }
+
+            match client.agent_get(&namespace.source_pane) {
+                Ok(result) => match verified_session(&result, &namespace.source_pane) {
+                    Ok(live_session) if live_session == namespace.session_id => {
+                        self.bind_draft_after_verification(&namespace.source_pane, &live_session)?;
+                        namespace.last_verified_ms = now_ms;
+                        namespace.orphaned_since_ms = None;
+                        self.save_namespace(&namespace)?;
+                    }
+                    Ok(live_session) => {
+                        self.remove_replaced_session_state(&namespace, &live_session)?;
+                    }
+                    Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
+                },
+                Err(error) if error.api_code() == Some("not_found") => {
+                    self.remove_pane_state(&namespace.source_pane)?;
+                }
+                Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
+            }
+        }
+        Ok(())
+    }
+
     pub fn overlay_for_source(&self, source: &str) -> AppResult<Option<String>> {
         Ok(self.load_registry()?.overlays.get(source).cloned())
     }
@@ -204,12 +328,19 @@ impl StateStore {
         text: &str,
         attachments: &[Attachment],
     ) -> AppResult<()> {
-        self.save_editor_draft(pane_id, &EditorSnapshot::plain(text), attachments, &[])
+        self.save_editor_draft(
+            pane_id,
+            None,
+            &EditorSnapshot::plain(text),
+            attachments,
+            &[],
+        )
     }
 
     pub fn save_editor_draft(
         &self,
         pane_id: &str,
+        session_id: Option<&str>,
         editor: &EditorSnapshot,
         attachments: &[Attachment],
         prompt_displays: &[CompactPromptOverride],
@@ -221,7 +352,8 @@ impl StateStore {
             &self.root,
             &file,
             serde_json::to_vec(&PersistedDraft {
-                version: 2,
+                version: DRAFT_VERSION,
+                session_id: session_id.map(str::to_owned),
                 editor: editor.clone(),
                 attachments: attachments
                     .iter()
@@ -259,9 +391,17 @@ impl StateStore {
             Ok(draft) => draft,
             Err(error) => return quarantine_draft(&file, error),
         };
-        let (editor, attachments, prompt_displays) = match draft {
-            ReadDraft::Current(draft) if draft.version == 2 => {
-                (draft.editor, draft.attachments, draft.prompt_displays)
+        let (session_id, editor, attachments, prompt_displays) = match draft {
+            ReadDraft::Current(draft) if matches!(draft.version, 2 | DRAFT_VERSION) => {
+                let session_id = (draft.version == DRAFT_VERSION)
+                    .then_some(draft.session_id)
+                    .flatten();
+                (
+                    session_id,
+                    draft.editor,
+                    draft.attachments,
+                    draft.prompt_displays,
+                )
             }
             ReadDraft::Current(draft) => {
                 return quarantine_draft(
@@ -270,6 +410,7 @@ impl StateStore {
                 );
             }
             ReadDraft::Legacy(draft) => (
+                None,
                 EditorSnapshot::plain(draft.text),
                 draft.attachments,
                 Vec::new(),
@@ -277,6 +418,7 @@ impl StateStore {
         };
         let text = editor.submission_text();
         Ok(DraftState {
+            session_id,
             text,
             editor,
             attachments: attachments
@@ -293,6 +435,97 @@ impl StateStore {
 
     fn registry_path(&self) -> PathBuf {
         self.root.join("registry.json")
+    }
+
+    fn bind_draft_after_verification(&self, source_pane: &str, session_id: &str) -> AppResult<()> {
+        let draft_path = self.draft_path(source_pane)?;
+        if !draft_path.exists() {
+            return Ok(());
+        }
+        reject_symlink(&draft_path)?;
+        let draft = self.load_draft(source_pane)?;
+        match draft.session_id.as_deref() {
+            Some(saved) if saved == session_id => Ok(()),
+            Some(_) => remove_file_if_present(&draft_path),
+            None => self.save_editor_draft(
+                source_pane,
+                Some(session_id),
+                &draft.editor,
+                &draft.attachments,
+                &draft.prompt_displays,
+            ),
+        }
+    }
+
+    fn remove_replaced_session_state(
+        &self,
+        namespace: &PaneNamespaceState,
+        live_session: &str,
+    ) -> AppResult<()> {
+        let safe = checked_pane_component(&namespace.source_pane)?;
+        let old_journal = self.history_journal(&namespace.source_pane, &namespace.session_id)?;
+        let history_root = self.root.join("history");
+        let history_pane = history_root.join(safe);
+        require_exact_parent(old_journal.path(), &history_pane)?;
+        reject_symlink(&history_root)?;
+        reject_symlink(&history_pane)?;
+        reject_symlink(old_journal.path())?;
+
+        let draft_path = self.draft_path(&namespace.source_pane)?;
+        let keep_draft = if draft_path.exists() {
+            reject_symlink(&draft_path)?;
+            self.load_draft(&namespace.source_pane)?
+                .session_id
+                .as_deref()
+                == Some(live_session)
+        } else {
+            false
+        };
+
+        remove_file_if_present(old_journal.path())?;
+        remove_empty_directory_if_present(&history_pane)?;
+        if !keep_draft {
+            remove_file_if_present(&draft_path)?;
+        }
+        self.remove_source(&namespace.source_pane)?;
+        remove_file_if_present(&self.namespace_path(&namespace.source_pane)?)?;
+        Ok(())
+    }
+
+    fn retain_or_expire_orphan(
+        &self,
+        mut namespace: PaneNamespaceState,
+        now_ms: u64,
+    ) -> AppResult<()> {
+        let orphaned_since = *namespace.orphaned_since_ms.get_or_insert(now_ms);
+        if now_ms.saturating_sub(orphaned_since) >= ORPHAN_RETENTION_MS {
+            return self.remove_pane_state(&namespace.source_pane);
+        }
+        self.save_namespace(&namespace)
+    }
+
+    fn save_namespace(&self, namespace: &PaneNamespaceState) -> AppResult<()> {
+        let panes = self.root.join("panes");
+        ensure_private_directory(&panes)?;
+        let destination = self.namespace_path(&namespace.source_pane)?;
+        reject_symlink(&destination)?;
+        atomic_write(&self.root, &destination, serde_json::to_vec(namespace)?)
+    }
+
+    fn namespace_path(&self, source_pane: &str) -> AppResult<PathBuf> {
+        let panes = self.root.join("panes");
+        let path = panes.join(format!("{}.json", checked_pane_component(source_pane)?));
+        require_exact_parent(&path, &panes)?;
+        Ok(path)
+    }
+
+    fn draft_path(&self, source_pane: &str) -> AppResult<PathBuf> {
+        let path = self.root.join(format!(
+            "draft-{}.json",
+            checked_pane_component(source_pane)?
+        ));
+        require_exact_parent(&path, &self.root)?;
+        Ok(path)
     }
 
     fn load_registry(&self) -> AppResult<OverlayRegistry> {
@@ -319,6 +552,112 @@ impl StateStore {
             &self.registry_path(),
             serde_json::to_vec(registry)?,
         )
+    }
+}
+
+fn verified_session(result: &serde_json::Value, expected_pane: &str) -> AppResult<String> {
+    let agent = result
+        .get("agent")
+        .ok_or_else(|| AppError::new("plugin state", "Herdr response has no agent record"))?;
+    if agent.get("pane_id").and_then(serde_json::Value::as_str) != Some(expected_pane) {
+        return Err(AppError::new(
+            "plugin state",
+            "Herdr returned a different source pane",
+        ));
+    }
+    let session = agent
+        .get("agent_session")
+        .ok_or_else(|| AppError::new("plugin state", "native agent session is unavailable"))?;
+    if session.get("kind").and_then(serde_json::Value::as_str) != Some("id") {
+        return Err(AppError::new(
+            "plugin state",
+            "native agent session is not id-based",
+        ));
+    }
+    session
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::new("plugin state", "native agent session id is unavailable"))
+}
+
+fn checked_pane_component(source_pane: &str) -> AppResult<String> {
+    let mut parts = source_pane.split(':');
+    let workspace = parts.next().unwrap_or_default();
+    let pane = parts.next().unwrap_or_default();
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    };
+    if !valid_part(workspace) || !valid_part(pane) || parts.next().is_some() {
+        return Err(AppError::new(
+            "plugin state",
+            "invalid source pane identifier",
+        ));
+    }
+    Ok(safe_state_component(source_pane))
+}
+
+fn require_exact_parent(path: &Path, expected_parent: &Path) -> AppResult<()> {
+    if path.parent() != Some(expected_parent) {
+        return Err(AppError::new(
+            "plugin state",
+            format!("state target escapes its namespace: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> AppResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::new(
+            "plugin state",
+            format!("refusing symlinked state target: {}", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_private_directory(path: &Path) -> AppResult<()> {
+    reject_symlink(path)?;
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn remove_file_if_present(path: &Path) -> AppResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_directory_if_present(path: &Path) -> AppResult<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_empty_directory_if_present(path: &Path) -> AppResult<()> {
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

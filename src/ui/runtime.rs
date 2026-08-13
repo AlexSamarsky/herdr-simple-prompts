@@ -23,6 +23,10 @@ const CAPTURE_QUEUE_CAPACITY: usize = 8;
 const CAPTURE_ATTEMPTS: usize = 8;
 const CAPTURE_LINES: u32 = 240;
 const CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(75);
+const LIFECYCLE_WAIT: Duration = Duration::from_secs(1);
+const LIFECYCLE_RETRY_INITIAL: Duration = Duration::from_millis(200);
+const LIFECYCLE_RETRY_MAX: Duration = Duration::from_secs(1);
+const LIFECYCLE_STOP_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub(super) enum ActionCommand {
@@ -75,6 +79,7 @@ pub enum RuntimeEvent {
         presentation: MessagePresentation,
     },
     CaptureDiagnostic(String),
+    SourcePaneClosed,
 }
 
 pub struct UiRuntime {
@@ -82,7 +87,7 @@ pub struct UiRuntime {
     capture_tx: SyncSender<CaptureCommand>,
     events: Receiver<RuntimeEvent>,
     stop: Arc<AtomicBool>,
-    _threads: Vec<JoinHandle<()>>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 impl UiRuntime {
@@ -109,6 +114,9 @@ impl UiRuntime {
             HerdrClient::connect(socket).map_err(|error| AppError::new("ui", error.to_string()))?,
             identity.clone(),
         );
+        let lifecycle_client = HerdrClient::connect(socket)
+            .map_err(|error| AppError::new("ui", error.to_string()))?
+            .with_timeout(Duration::from_millis(1_100));
 
         let threads = vec![
             spawn_observer(
@@ -136,6 +144,12 @@ impl UiRuntime {
                 capture_transport,
                 identity.kind,
             ),
+            spawn_lifecycle_worker(
+                Arc::clone(&stop),
+                event_tx,
+                lifecycle_client,
+                identity.pane_id,
+            ),
         ];
 
         Ok(Self {
@@ -143,7 +157,7 @@ impl UiRuntime {
             capture_tx,
             events,
             stop,
-            _threads: threads,
+            threads,
         })
     }
 
@@ -197,9 +211,69 @@ impl UiRuntime {
     }
 }
 
+fn spawn_lifecycle_worker(
+    stop: Arc<AtomicBool>,
+    events: SyncSender<RuntimeEvent>,
+    client: HerdrClient,
+    source_pane: String,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut retry_delay = LIFECYCLE_RETRY_INITIAL;
+        while !stop.load(Ordering::Acquire) {
+            match client.wait_for_pane_closed(&source_pane, LIFECYCLE_WAIT) {
+                Ok(true) => {
+                    let _ = events.send(RuntimeEvent::SourcePaneClosed);
+                    break;
+                }
+                Ok(false) => {
+                    if source_pane_is_gone(&client, &source_pane) {
+                        let _ = events.send(RuntimeEvent::SourcePaneClosed);
+                        break;
+                    }
+                    retry_delay = LIFECYCLE_RETRY_INITIAL;
+                }
+                Err(_) => {
+                    if source_pane_is_gone(&client, &source_pane) {
+                        let _ = events.send(RuntimeEvent::SourcePaneClosed);
+                        break;
+                    }
+                    sleep_while_running(&stop, retry_delay);
+                    retry_delay = next_lifecycle_retry(retry_delay);
+                }
+            }
+        }
+    })
+}
+
+fn source_pane_is_gone(client: &HerdrClient, source_pane: &str) -> bool {
+    matches!(
+        client.agent_get(source_pane),
+        Err(error) if error.api_code() == Some("not_found")
+    )
+}
+
+fn next_lifecycle_retry(current: Duration) -> Duration {
+    current.saturating_mul(2).min(LIFECYCLE_RETRY_MAX)
+}
+
+fn sleep_while_running(stop: &AtomicBool, duration: Duration) {
+    let mut remaining = duration;
+    while !remaining.is_zero() && !stop.load(Ordering::Acquire) {
+        let step = remaining.min(LIFECYCLE_STOP_POLL);
+        thread::sleep(step);
+        remaining = remaining.saturating_sub(step);
+    }
+}
+
 impl Drop for UiRuntime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        let (_replacement_tx, replacement_events) = sync_channel(1);
+        let events = std::mem::replace(&mut self.events, replacement_events);
+        drop(events);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -214,7 +288,7 @@ pub(super) fn capture_test_runtime(capacity: usize) -> (UiRuntime, Receiver<Capt
             capture_tx,
             events,
             stop: Arc::new(AtomicBool::new(false)),
-            _threads: Vec::new(),
+            threads: Vec::new(),
         },
         capture_rx,
     )
@@ -231,7 +305,7 @@ pub(super) fn interaction_test_runtime(capacity: usize) -> (UiRuntime, Receiver<
             capture_tx,
             events,
             stop: Arc::new(AtomicBool::new(false)),
-            _threads: Vec::new(),
+            threads: Vec::new(),
         },
         action_rx,
     )
@@ -435,18 +509,215 @@ mod tests {
     use super::{
         ActionCommand, CaptureCommand, RuntimeEvent, UiRuntime, complete_observation,
         follower_is_active, resolve_capture, resolve_capture_command, spawn_follower,
+        spawn_lifecycle_worker,
     };
     use crate::agent::claude::ClaudeAdapter;
     use crate::agent::follower::{FollowerEvent, TranscriptFollower};
     use crate::agent::{AgentIdentity, AgentKind, AgentStatus};
+    use crate::herdr::HerdrClient;
     use crate::style::{AnsiColor, MessagePresentation};
     use crate::{AppError, AppResult};
     use std::cell::Cell;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc::sync_channel;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
+
+    static NEXT_LIFECYCLE_SERVER: AtomicU64 = AtomicU64::new(1);
+
+    fn lifecycle_server(
+        response: Result<serde_json::Value, serde_json::Value>,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        Receiver<serde_json::Value>,
+        SyncSender<()>,
+        JoinHandle<()>,
+    ) {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-simple-prompts-lifecycle-{}-{}",
+            std::process::id(),
+            NEXT_LIFECYCLE_SERVER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (request_tx, request_rx) = sync_channel(1);
+        let (release_tx, release_rx) = sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            request_tx.send(request.clone()).unwrap();
+            release_rx.recv().unwrap();
+            let envelope = match response {
+                Ok(result) => serde_json::json!({"id": request["id"], "result": result}),
+                Err(error) => serde_json::json!({"id": request["id"], "error": error}),
+            };
+            serde_json::to_writer(&mut stream, &envelope).unwrap();
+            stream.write_all(b"\n").unwrap();
+        });
+        (directory, socket, request_rx, release_tx, worker)
+    }
+
+    fn lifecycle_sequence_server(
+        responses: Vec<Result<serde_json::Value, serde_json::Value>>,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        Receiver<serde_json::Value>,
+        JoinHandle<()>,
+    ) {
+        let directory = std::env::temp_dir().join(format!(
+            "hsp-lc-seq-{}-{}",
+            std::process::id(),
+            NEXT_LIFECYCLE_SERVER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (request_tx, request_rx) = sync_channel(responses.len());
+        let worker = std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                request_tx.send(request.clone()).unwrap();
+                let envelope = match response {
+                    Ok(result) => serde_json::json!({"id": request["id"], "result": result}),
+                    Err(error) => serde_json::json!({"id": request["id"], "error": error}),
+                };
+                serde_json::to_writer(&mut stream, &envelope).unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        (directory, socket, request_rx, worker)
+    }
+
+    #[test]
+    fn lifecycle_worker_emits_source_closed_once_and_exits() {
+        let (directory, socket, request_rx, release_tx, server) =
+            lifecycle_server(Ok(serde_json::json!({
+                "type": "wait_matched",
+                "event": {"event": "pane_closed", "data": {"pane_id": "w1:p1"}}
+            })));
+        let client = HerdrClient::connect(&socket).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = sync_channel(2);
+        let worker = spawn_lifecycle_worker(Arc::clone(&stop), event_tx, client, "w1:p1".into());
+
+        assert_eq!(request_rx.recv().unwrap()["method"], "events.wait");
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            RuntimeEvent::SourcePaneClosed
+        ));
+        worker.join().unwrap();
+        assert!(event_rx.try_recv().is_err());
+
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_worker_timeout_emits_no_event_and_stops_after_poll() {
+        let (directory, socket, request_rx, release_tx, server) = lifecycle_server(Err(
+            serde_json::json!({"code": "timeout", "message": "timed out waiting for event match"}),
+        ));
+        let client = HerdrClient::connect(&socket).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = sync_channel(1);
+        let worker = spawn_lifecycle_worker(Arc::clone(&stop), event_tx, client, "w1:p1".into());
+
+        request_rx.recv().unwrap();
+        stop.store(true, Ordering::Release);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(event_rx.try_recv().is_err());
+
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_worker_detects_close_missed_between_wait_calls() {
+        let (directory, socket, request_rx, server) = lifecycle_sequence_server(vec![
+            Err(serde_json::json!({
+                "code": "timeout",
+                "message": "timed out waiting for event match"
+            })),
+            Err(serde_json::json!({"code": "not_found", "message": "pane missing"})),
+        ]);
+        let client = HerdrClient::connect(&socket).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = sync_channel(1);
+        let worker = spawn_lifecycle_worker(Arc::clone(&stop), event_tx, client, "w1:p1".into());
+
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            RuntimeEvent::SourcePaneClosed
+        ));
+        worker.join().unwrap();
+        let methods = [
+            request_rx.recv().unwrap()["method"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            request_rx.recv().unwrap()["method"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ];
+        assert_eq!(methods, ["events.wait", "agent.get"]);
+
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_drop_disconnects_a_full_event_queue_before_joining_workers() {
+        let (action_tx, _action_rx) = sync_channel(1);
+        let (capture_tx, _capture_rx) = sync_channel(1);
+        let (event_tx, events) = sync_channel(1);
+        event_tx
+            .send(RuntimeEvent::CaptureDiagnostic("full".into()))
+            .unwrap();
+        let blocked_sender = std::thread::spawn(move || {
+            let _ = event_tx.send(RuntimeEvent::SourcePaneClosed);
+        });
+        let runtime = UiRuntime {
+            action_tx,
+            capture_tx,
+            events,
+            stop: Arc::new(AtomicBool::new(false)),
+            threads: vec![blocked_sender],
+        };
+
+        let started = Instant::now();
+        drop(runtime);
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn lifecycle_retry_backoff_is_bounded() {
+        let mut delay = super::LIFECYCLE_RETRY_INITIAL;
+        let expected = [200, 400, 800, 1_000, 1_000];
+        for expected_ms in expected {
+            assert_eq!(delay, Duration::from_millis(expected_ms));
+            delay = super::next_lifecycle_retry(delay);
+        }
+    }
 
     #[test]
     fn submit_only_enqueues_and_never_waits_for_herdr_io() {
@@ -458,7 +729,7 @@ mod tests {
             capture_tx,
             events,
             stop: Arc::new(AtomicBool::new(false)),
-            _threads: Vec::new(),
+            threads: Vec::new(),
         };
 
         let started = Instant::now();
@@ -482,7 +753,7 @@ mod tests {
             capture_tx,
             events,
             stop: Arc::new(AtomicBool::new(false)),
-            _threads: Vec::new(),
+            threads: Vec::new(),
         };
         runtime.submit("local-1".into(), "first".into()).unwrap();
 
@@ -505,7 +776,7 @@ mod tests {
             capture_tx,
             events,
             stop: Arc::new(AtomicBool::new(false)),
-            _threads: Vec::new(),
+            threads: Vec::new(),
         };
         runtime
             .capture_final("answer-1".into(), "first".into())

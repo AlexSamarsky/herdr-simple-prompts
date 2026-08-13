@@ -127,3 +127,29 @@ fn blocked_surface_and_send_result_do_not_mutate_visible_or_composer_state() {
     app.apply_interaction_result(Err("late native send failure".into()));
     assert!(app.interaction_error.is_none());
 }
+
+#[test]
+fn source_pane_close_disables_input_and_clears_ephemeral_blocked_surface() {
+    let mut app = AppState {
+        agent_status: AgentStatus::Blocked,
+        blocked_surface: Some(Ok(StyledText {
+            text: "Allow this command?".into(),
+            runs: Vec::new(),
+        })),
+        interaction_error: Some("late interaction error".into()),
+        input_enabled: true,
+        ..AppState::default()
+    };
+
+    app.source_pane_closed();
+
+    assert!(!app.input_enabled);
+    assert_eq!(app.agent_status, AgentStatus::Unknown);
+    assert!(app.working_since.is_none());
+    assert!(app.blocked_surface.is_none());
+    assert!(app.interaction_error.is_none());
+    assert_eq!(
+        app.connection_error.as_deref(),
+        Some("Source pane closed · prefix+m to return")
+    );
+}

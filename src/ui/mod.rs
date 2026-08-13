@@ -49,7 +49,10 @@ pub fn run_from_env() -> AppResult<()> {
     let state_root = required_env("HERDR_PLUGIN_STATE_DIR")?;
     let client = HerdrClient::connect(Path::new(&socket))
         .map_err(|error| AppError::new("ui", error.to_string()))?;
+    let state_store = StateStore::at(state_root);
+    state_store.validate_saved_namespaces(&client, now_ms())?;
     let identity = agent_identity(&client, &source_pane)?;
+    state_store.bind_verified_namespace(&source_pane, &identity.session_id, now_ms())?;
     let transcript = resolve_transcript(
         identity.kind,
         &identity.session_id,
@@ -60,16 +63,19 @@ pub fn run_from_env() -> AppResult<()> {
         AgentKind::Claude => Box::new(crate::agent::claude::ClaudeAdapter::default()),
     };
     let mut follower = TranscriptFollower::new(transcript, adapter)?;
-    let state_store = StateStore::at(state_root);
     let history_journal = state_store.history_journal(&source_pane, &identity.session_id)?;
     let saved_history = history_journal.load()?;
-    let history_writer = HistoryWriter::spawn(history_journal);
+    let mut history_writer = Some(HistoryWriter::spawn(history_journal));
     let mut editor = Editor::default();
     let mut draft = state_store.load_draft(&source_pane)?;
     draft
         .prompt_displays
         .retain(|summary| summary.session_id == identity.session_id);
-    let draft_writer = DraftWriter::spawn(state_store.clone(), source_pane.clone());
+    let mut draft_writer = Some(DraftWriter::spawn(
+        state_store.clone(),
+        source_pane.clone(),
+        Some(identity.session_id.clone()),
+    ));
     editor.replace_snapshot(draft.editor);
     let mut app = AppState {
         session_id: identity.session_id.clone(),
@@ -90,12 +96,15 @@ pub fn run_from_env() -> AppResult<()> {
         &runtime,
         CapturePolicy::NewestFinalOnly,
     );
-    queue_history_upserts(&mut app, &history_writer);
-    draft_writer.queue_editor(
-        editor.snapshot(),
-        app.draft_attachments.clone(),
-        app.prompt_displays.clone(),
-    );
+    queue_history_upserts(&mut app, history_writer.as_ref());
+    draft_writer
+        .as_ref()
+        .expect("draft writer exists")
+        .queue_editor(
+            editor.snapshot(),
+            app.draft_attachments.clone(),
+            app.prompt_displays.clone(),
+        );
     let mut stdout = io::stdout();
     let _guard = TerminalGuard::enter(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
@@ -107,6 +116,16 @@ pub fn run_from_env() -> AppResult<()> {
 
     loop {
         while let Some(event) = runtime.try_recv() {
+            if matches!(&event, RuntimeEvent::SourcePaneClosed) {
+                drop(history_writer.take());
+                drop(draft_writer.take());
+                if let Err(error) = state_store.remove_pane_state(&source_pane) {
+                    app.transcript_error = Some(format!("source cleanup: {error}"));
+                }
+                app.source_pane_closed();
+                draft_dirty = false;
+                continue;
+            }
             let change = apply_runtime_event(
                 event,
                 &identity,
@@ -115,28 +134,32 @@ pub fn run_from_env() -> AppResult<()> {
                 &mut history_cache,
                 &runtime,
             );
-            queue_history_upserts(&mut app, &history_writer);
-            apply_draft_change(
-                change,
-                &draft_writer,
-                &app,
-                &editor,
-                &mut draft_dirty,
-                &mut draft_save_at,
-            );
+            queue_history_upserts(&mut app, history_writer.as_ref());
+            if let Some(writer) = draft_writer.as_ref() {
+                apply_draft_change(
+                    change,
+                    writer,
+                    &app,
+                    &editor,
+                    &mut draft_dirty,
+                    &mut draft_save_at,
+                );
+            }
         }
         if draft_dirty && Instant::now() >= draft_save_at {
-            draft_writer.queue_editor(
-                editor.snapshot(),
-                app.draft_attachments.clone(),
-                app.prompt_displays.clone(),
-            );
+            if let Some(writer) = draft_writer.as_ref() {
+                writer.queue_editor(
+                    editor.snapshot(),
+                    app.draft_attachments.clone(),
+                    app.prompt_displays.clone(),
+                );
+            }
             draft_dirty = false;
         }
-        if let Some(error) = draft_writer.take_error() {
+        if let Some(error) = draft_writer.as_ref().and_then(DraftWriter::take_error) {
             app.send_error = Some(error);
         }
-        if let Some(error) = history_writer.take_error() {
+        if let Some(error) = history_writer.as_ref().and_then(HistoryWriter::take_error) {
             app.send_error = Some(error);
         }
 
@@ -154,14 +177,16 @@ pub fn run_from_env() -> AppResult<()> {
                     &mut local_sequence,
                     &mut history_cache,
                 )?;
-                apply_draft_change(
-                    change,
-                    &draft_writer,
-                    &app,
-                    &editor,
-                    &mut draft_dirty,
-                    &mut draft_save_at,
-                );
+                if let Some(writer) = draft_writer.as_ref() {
+                    apply_draft_change(
+                        change,
+                        writer,
+                        &app,
+                        &editor,
+                        &mut draft_dirty,
+                        &mut draft_save_at,
+                    );
+                }
             }
             Event::Paste(content) => {
                 if handle_blocked_paste(&content, &mut app, &runtime) {
@@ -186,14 +211,16 @@ pub fn run_from_env() -> AppResult<()> {
                     }
                 } else {
                     editor.insert_paste(&content);
-                    apply_draft_change(
-                        DraftChange::Debounced,
-                        &draft_writer,
-                        &app,
-                        &editor,
-                        &mut draft_dirty,
-                        &mut draft_save_at,
-                    );
+                    if let Some(writer) = draft_writer.as_ref() {
+                        apply_draft_change(
+                            DraftChange::Debounced,
+                            writer,
+                            &app,
+                            &editor,
+                            &mut draft_dirty,
+                            &mut draft_save_at,
+                        );
+                    }
                 }
             }
             Event::Resize(_, _) => {}
@@ -379,6 +406,9 @@ fn apply_runtime_event(
             DraftChange::None
         }
         RuntimeEvent::Observation(Ok(observation)) => {
+            if app.source_pane_closed {
+                return DraftChange::None;
+            }
             app.connection_error = None;
             app.input_enabled = true;
             let current = observation.identity;
@@ -397,6 +427,9 @@ fn apply_runtime_event(
             DraftChange::None
         }
         RuntimeEvent::Observation(Err(error)) => {
+            if app.source_pane_closed {
+                return DraftChange::None;
+            }
             app.connection_error = Some(error);
             app.input_enabled = false;
             DraftChange::None
@@ -455,6 +488,10 @@ fn apply_runtime_event(
             app.transcript_error = Some(format!("final style capture: {error}"));
             DraftChange::None
         }
+        RuntimeEvent::SourcePaneClosed => {
+            app.source_pane_closed();
+            DraftChange::None
+        }
     }
 }
 
@@ -483,9 +520,11 @@ fn apply_draft_change(
     }
 }
 
-fn queue_history_upserts(app: &mut AppState, writer: &HistoryWriter) {
+fn queue_history_upserts(app: &mut AppState, writer: Option<&HistoryWriter>) {
     for record in app.drain_history_upserts() {
-        writer.queue(record);
+        if let Some(writer) = writer {
+            writer.queue(record);
+        }
     }
 }
 

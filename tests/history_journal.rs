@@ -6,6 +6,7 @@ use herdr_simple_prompts::history::{
 };
 use herdr_simple_prompts::model::{Attachment, Message};
 use herdr_simple_prompts::paste::{LARGE_PASTE_CHARS, fingerprint};
+use herdr_simple_prompts::state::StateStore;
 use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
 use std::os::unix::fs::PermissionsExt;
 
@@ -372,5 +373,24 @@ fn concurrent_independent_journals_append_complete_json_lines() {
             .len(),
         (workers * records_per_worker) as usize
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pane_state_cleanup_removes_only_the_exact_pane_history_namespace() {
+    let root = test_root("pane-cleanup");
+    let _ = std::fs::remove_dir_all(&root);
+    let store = StateStore::at(&root);
+    let target = store.history_journal("w1:p1", "session-1").unwrap();
+    let sibling = store.history_journal("w1:p10", "session-10").unwrap();
+    target.append(&prompt("u1", "u1", 1, "target")).unwrap();
+    sibling.append(&prompt("u10", "u10", 1, "sibling")).unwrap();
+
+    store.remove_pane_state("w1:p1").unwrap();
+
+    assert!(!target.path().exists());
+    assert!(!root.join("history/w1_p1").exists());
+    assert!(sibling.path().exists());
+    assert_eq!(sibling.load().unwrap().len(), 1);
     std::fs::remove_dir_all(root).unwrap();
 }

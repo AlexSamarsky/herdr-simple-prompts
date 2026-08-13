@@ -61,12 +61,6 @@ pub struct HerdrClient {
 impl HerdrClient {
     pub fn connect(socket_path: impl AsRef<Path>) -> Result<Self, HerdrError> {
         let socket_path = socket_path.as_ref().to_owned();
-        if !socket_path.exists() {
-            return Err(HerdrError::Protocol(format!(
-                "socket does not exist: {}",
-                socket_path.display()
-            )));
-        }
         Ok(Self {
             socket_path,
             next_id: AtomicU64::new(1),
@@ -140,6 +134,40 @@ impl HerdrClient {
 
     pub fn agent_get(&self, target: &str) -> Result<Value, HerdrError> {
         self.call("agent.get", json!({"target": target}))
+    }
+
+    pub fn wait_for_pane_closed(
+        &self,
+        pane_id: &str,
+        timeout: Duration,
+    ) -> Result<bool, HerdrError> {
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let result = match self.call(
+            "events.wait",
+            json!({
+                "match_event": {"event": "pane_closed", "pane_id": pane_id},
+                "timeout_ms": timeout_ms,
+            }),
+        ) {
+            Ok(result) => result,
+            Err(error) if matches!(error.api_code(), Some("timeout" | "wait_timeout")) => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let exact_match = result.get("type").and_then(Value::as_str) == Some("wait_matched")
+            && result.pointer("/event/event").and_then(Value::as_str) == Some("pane_closed")
+            && result
+                .pointer("/event/data/pane_id")
+                .and_then(Value::as_str)
+                == Some(pane_id);
+        if exact_match {
+            Ok(true)
+        } else {
+            Err(HerdrError::Protocol(format!(
+                "events.wait returned a mismatched pane_closed response: {result}"
+            )))
+        }
     }
 
     pub fn pane_get(&self, pane_id: &str) -> Result<Value, HerdrError> {
