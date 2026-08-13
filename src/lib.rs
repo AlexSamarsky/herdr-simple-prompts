@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod ansi;
 pub mod app;
+pub mod composer;
 pub mod editor;
 mod error;
 pub mod herdr;

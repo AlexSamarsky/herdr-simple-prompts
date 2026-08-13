@@ -69,7 +69,7 @@ Use explicit expected values so no test merely checks that classification return
 Run:
 
 ```bash
-cargo test composer --lib
+cargo test --test composer
 ```
 
 Expected: compilation or assertion failures because the module and types do not exist yet.
@@ -123,7 +123,7 @@ Add `mod composer;` (or the repository's existing visibility convention) in `src
 ### Step 3: Run the focused tests
 
 ```bash
-cargo test composer --lib
+cargo test --test composer
 ```
 
 Expected: all classifier and access-policy tests pass.
@@ -136,7 +136,7 @@ Invoke `superpowers:requesting-code-review` for Task 1. Fix all correctness, pri
 
 ```bash
 cargo fmt --check
-cargo test composer --lib
+cargo test --test composer
 git diff --check
 git add src/composer.rs src/lib.rs
 git commit -m "add native composer classifier"
