@@ -391,6 +391,27 @@ fn markdown_links_recover_after_nested_or_invalid_candidates() {
 }
 
 #[test]
+fn markdown_valid_link_owns_inline_like_destination_syntax() {
+    let styled = style_markdown("[label](a`code`b)");
+
+    assert_eq!(styled.text, "label");
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    let label_style = style_at(&styled, 0).unwrap();
+    assert_eq!(label_style.foreground, Some(AnsiColor::Cyan));
+    assert!(label_style.modifiers.underline);
+}
+
+#[test]
+fn markdown_malformed_link_candidate_stays_atomically_literal() {
+    let text = "[**label**](bad url)";
+    let styled = style_markdown(text);
+
+    assert_eq!(styled.text, text);
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    assert!(styled.runs.is_empty());
+}
+
+#[test]
 fn exact_codex_final_capture_removes_only_known_chrome_and_preserves_styles() {
     let ansi = concat!(
         "tool output\n",

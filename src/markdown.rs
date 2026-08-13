@@ -21,6 +21,46 @@ struct LineRange {
     after_end: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct InlineCodeRange {
+    open: usize,
+    close: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LinkCandidate {
+    open: usize,
+    label_start: usize,
+    label_end: usize,
+    close: usize,
+    valid: bool,
+}
+
+#[derive(Debug)]
+struct LinkOwnership {
+    start: usize,
+    owned: Vec<bool>,
+}
+
+impl LinkOwnership {
+    fn new(start: usize, end: usize) -> Self {
+        Self {
+            start,
+            owned: vec![false; end - start],
+        }
+    }
+
+    fn reserve(&mut self, start: usize, end: usize) {
+        self.owned[start - self.start..end - self.start].fill(true);
+    }
+
+    fn overlaps(&self, start: usize, end: usize) -> bool {
+        self.owned[start - self.start..end - self.start]
+            .iter()
+            .any(|byte| *byte)
+    }
+}
+
 pub fn style_markdown(text: &str) -> StyledText {
     let mut slots = vec![StyleSlot::default(); text.len()];
     let mut visible = vec![true; text.len()];
@@ -131,53 +171,37 @@ fn style_inline(
     if start >= end {
         return;
     }
-    style_inline_code(text, start, end, slots, visible);
-    style_links(text, start, end, slots, visible);
-    style_strong(text, start, end, slots, visible);
-    style_emphasis(text, start, end, slots, visible);
+    let inline_code = inline_code_ranges(text, start, end);
+    let (links, link_owned) = link_candidates(text, start, end, &inline_code);
+    style_inline_code(&inline_code, slots, visible, &link_owned);
+    style_links(&links, slots, visible);
+    style_strong(text, start, end, slots, visible, &link_owned);
+    style_emphasis(text, start, end, slots, visible, &link_owned);
 }
 
-fn style_inline_code(
-    text: &str,
-    start: usize,
-    end: usize,
-    slots: &mut [StyleSlot],
-    visible: &mut [bool],
-) {
+fn inline_code_ranges(text: &str, start: usize, end: usize) -> Vec<InlineCodeRange> {
     let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
     let mut cursor = start;
     while let Some(open) = find_byte(bytes, cursor, end, b'`') {
-        let content_start = open + 1;
-        let Some(close) = find_byte(bytes, content_start, end, b'`') else {
+        let Some(close) = find_byte(bytes, open + 1, end, b'`') else {
             break;
         };
-        if content_start < close {
-            apply_style(
-                slots,
-                content_start,
-                close,
-                INLINE_CODE_PRIORITY,
-                code_style(),
-            );
-        }
-        discard_if_allowed(
-            visible,
-            slots,
-            &[(open, content_start), (close, close + 1)],
-            INLINE_CODE_PRIORITY,
-        );
+        ranges.push(InlineCodeRange { open, close });
         cursor = close + 1;
     }
+    ranges
 }
 
-fn style_links(
+fn link_candidates(
     text: &str,
     start: usize,
     end: usize,
-    slots: &mut [StyleSlot],
-    visible: &mut [bool],
-) {
+    inline_code: &[InlineCodeRange],
+) -> (Vec<LinkCandidate>, LinkOwnership) {
     let bytes = text.as_bytes();
+    let mut candidates = Vec::new();
+    let mut owned = LinkOwnership::new(start, end);
     let mut cursor = start;
     while let Some(open) = find_byte(bytes, cursor, end, b'[') {
         let label_start = open + 1;
@@ -185,35 +209,104 @@ fn style_links(
             break;
         };
         if let Some(nested_open) = find_byte(bytes, label_start, label_end, b'[') {
+            reserve_link_prefix(&mut owned, inline_code, open, nested_open);
             cursor = nested_open;
             continue;
         }
         let url_start = label_end + 2;
         let Some(close) = find_byte(bytes, url_start, end, b')') else {
+            reserve_link_prefix(&mut owned, inline_code, open, end);
             break;
         };
         if let Some(nested_open) = find_byte(bytes, url_start, close, b'[') {
+            reserve_link_prefix(&mut owned, inline_code, open, nested_open);
             cursor = nested_open;
             continue;
         }
-        let url = &text[url_start..close];
-        if label_start < label_end && !url.is_empty() && !url.chars().any(char::is_whitespace) {
-            apply_style(slots, open, close + 1, LINK_PRIORITY, StyleState::default());
-            apply_style(
-                slots,
+        if !inside_inline_code(open, inline_code) {
+            owned.reserve(open, close + 1);
+            let url = &text[url_start..close];
+            candidates.push(LinkCandidate {
+                open,
                 label_start,
                 label_end,
-                LINK_LABEL_PRIORITY,
-                link_style(),
-            );
-            discard_if_allowed(
-                visible,
-                slots,
-                &[(open, label_start), (label_end, close + 1)],
-                LINK_LABEL_PRIORITY,
-            );
+                close,
+                valid: label_start < label_end
+                    && !url.is_empty()
+                    && !url.chars().any(char::is_whitespace),
+            });
         }
         cursor = close + 1;
+    }
+    (candidates, owned)
+}
+
+fn reserve_link_prefix(
+    owned: &mut LinkOwnership,
+    inline_code: &[InlineCodeRange],
+    start: usize,
+    end: usize,
+) {
+    if !inside_inline_code(start, inline_code) {
+        owned.reserve(start, end);
+    }
+}
+
+fn inside_inline_code(byte: usize, inline_code: &[InlineCodeRange]) -> bool {
+    inline_code
+        .iter()
+        .any(|range| range.open < byte && byte < range.close)
+}
+
+fn style_inline_code(
+    ranges: &[InlineCodeRange],
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+    link_owned: &LinkOwnership,
+) {
+    for range in ranges {
+        if link_owned.overlaps(range.open, range.open + 1)
+            || link_owned.overlaps(range.close, range.close + 1)
+        {
+            continue;
+        }
+        let content_start = range.open + 1;
+        if content_start < range.close {
+            apply_style(
+                slots,
+                content_start,
+                range.close,
+                INLINE_CODE_PRIORITY,
+                code_style(),
+            );
+        }
+        discard_if_allowed(
+            visible,
+            slots,
+            &[(range.open, content_start), (range.close, range.close + 1)],
+            INLINE_CODE_PRIORITY,
+        );
+    }
+}
+
+fn style_links(candidates: &[LinkCandidate], slots: &mut [StyleSlot], visible: &mut [bool]) {
+    for candidate in candidates.iter().filter(|candidate| candidate.valid) {
+        apply_style(
+            slots,
+            candidate.open,
+            candidate.close + 1,
+            LINK_PRIORITY,
+            StyleState::default(),
+        );
+        apply_style(
+            slots,
+            candidate.label_start,
+            candidate.label_end,
+            LINK_LABEL_PRIORITY,
+            link_style(),
+        );
+        discard(visible, candidate.open, candidate.label_start);
+        discard(visible, candidate.label_end, candidate.close + 1);
     }
 }
 
@@ -223,6 +316,7 @@ fn style_strong(
     end: usize,
     slots: &mut [StyleSlot],
     visible: &mut [bool],
+    link_owned: &LinkOwnership,
 ) {
     let bytes = text.as_bytes();
     let mut cursor = start;
@@ -231,6 +325,10 @@ fn style_strong(
         let Some(close) = find_sequence(bytes, content_start, end, b"**") else {
             break;
         };
+        if link_owned.overlaps(open, content_start) || link_owned.overlaps(close, close + 2) {
+            cursor = close + 2;
+            continue;
+        }
         if content_start < close {
             apply_style(slots, content_start, close, STRONG_PRIORITY, bold_style());
         }
@@ -250,6 +348,7 @@ fn style_emphasis(
     end: usize,
     slots: &mut [StyleSlot],
     visible: &mut [bool],
+    link_owned: &LinkOwnership,
 ) {
     let bytes = text.as_bytes();
     let mut cursor = start;
@@ -258,6 +357,10 @@ fn style_emphasis(
         let Some(close) = find_byte(bytes, content_start, end, b'_') else {
             break;
         };
+        if link_owned.overlaps(open, content_start) || link_owned.overlaps(close, close + 1) {
+            cursor = close + 1;
+            continue;
+        }
         if content_start < close {
             apply_style(
                 slots,
