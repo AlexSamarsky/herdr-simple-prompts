@@ -9,7 +9,7 @@ starts directly with the answer body, so that time is no longer visible.
 
 ## Selected presentation
 
-Render one light-gray metadata row immediately above every final answer:
+Render one undimmed gray metadata row immediately above every final answer:
 
 ```text
 13.08.2026 19:32
@@ -28,9 +28,10 @@ honors the local offset that applied at the answer instant, including DST.
   Missing or invalid legacy timestamps do not create an empty gap.
 - Clip the timestamp to the available terminal width so it always occupies at
   most one visual row.
-- Use an ANSI `White` foreground without `dim` on the ordinary terminal
-  surface. Herdr maps this to light gray, brighter than `BrightBlack` but below
-  the answer body's `BrightWhite` default.
+- Use an ANSI `BrightBlack` foreground without `dim` on the ordinary terminal
+  surface. This is brighter than the prompt timestamp's existing
+  `BrightBlack + dim` treatment but below the answer body's `BrightWhite`
+  default.
 - Keep the answer's existing native ANSI or Markdown fallback body unchanged.
 - Keep prompt bands, sticky prompt behavior, bottom-following, and scrolling
   semantics unchanged apart from the intentional extra answer timestamp row.
@@ -44,7 +45,7 @@ that existing value and introduces no new stored data.
 ## Testing
 
 - A fixed answer epoch at `+03:00` renders `13.08.2026 19:32` above the answer.
-- The metadata style is light-gray/unboxed and the answer body starts on the
+- The metadata style is undimmed-gray/unboxed and the answer body starts on the
   next row.
 - A narrow viewport clips the metadata within one row.
 - Missing and invalid answer timestamps add no blank row.

@@ -115,6 +115,7 @@ impl HistoryDocument {
                 format_timestamp(turn.prompt.timestamp_ms).as_deref(),
                 prompt_fill(),
                 width,
+                true,
             ));
             let content_start_row = document.rows.len();
             let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
@@ -129,9 +130,12 @@ impl HistoryDocument {
 
             if let Some(answer) = &turn.final_answer {
                 if let Some(timestamp) = format_timestamp(answer.timestamp_ms) {
-                    document
-                        .rows
-                        .push(filled_timestamp_row(Some(timestamp.as_str()), None, width));
+                    document.rows.push(filled_timestamp_row(
+                        Some(timestamp.as_str()),
+                        None,
+                        width,
+                        false,
+                    ));
                 }
                 for line in &answer_lines(answer) {
                     push_answer_rows(&mut document.rows, line, width);
@@ -462,6 +466,7 @@ fn filled_timestamp_row(
     timestamp: Option<&str>,
     fill: Option<CellStyle>,
     width: usize,
+    dim: bool,
 ) -> VisualRow {
     let clipped = timestamp.map(|timestamp| clip_to_width(timestamp, width));
     let spans = clipped
@@ -470,7 +475,11 @@ fn filled_timestamp_row(
             vec![VisualSpan {
                 text: timestamp,
                 style: CellStyle {
-                    foreground: Some(AnsiColor::White),
+                    foreground: Some(AnsiColor::BrightBlack),
+                    modifiers: StyleModifiers {
+                        dim,
+                        ..StyleModifiers::default()
+                    },
                     ..CellStyle::default()
                 },
             }]

@@ -85,13 +85,13 @@ fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
     assert_eq!(document.rows[1].fill, document.rows[2].fill);
     assert_eq!(
         document.rows[0].spans[0].style.foreground,
-        Some(AnsiColor::White)
+        Some(AnsiColor::BrightBlack)
     );
-    assert!(!document.rows[0].spans[0].style.modifiers.dim);
+    assert!(document.rows[0].spans[0].style.modifiers.dim);
 }
 
 #[test]
-fn answer_timestamp_is_a_light_gray_unboxed_row_above_the_styled_body() {
+fn answer_timestamp_is_an_undimmed_gray_row_above_the_styled_body() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
@@ -126,7 +126,7 @@ fn answer_timestamp_is_a_light_gray_unboxed_row_above_the_styled_body() {
     assert!(document.rows[3].fill.is_none());
     assert_eq!(
         document.rows[3].spans[0].style.foreground,
-        Some(AnsiColor::White)
+        Some(AnsiColor::BrightBlack)
     );
     assert!(!document.rows[3].spans[0].style.modifiers.dim);
     assert_eq!(document.rows[4].plain_text(), "Native answer");
