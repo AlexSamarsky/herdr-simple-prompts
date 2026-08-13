@@ -6,6 +6,7 @@ pub mod editor;
 mod error;
 pub mod herdr;
 pub mod history;
+pub mod local_time;
 pub mod markdown;
 pub mod model;
 pub mod paste;

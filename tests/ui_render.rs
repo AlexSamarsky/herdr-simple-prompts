@@ -1,9 +1,12 @@
+use chrono::FixedOffset;
 use herdr_simple_prompts::agent::AgentStatus;
 use herdr_simple_prompts::app::{AppEvent, AppState};
 use herdr_simple_prompts::composer::NativeComposerState;
 use herdr_simple_prompts::editor::Editor;
+use herdr_simple_prompts::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
 use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::model::Message;
+use herdr_simple_prompts::paste::fingerprint;
 use herdr_simple_prompts::style::StyledText;
 use herdr_simple_prompts::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun};
 use herdr_simple_prompts::ui::render::{render_to_buffer, render_to_string};
@@ -22,11 +25,7 @@ fn rendered_buffer(app: &AppState, width: u16, height: u16) -> Buffer {
 #[test]
 fn prompt_is_a_label_free_gray_block_and_answer_is_unboxed() {
     let mut app = AppState::default();
-    app.apply(AppEvent::NativeUser(Message::text(
-        "u1",
-        "check dns",
-        Some(1),
-    )));
+    app.apply(AppEvent::NativeUser(Message::text("u1", "check dns", None)));
     app.apply(AppEvent::NativeFinal(Message::text(
         "a1",
         "zone is pending",
@@ -46,6 +45,123 @@ fn prompt_is_a_label_free_gray_block_and_answer_is_unboxed() {
     assert_eq!(document.rows[1].fill, document.rows[2].fill);
     assert!(document.rows[0].fill.is_some());
     assert!(document.rows[3].fill.is_none());
+}
+
+#[test]
+fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "check dns",
+        Some(1_786_638_720_000),
+    )));
+    app.apply(AppEvent::NativeFinal(Message::text(
+        "a1",
+        "zone is pending",
+        Some(1_786_638_721_000),
+    )));
+
+    let document =
+        HistoryDocument::from_app_at_offset(&app, 50, FixedOffset::east_opt(3 * 60 * 60).unwrap());
+
+    assert_eq!(document.rows.len(), 5);
+    assert_eq!(document.rows[0].plain_text(), "13.08.2026 19:32");
+    assert_eq!(document.rows[1].plain_text(), "check dns");
+    assert_eq!(document.rows[2].plain_text(), "");
+    assert_eq!(document.rows[3].plain_text(), "zone is pending");
+    assert_eq!(document.rows[0].fill, document.rows[1].fill);
+    assert_eq!(document.rows[1].fill, document.rows[2].fill);
+    assert_eq!(
+        document.rows[0].spans[0].style.foreground,
+        Some(AnsiColor::BrightBlack)
+    );
+    assert!(document.rows[0].spans[0].style.modifiers.dim);
+}
+
+#[test]
+fn narrow_timestamp_is_clipped_to_one_gray_row_without_growing_the_prompt() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "prompt",
+        Some(1_786_638_720_000),
+    )));
+
+    let document =
+        HistoryDocument::from_app_at_offset(&app, 8, FixedOffset::east_opt(3 * 60 * 60).unwrap());
+
+    assert_eq!(document.rows.len(), 4);
+    assert_eq!(document.rows[0].plain_text(), "13.08.20");
+    assert_eq!(document.rows[0].cell_width(), 8);
+    assert_eq!(document.rows[1].plain_text(), "prompt");
+    assert_eq!(document.rows[2].plain_text(), "");
+    assert!(document.rows[0].fill.is_some());
+}
+
+#[test]
+fn missing_or_invalid_timestamp_leaves_the_existing_top_gray_row_blank() {
+    for timestamp_ms in [None, Some(u64::MAX)] {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text(
+            "u1",
+            "legacy prompt",
+            timestamp_ms,
+        )));
+
+        let document = HistoryDocument::from_app_at_offset(
+            &app,
+            50,
+            FixedOffset::east_opt(3 * 60 * 60).unwrap(),
+        );
+
+        assert_eq!(document.rows.len(), 4);
+        assert_eq!(document.rows[0].plain_text(), "");
+        assert_eq!(document.rows[1].plain_text(), "legacy prompt");
+        assert!(document.rows[0].fill.is_some());
+    }
+}
+
+#[test]
+fn optimistic_and_hydrated_prompts_render_their_owned_timestamps() {
+    let offset = FixedOffset::east_opt(3 * 60 * 60).unwrap();
+    let mut optimistic = AppState::default();
+    let mut editor = Editor::default();
+    editor.replace("optimistic prompt");
+    optimistic.apply(AppEvent::PromptSubmitted {
+        local_id: "local-1".into(),
+        submission: editor.take_editor_submission(),
+        attachments: Vec::new(),
+        at_ms: 1_786_638_720_000,
+    });
+
+    let optimistic_document = HistoryDocument::from_app_at_offset(&optimistic, 50, offset);
+
+    assert_eq!(optimistic_document.rows[0].plain_text(), "13.08.2026 19:32");
+    assert_eq!(
+        optimistic_document.rows[1].plain_text(),
+        "optimistic prompt"
+    );
+
+    let mut hydrated = AppState::default();
+    hydrated.hydrate_visible_history(vec![VisibleHistoryRecord {
+        version: 2,
+        role: VisibleRole::Prompt,
+        stable_id: "saved-1".into(),
+        turn_id: "saved-1".into(),
+        order: 1,
+        text: "hydrated prompt".into(),
+        attachments: Vec::new(),
+        timestamp_ms: Some(1_786_638_720_000),
+        text_fingerprint: fingerprint("hydrated prompt"),
+        presentation: PersistedPresentation::Plain,
+        rendered_text: None,
+        rendered_text_fingerprint: None,
+    }]);
+
+    let hydrated_document = HistoryDocument::from_app_at_offset(&hydrated, 50, offset);
+
+    assert_eq!(hydrated_document.rows[0].plain_text(), "13.08.2026 19:32");
+    assert_eq!(hydrated_document.rows[1].plain_text(), "hydrated prompt");
 }
 
 #[test]
@@ -213,7 +329,7 @@ fn wrapped_prompt_rows_fill_the_full_band_background() {
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
         "a deliberately long prompt that wraps onto continuation rows",
-        Some(1),
+        None,
     )));
 
     let width = 22;
@@ -247,7 +363,7 @@ fn wrapped_prompt_uses_the_full_width_without_a_role_indent() {
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
         "abcdefghijklmnopqrst",
-        Some(1),
+        None,
     )));
 
     let document = HistoryDocument::from_app(&app, 14);

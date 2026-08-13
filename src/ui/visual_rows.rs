@@ -1,6 +1,8 @@
 use crate::app::AppState;
+use crate::local_time::{format_local_timestamp, format_timestamp_at_offset};
 use crate::model::{Delivery, Message};
 use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
+use chrono::FixedOffset;
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -91,11 +93,29 @@ pub struct StickyRows {
 
 impl HistoryDocument {
     pub fn from_app(app: &AppState, width: u16) -> Self {
+        Self::from_app_with_timestamp_formatter(app, width, format_local_timestamp)
+    }
+
+    pub fn from_app_at_offset(app: &AppState, width: u16, offset: FixedOffset) -> Self {
+        Self::from_app_with_timestamp_formatter(app, width, |timestamp_ms| {
+            format_timestamp_at_offset(timestamp_ms, offset)
+        })
+    }
+
+    fn from_app_with_timestamp_formatter(
+        app: &AppState,
+        width: u16,
+        mut format_timestamp: impl FnMut(Option<u64>) -> Option<String>,
+    ) -> Self {
         let mut document = Self::default();
         let width = usize::from(width.max(1));
         for turn in &app.turns {
             let start_row = document.rows.len();
-            document.rows.push(filled_empty_row(prompt_fill()));
+            document.rows.push(filled_timestamp_row(
+                format_timestamp(turn.prompt.timestamp_ms).as_deref(),
+                prompt_fill(),
+                width,
+            ));
             let content_start_row = document.rows.len();
             let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
             if prompt_lines.is_empty() {
@@ -420,4 +440,43 @@ fn filled_empty_row(fill: Option<CellStyle>) -> VisualRow {
         spans: Vec::new(),
         fill,
     }
+}
+
+fn filled_timestamp_row(
+    timestamp: Option<&str>,
+    fill: Option<CellStyle>,
+    width: usize,
+) -> VisualRow {
+    let clipped = timestamp.map(|timestamp| clip_to_width(timestamp, width));
+    let spans = clipped
+        .filter(|timestamp| !timestamp.is_empty())
+        .map(|timestamp| {
+            vec![VisualSpan {
+                text: timestamp,
+                style: CellStyle {
+                    foreground: Some(AnsiColor::BrightBlack),
+                    modifiers: StyleModifiers {
+                        dim: true,
+                        ..StyleModifiers::default()
+                    },
+                    ..CellStyle::default()
+                },
+            }]
+        })
+        .unwrap_or_default();
+    VisualRow { spans, fill }
+}
+
+fn clip_to_width(text: &str, width: usize) -> String {
+    let mut clipped = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if character_width > 0 && used + character_width > width {
+            break;
+        }
+        clipped.push(character);
+        used += character_width;
+    }
+    clipped
 }
