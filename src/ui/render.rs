@@ -352,12 +352,19 @@ pub(crate) fn draw_terminal<B: Backend>(
 fn plain_cells(buffer: &Buffer, areas: &[HyperlinkArea]) -> Vec<(u16, u16, Cell)> {
     let mut cells = Vec::new();
     for area in areas {
-        for x in area.x..area.x.saturating_add(area.width) {
+        let end = area.x.saturating_add(area.width);
+        let mut x = area.x;
+        while x < end {
             let position = Position::new(x, area.y);
             let Some(cell) = buffer.cell(position).filter(|cell| !cell.skip) else {
+                x = x.saturating_add(1);
                 continue;
             };
             cells.push((x, area.y, cell.clone()));
+            let width = u16::try_from(UnicodeWidthStr::width(cell.symbol()))
+                .unwrap_or(u16::MAX)
+                .max(1);
+            x = x.saturating_add(width);
         }
     }
     cells
@@ -622,12 +629,38 @@ pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryRenderCache, editor_visual_cursor, wrapped_text_height};
+    use super::{
+        HistoryRenderCache, HyperlinkArea, editor_visual_cursor, plain_cells, wrapped_text_height,
+    };
     use crate::app::{AppEvent, AppState};
     use crate::model::Message;
     use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{CrosstermBackend, TestBackend};
+    use ratatui::layout::Rect;
+    use ratatui::{TerminalOptions, Viewport};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl RecordingWriter {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn wrapped_cursor_uses_display_rows_and_columns() {
@@ -776,6 +809,66 @@ mod tests {
                 .content
                 .iter()
                 .all(|cell| !cell.symbol().contains("\u{1b}]8;;"))
+        );
+    }
+
+    #[test]
+    fn stale_link_reset_skips_wide_glyph_continuation_cells() {
+        let buffer = ratatui::buffer::Buffer::with_lines(["界X"]);
+
+        let cells = plain_cells(
+            &buffer,
+            &[HyperlinkArea {
+                x: 0,
+                y: 0,
+                width: 2,
+            }],
+        );
+
+        assert_eq!(
+            cells
+                .iter()
+                .map(|(x, y, cell)| (*x, *y, cell.symbol()))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, "界")]
+        );
+        assert_eq!(buffer[(2, 0)].symbol(), "X");
+    }
+
+    #[test]
+    fn crossterm_bytes_close_osc_before_restoring_the_composer_cursor() {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+        app.apply(AppEvent::NativeFinal(Message::final_text(
+            "a1",
+            "[OpenAI](https://openai.com)",
+            None,
+        )));
+        let writer = RecordingWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 50, 14)),
+            },
+        )
+        .unwrap();
+        let mut cache = HistoryRenderCache::default();
+
+        super::draw_terminal(&mut terminal, &app, &Default::default(), &mut cache).unwrap();
+
+        let bytes = writer.bytes();
+        let osc = b"\x1b]8;;https://openai.com\x07OpenAI\x1b]8;;\x07";
+        let osc_end = bytes
+            .windows(osc.len())
+            .position(|window| window == osc)
+            .expect("backend should emit the exact balanced OSC 8 sequence")
+            + osc.len();
+        assert!(
+            bytes[osc_end..]
+                .windows(b"\x1b[12;1H".len())
+                .any(|window| window == b"\x1b[12;1H"),
+            "cursor restoration must be emitted after the OSC close"
         );
     }
 }

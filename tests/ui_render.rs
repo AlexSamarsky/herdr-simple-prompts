@@ -1046,6 +1046,65 @@ fn exact_native_presentation_adds_link_target_without_replacing_native_style() {
 }
 
 #[test]
+fn exact_native_non_http_links_lose_only_their_captured_underline() {
+    for (index, destination) in [
+        "mailto:user@example.test",
+        "editor://open/project",
+        "https://example.test/\u{1b}]8;;injected",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut app = AppState::default();
+        app.apply(AppEvent::NativeUser(Message::text(
+            format!("u{index}"),
+            "show native",
+            None,
+        )));
+        app.apply(AppEvent::NativeFinal(Message {
+            stable_id: format!("a{index}"),
+            text: format!("[label]({destination})"),
+            presentation: MessagePresentation::NativeAnsi(StyledText {
+                text: "label".into(),
+                runs: vec![StyleRun {
+                    start_byte: 0,
+                    end_byte: "label".len(),
+                    foreground: Some(AnsiColor::Blue),
+                    background: None,
+                    modifiers: StyleModifiers {
+                        bold: true,
+                        underline: true,
+                        ..StyleModifiers::default()
+                    },
+                }],
+            }),
+            attachments: Vec::new(),
+            timestamp_ms: None,
+        }));
+
+        let document = HistoryDocument::from_app(&app, 50);
+        let label = document
+            .rows
+            .iter()
+            .flat_map(|row| &row.spans)
+            .find(|span| span.text.contains("label"))
+            .expect("native non-clickable label should reach visual rows");
+
+        assert_eq!(label.hyperlink, None, "destination: {destination:?}");
+        assert!(label.style.modifiers.bold, "destination: {destination:?}");
+        assert!(
+            !label.style.modifiers.underline,
+            "destination: {destination:?}"
+        );
+        assert_eq!(
+            label.style.foreground,
+            Some(AnsiColor::Blue),
+            "destination: {destination:?}"
+        );
+    }
+}
+
+#[test]
 fn terminal_draw_emits_balanced_osc_8_and_restores_the_composer_cursor() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text("u1", "show link", None)));

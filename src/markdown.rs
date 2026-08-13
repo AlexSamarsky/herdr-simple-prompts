@@ -44,17 +44,24 @@ pub struct HyperlinkRange {
     pub url: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NonClickableLinkRange {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarkdownProjection {
     pub styled: StyledText,
     pub hyperlinks: Vec<HyperlinkRange>,
+    pub non_clickable_links: Vec<NonClickableLinkRange>,
 }
 
 #[derive(Debug)]
-struct SourceHyperlink<'a> {
+struct SourceLink<'a> {
     label_start: usize,
     label_end: usize,
-    url: &'a str,
+    clickable_url: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -176,7 +183,7 @@ fn project_visible(
     text: &str,
     slots: &[StyleSlot],
     visible: &[bool],
-    source_hyperlinks: &[SourceHyperlink<'_>],
+    source_links: &[SourceLink<'_>],
 ) -> MarkdownProjection {
     let mut projected = String::with_capacity(text.len());
     let mut builder = StyleRunBuilder::new();
@@ -190,24 +197,38 @@ fn project_visible(
         projected_offsets[byte + character.len_utf8()] = Some(projected.len());
     }
     let runs = builder.finish(projected.len());
-    let hyperlinks = source_hyperlinks
-        .iter()
-        .filter_map(|link| {
-            let start_byte = projected_offsets[link.label_start]?;
-            let end_byte = projected_offsets[link.label_end]?;
-            (start_byte < end_byte).then(|| HyperlinkRange {
+    let mut hyperlinks = Vec::new();
+    let mut non_clickable_links = Vec::new();
+    for link in source_links {
+        let Some(start_byte) = projected_offsets[link.label_start] else {
+            continue;
+        };
+        let Some(end_byte) = projected_offsets[link.label_end] else {
+            continue;
+        };
+        if start_byte >= end_byte {
+            continue;
+        }
+        if let Some(url) = link.clickable_url {
+            hyperlinks.push(HyperlinkRange {
                 start_byte,
                 end_byte,
-                url: link.url.to_owned(),
-            })
-        })
-        .collect();
+                url: url.to_owned(),
+            });
+        } else {
+            non_clickable_links.push(NonClickableLinkRange {
+                start_byte,
+                end_byte,
+            });
+        }
+    }
     MarkdownProjection {
         styled: StyledText {
             text: projected,
             runs,
         },
         hyperlinks,
+        non_clickable_links,
     }
 }
 
@@ -217,7 +238,7 @@ fn style_inline<'a>(
     end: usize,
     slots: &mut [StyleSlot],
     visible: &mut [bool],
-    hyperlinks: &mut Vec<SourceHyperlink<'a>>,
+    hyperlinks: &mut Vec<SourceLink<'a>>,
 ) {
     if start >= end {
         return;
@@ -351,7 +372,7 @@ fn style_links<'a>(
     candidates: &[LinkCandidate],
     slots: &mut [StyleSlot],
     visible: &mut [bool],
-    hyperlinks: &mut Vec<SourceHyperlink<'a>>,
+    hyperlinks: &mut Vec<SourceLink<'a>>,
 ) {
     for candidate in candidates.iter().filter(|candidate| candidate.valid) {
         apply_style(
@@ -362,7 +383,8 @@ fn style_links<'a>(
             StyleState::default(),
         );
         let url = &text[candidate.url_start..candidate.close];
-        if is_safe_http_url(url) {
+        let clickable = is_safe_http_url(url);
+        if clickable {
             apply_style(
                 slots,
                 candidate.label_start,
@@ -370,12 +392,12 @@ fn style_links<'a>(
                 LINK_LABEL_PRIORITY,
                 link_style(),
             );
-            hyperlinks.push(SourceHyperlink {
-                label_start: candidate.label_start,
-                label_end: candidate.label_end,
-                url,
-            });
         }
+        hyperlinks.push(SourceLink {
+            label_start: candidate.label_start,
+            label_end: candidate.label_end,
+            clickable_url: clickable.then_some(url),
+        });
         discard(visible, candidate.open, candidate.label_start);
         discard(visible, candidate.label_end, candidate.close + 1);
     }

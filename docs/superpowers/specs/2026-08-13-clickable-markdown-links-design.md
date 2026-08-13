@@ -28,8 +28,10 @@ history-journal schemas remain unchanged.
 The visual-row projection carries an optional URL on each link span and keeps
 it while splitting lines and wrapping Unicode text. Native ANSI answers reuse
 the Markdown hyperlink ranges only when the Markdown-projected visible text is
-byte-identical to the captured native visible text; native colors and emphasis
-remain authoritative.
+byte-identical to the captured native visible text. Native colors and emphasis
+remain authoritative, except that an underline is suppressed over a
+syntactically valid non-clickable link label so unsupported schemes retain the
+agreed ordinary presentation.
 
 Ratatui first draws an ordinary frame. The terminal path then redraws only the
 linked spans through the backend with an OSC 8 open sequence, visible label,

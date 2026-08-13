@@ -117,7 +117,9 @@ movement, alternate-screen commands, OSC titles, hyperlinks, clipboard
 commands, and other terminal controls are discarded and never replayed. Any
 clickable link is rebuilt only from the canonical, control-free HTTP(S)
 Markdown destination after the visible text matches exactly; a captured OSC
-sequence can never become link metadata.
+sequence can never become link metadata. For a syntactically valid but
+non-clickable destination, only a captured underline on that label is removed;
+unrelated native color and emphasis remain unchanged.
 
 When exact native ANSI is unavailable, the same dependency-free projected text
 is shown with deterministic fallback styles. Captured native visible text and

@@ -1,8 +1,13 @@
 use crate::app::AppState;
 use crate::local_time::{format_local_timestamp, format_timestamp_at_offset};
-use crate::markdown::{HyperlinkRange, MarkdownProjection, style_markdown_with_links};
+use crate::markdown::{
+    HyperlinkRange, MarkdownProjection, NonClickableLinkRange, style_markdown_with_links,
+};
 use crate::model::{Delivery, Message};
-use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
+use crate::style::{
+    AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyleRunBuilder, StyleState,
+    StyledText,
+};
 use chrono::FixedOffset;
 use unicode_width::UnicodeWidthChar;
 
@@ -426,15 +431,18 @@ fn answer_lines(message: &Message) -> Vec<AnswerLine> {
     let MarkdownProjection {
         styled: markdown_styled,
         hyperlinks: markdown_hyperlinks,
+        non_clickable_links,
     } = style_markdown_with_links(&message.text);
     let (source, hyperlinks) = match &message.presentation {
         MessagePresentation::NativeAnsi(styled) => {
-            let hyperlinks = if styled.text == markdown_styled.text {
-                markdown_hyperlinks
+            if styled.text == markdown_styled.text {
+                (
+                    suppress_link_underlines(styled, &non_clickable_links),
+                    markdown_hyperlinks,
+                )
             } else {
-                Vec::new()
-            };
-            (styled.clone(), hyperlinks)
+                (styled.clone(), Vec::new())
+            }
         }
         MessagePresentation::MarkdownFallback => (markdown_styled, markdown_hyperlinks),
         MessagePresentation::Plain => (
@@ -446,6 +454,53 @@ fn answer_lines(message: &Message) -> Vec<AnswerLine> {
         ),
     };
     split_answer_lines(&source, &hyperlinks)
+}
+
+fn suppress_link_underlines(source: &StyledText, ranges: &[NonClickableLinkRange]) -> StyledText {
+    let runs = valid_runs(source);
+    let mut styles = StyleCursor::new(&runs);
+    let mut ranges = TextRangeCursor::new(ranges);
+    let mut builder = StyleRunBuilder::new();
+    for (byte, _) in source.text.char_indices() {
+        let style = styles.style_at(byte);
+        let mut state = StyleState {
+            foreground: style.foreground,
+            background: style.background,
+            modifiers: style.modifiers,
+        };
+        if ranges.contains(byte) {
+            state.modifiers.underline = false;
+        }
+        builder.set_style(state, byte);
+    }
+    StyledText {
+        text: source.text.clone(),
+        runs: builder.finish(source.text.len()),
+    }
+}
+
+struct TextRangeCursor<'a> {
+    ranges: &'a [NonClickableLinkRange],
+    index: usize,
+}
+
+impl<'a> TextRangeCursor<'a> {
+    fn new(ranges: &'a [NonClickableLinkRange]) -> Self {
+        Self { ranges, index: 0 }
+    }
+
+    fn contains(&mut self, byte: usize) -> bool {
+        while self
+            .ranges
+            .get(self.index)
+            .is_some_and(|range| byte >= range.end_byte)
+        {
+            self.index += 1;
+        }
+        self.ranges
+            .get(self.index)
+            .is_some_and(|range| range.start_byte <= byte)
+    }
 }
 
 fn split_answer_lines(source: &StyledText, hyperlinks: &[HyperlinkRange]) -> Vec<AnswerLine> {
