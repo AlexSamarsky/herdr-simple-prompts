@@ -174,7 +174,7 @@ fn sanitizer_never_splits_a_multibyte_scalar_after_an_unknown_escape() {
 }
 
 #[test]
-fn markdown_fallback_styles_the_supported_subset_without_rewriting_text() {
+fn markdown_projection_removes_supported_delimiters_and_rebases_styles() {
     let text = concat!(
         "paragraph with `inline` code\n",
         "# Heading\n",
@@ -187,10 +187,21 @@ fn markdown_fallback_styles_the_supported_subset_without_rewriting_text() {
         "```\n",
         "malformed **open and _open and `open and [label](\n",
     );
+    let expected = concat!(
+        "paragraph with inline code\n",
+        "Heading\n",
+        "Subheading\n",
+        "- list with bold text\n",
+        "1. numbered with italic text\n",
+        "label\n",
+        "let x = **plain inside fence**;\n",
+        "malformed **open and _open and `open and [label](\n",
+    );
+    let message = Message::final_text("answer", text, Some(1));
 
-    let styled = style_markdown(text);
+    let styled = style_markdown(&message.text);
 
-    assert_eq!(styled.text, text);
+    assert_eq!(styled.text, expected);
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
     assert!(styled.runs.windows(2).all(|runs| {
         runs[0].end_byte < runs[1].start_byte
@@ -233,7 +244,7 @@ fn markdown_fallback_styles_the_supported_subset_without_rewriting_text() {
         ),
     ];
     for (name, needle, foreground, background, bold, italic, underline) in cases {
-        let byte = text.find(needle).unwrap();
+        let byte = styled.text.find(needle).unwrap();
         let style = style_at(&styled, byte).unwrap_or_else(|| panic!("missing {name} style"));
         assert_eq!(style.foreground, foreground, "{name} foreground");
         assert_eq!(style.background, background, "{name} background");
@@ -242,21 +253,48 @@ fn markdown_fallback_styles_the_supported_subset_without_rewriting_text() {
         assert_eq!(style.modifiers.underline, underline, "{name} underline");
     }
 
-    let url = text.find("https://example.test").unwrap();
-    assert!(style_at(&styled, url).is_none());
-
-    let inline_open = text.find('`').unwrap();
-    let strong_open = text.find("**bold**").unwrap();
-    let emphasis_open = text.find("_italic_").unwrap();
-    assert!(style_at(&styled, inline_open).is_none());
-    assert!(style_at(&styled, strong_open).is_none());
-    assert!(style_at(&styled, emphasis_open).is_none());
-    let malformed = text.find("**open").unwrap();
+    assert!(!styled.text.contains("https://example.test"));
+    assert!(!styled.text.contains("```"));
+    let malformed = styled.text.find("**open").unwrap();
     assert!(style_at(&styled, malformed).is_none());
-
-    let message = Message::final_text("answer", text, Some(1));
-    let _computed = style_markdown(&message.text);
+    assert_eq!(message.text, text);
     assert_eq!(message.presentation, MessagePresentation::MarkdownFallback);
+}
+
+#[test]
+fn markdown_projection_keeps_malformed_constructs_literal() {
+    let text = concat!(
+        "unclosed **strong\n",
+        "unclosed _emphasis\n",
+        "unclosed `code\n",
+        "[label](not valid)\n",
+        "```rust\n",
+        "**literal inside unclosed fence**\n",
+    );
+
+    let styled = style_markdown(text);
+
+    assert_eq!(styled.text, text);
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    assert!(styled.runs.is_empty());
+}
+
+#[test]
+fn markdown_projection_rebases_style_runs_after_removed_unicode_adjacent_markup() {
+    let text = "# Привет **мир** — [документация](https://example.test)";
+    let styled = style_markdown(text);
+
+    assert_eq!(styled.text, "Привет мир — документация");
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+
+    let world = styled.text.find("мир").unwrap();
+    let world_style = style_at(&styled, world).unwrap();
+    assert!(world_style.modifiers.bold);
+
+    let link = styled.text.find("документация").unwrap();
+    let link_style = style_at(&styled, link).unwrap();
+    assert_eq!(link_style.foreground, Some(AnsiColor::Cyan));
+    assert!(link_style.modifiers.underline);
 }
 
 #[test]
@@ -267,33 +305,40 @@ fn markdown_inline_constructs_never_cross_newlines_and_precedence_is_determinist
         "**crosses\nline** _also\nplain_\n",
         "```\n",
         "`fenced` **still code**\n",
+        "```\n",
+    );
+    let expected = concat!(
+        "code **not bold** _not italic_ [not link](url)\n",
+        "strong _does not override_\n",
+        "**crosses\nline** _also\nplain_\n",
+        "`fenced` **still code**\n",
     );
 
     let styled = style_markdown(text);
 
-    assert_eq!(styled.text, text);
+    assert_eq!(styled.text, expected);
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
-    let code_bold_words = text.find("not bold").unwrap();
+    let code_bold_words = styled.text.find("not bold").unwrap();
     let code_style = style_at(&styled, code_bold_words).unwrap();
     assert_eq!(code_style.background, Some(AnsiColor::BrightBlack));
     assert!(!code_style.modifiers.bold);
     assert!(!code_style.modifiers.italic);
     assert!(!code_style.modifiers.underline);
 
-    let strong_inner = text.find("does not override").unwrap();
+    let strong_inner = styled.text.find("does not override").unwrap();
     let strong_style = style_at(&styled, strong_inner).unwrap();
     assert!(strong_style.modifiers.bold);
     assert!(!strong_style.modifiers.italic);
 
     for malformed in ["crosses", "line", "also", "plain"] {
-        let byte = text.find(malformed).unwrap();
+        let byte = styled.text.find(malformed).unwrap();
         assert!(
             style_at(&styled, byte).is_none(),
             "{malformed} stayed plain"
         );
     }
 
-    let fenced_inline = text.rfind("still code").unwrap();
+    let fenced_inline = styled.text.rfind("still code").unwrap();
     let fenced_style = style_at(&styled, fenced_inline).unwrap();
     assert_eq!(fenced_style.background, Some(AnsiColor::BrightBlack));
     assert!(!fenced_style.modifiers.bold);
@@ -309,14 +354,22 @@ fn markdown_links_recover_after_nested_or_invalid_candidates() {
         "[empty-url]() then [third](https://third.test)\n",
         "[bad-url](not valid) then [fourth](https://fourth.test)\n",
     );
+    let expected = concat!(
+        "[broken then label\n",
+        "[bad](nested\n",
+        "[bad whitespace](before deep\n",
+        "[](empty-label) then second\n",
+        "[empty-url]() then third\n",
+        "[bad-url](not valid) then fourth\n",
+    );
 
     let styled = style_markdown(text);
 
-    assert_eq!(styled.text, text);
+    assert_eq!(styled.text, expected);
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
-    assert!(style_at(&styled, text.find("broken then").unwrap()).is_none());
+    assert!(style_at(&styled, styled.text.find("broken then").unwrap()).is_none());
     for label in ["label", "nested", "deep", "second", "third", "fourth"] {
-        let label_style = style_at(&styled, text.find(label).unwrap()).unwrap();
+        let label_style = style_at(&styled, styled.text.find(label).unwrap()).unwrap();
         assert_eq!(label_style.foreground, Some(AnsiColor::Cyan));
         assert!(label_style.modifiers.underline);
     }
@@ -329,11 +382,12 @@ fn markdown_links_recover_after_nested_or_invalid_candidates() {
         "bad-url",
         "not valid",
     ] {
-        assert!(style_at(&styled, text.find(invalid).unwrap()).is_none());
+        assert!(
+            style_at(&styled, styled.text.find(invalid).unwrap()).is_none(),
+            "{invalid} stayed literal and plain"
+        );
     }
-    for url in ["https://nested.test", "https://deep.test"] {
-        assert!(style_at(&styled, text.find(url).unwrap()).is_none());
-    }
+    assert!(!styled.text.contains("https://"));
 }
 
 #[test]

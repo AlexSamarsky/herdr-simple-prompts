@@ -14,70 +14,136 @@ struct StyleSlot {
     style: StyleState,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LineRange {
+    start: usize,
+    end: usize,
+    after_end: usize,
+}
+
 pub fn style_markdown(text: &str) -> StyledText {
     let mut slots = vec![StyleSlot::default(); text.len()];
-    let mut fenced = false;
-    let mut line_start = 0;
+    let mut visible = vec![true; text.len()];
+    let lines = line_ranges(text);
+    let mut line_index = 0;
 
-    for line_end in text
-        .match_indices('\n')
-        .map(|(index, _)| index)
-        .chain(std::iter::once(text.len()))
-    {
-        let line = &text[line_start..line_end];
-        if fenced {
-            if is_closing_fence(line) {
-                fenced = false;
-            } else {
+    while line_index < lines.len() {
+        let line_range = lines[line_index];
+        let line = &text[line_range.start..line_range.end];
+        if is_opening_fence(line) {
+            let Some(closing_index) =
+                lines
+                    .iter()
+                    .enumerate()
+                    .skip(line_index + 1)
+                    .find_map(|(index, candidate)| {
+                        is_closing_fence(&text[candidate.start..candidate.end]).then_some(index)
+                    })
+            else {
+                break;
+            };
+
+            discard(&mut visible, line_range.start, line_range.after_end);
+            for code_line in &lines[line_index + 1..closing_index] {
                 apply_style(
                     &mut slots,
-                    line_start,
-                    line_end,
+                    code_line.start,
+                    code_line.end,
                     FENCED_CODE_PRIORITY,
                     code_style(),
                 );
             }
-        } else if is_opening_fence(line) {
-            fenced = true;
-        } else {
-            let (content_offset, heading) = block_content(line);
-            let content_start = line_start + content_offset;
-            if heading {
-                apply_style(
-                    &mut slots,
-                    content_start,
-                    line_end,
-                    BLOCK_PRIORITY,
-                    bold_style(),
-                );
-            }
-            style_inline(text, content_start, line_end, &mut slots);
+            let closing_range = lines[closing_index];
+            discard(&mut visible, closing_range.start, closing_range.after_end);
+            line_index = closing_index + 1;
+            continue;
         }
-        line_start = line_end.saturating_add(1);
+
+        let (content_offset, heading) = block_content(line);
+        let content_start = line_range.start + content_offset;
+        if heading {
+            discard(&mut visible, line_range.start, content_start);
+            apply_style(
+                &mut slots,
+                content_start,
+                line_range.end,
+                BLOCK_PRIORITY,
+                bold_style(),
+            );
+        }
+        style_inline(
+            text,
+            content_start,
+            line_range.end,
+            &mut slots,
+            &mut visible,
+        );
+        line_index += 1;
     }
 
-    let mut builder = StyleRunBuilder::new();
-    for (byte, _) in text.char_indices() {
-        builder.set_style(slots[byte].style, byte);
+    project_visible(text, &slots, &visible)
+}
+
+fn line_ranges(text: &str) -> Vec<LineRange> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (end, _) in text.match_indices('\n') {
+        ranges.push(LineRange {
+            start,
+            end,
+            after_end: end + 1,
+        });
+        start = end + 1;
     }
-    let runs = builder.finish(text.len());
+    if start < text.len() || text.is_empty() {
+        ranges.push(LineRange {
+            start,
+            end: text.len(),
+            after_end: text.len(),
+        });
+    }
+    ranges
+}
+
+fn project_visible(text: &str, slots: &[StyleSlot], visible: &[bool]) -> StyledText {
+    let mut projected = String::with_capacity(text.len());
+    let mut builder = StyleRunBuilder::new();
+    for (byte, character) in text.char_indices() {
+        if visible[byte] {
+            builder.set_style(slots[byte].style, projected.len());
+            projected.push(character);
+        }
+    }
+    let runs = builder.finish(projected.len());
     StyledText {
-        text: text.to_owned(),
+        text: projected,
         runs,
     }
 }
 
-fn style_inline(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
+fn style_inline(
+    text: &str,
+    start: usize,
+    end: usize,
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+) {
     if start >= end {
         return;
     }
-    style_emphasis(text, start, end, slots);
-    style_strong(text, start, end, slots);
-    style_links(text, start, end, slots);
-    style_inline_code(text, start, end, slots);
+    style_inline_code(text, start, end, slots, visible);
+    style_links(text, start, end, slots, visible);
+    style_strong(text, start, end, slots, visible);
+    style_emphasis(text, start, end, slots, visible);
 }
 
-fn style_inline_code(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
+fn style_inline_code(
+    text: &str,
+    start: usize,
+    end: usize,
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+) {
     let bytes = text.as_bytes();
     let mut cursor = start;
     while let Some(open) = find_byte(bytes, cursor, end, b'`') {
@@ -94,11 +160,23 @@ fn style_inline_code(text: &str, start: usize, end: usize, slots: &mut [StyleSlo
                 code_style(),
             );
         }
+        discard_if_allowed(
+            visible,
+            slots,
+            &[(open, content_start), (close, close + 1)],
+            INLINE_CODE_PRIORITY,
+        );
         cursor = close + 1;
     }
 }
 
-fn style_links(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
+fn style_links(
+    text: &str,
+    start: usize,
+    end: usize,
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+) {
     let bytes = text.as_bytes();
     let mut cursor = start;
     while let Some(open) = find_byte(bytes, cursor, end, b'[') {
@@ -128,12 +206,24 @@ fn style_links(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
                 LINK_LABEL_PRIORITY,
                 link_style(),
             );
+            discard_if_allowed(
+                visible,
+                slots,
+                &[(open, label_start), (label_end, close + 1)],
+                LINK_LABEL_PRIORITY,
+            );
         }
         cursor = close + 1;
     }
 }
 
-fn style_strong(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
+fn style_strong(
+    text: &str,
+    start: usize,
+    end: usize,
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+) {
     let bytes = text.as_bytes();
     let mut cursor = start;
     while let Some(open) = find_sequence(bytes, cursor, end, b"**") {
@@ -144,11 +234,23 @@ fn style_strong(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
         if content_start < close {
             apply_style(slots, content_start, close, STRONG_PRIORITY, bold_style());
         }
+        discard_if_allowed(
+            visible,
+            slots,
+            &[(open, content_start), (close, close + 2)],
+            STRONG_PRIORITY,
+        );
         cursor = close + 2;
     }
 }
 
-fn style_emphasis(text: &str, start: usize, end: usize, slots: &mut [StyleSlot]) {
+fn style_emphasis(
+    text: &str,
+    start: usize,
+    end: usize,
+    slots: &mut [StyleSlot],
+    visible: &mut [bool],
+) {
     let bytes = text.as_bytes();
     let mut cursor = start;
     while let Some(open) = find_byte(bytes, cursor, end, b'_') {
@@ -165,8 +267,35 @@ fn style_emphasis(text: &str, start: usize, end: usize, slots: &mut [StyleSlot])
                 italic_style(),
             );
         }
+        discard_if_allowed(
+            visible,
+            slots,
+            &[(open, content_start), (close, close + 1)],
+            EMPHASIS_PRIORITY,
+        );
         cursor = close + 1;
     }
+}
+
+fn discard_if_allowed(
+    visible: &mut [bool],
+    slots: &[StyleSlot],
+    ranges: &[(usize, usize)],
+    priority: u8,
+) {
+    if ranges.iter().all(|&(start, end)| {
+        slots[start..end]
+            .iter()
+            .all(|slot| slot.priority <= priority)
+    }) {
+        for &(start, end) in ranges {
+            discard(visible, start, end);
+        }
+    }
+}
+
+fn discard(visible: &mut [bool], start: usize, end: usize) {
+    visible[start..end].fill(false);
 }
 
 fn apply_style(slots: &mut [StyleSlot], start: usize, end: usize, priority: u8, style: StyleState) {
