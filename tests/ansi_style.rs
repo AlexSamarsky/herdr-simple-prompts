@@ -402,6 +402,25 @@ fn markdown_valid_link_owns_inline_like_destination_syntax() {
 }
 
 #[test]
+fn markdown_inline_code_outranks_a_valid_link_label() {
+    let styled = style_markdown("[left `code` right](url)");
+
+    assert_eq!(styled.text, "left code right");
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+
+    for label_part in ["left", "right"] {
+        let label_style = style_at(&styled, styled.text.find(label_part).unwrap()).unwrap();
+        assert_eq!(label_style.foreground, Some(AnsiColor::Cyan));
+        assert!(label_style.modifiers.underline);
+    }
+
+    let code_style = style_at(&styled, styled.text.find("code").unwrap()).unwrap();
+    assert_eq!(code_style.foreground, Some(AnsiColor::White));
+    assert_eq!(code_style.background, Some(AnsiColor::BrightBlack));
+    assert!(!code_style.modifiers.underline);
+}
+
+#[test]
 fn markdown_malformed_link_candidate_stays_atomically_literal() {
     let text = "[**label**](bad url)";
     let styled = style_markdown(text);

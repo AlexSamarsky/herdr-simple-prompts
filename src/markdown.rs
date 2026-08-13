@@ -224,16 +224,21 @@ fn link_candidates(
             continue;
         }
         if !inside_inline_code(open, inline_code) {
-            owned.reserve(open, close + 1);
             let url = &text[url_start..close];
+            let valid =
+                label_start < label_end && !url.is_empty() && !url.chars().any(char::is_whitespace);
+            if valid {
+                owned.reserve(open, label_start);
+                owned.reserve(label_end, close + 1);
+            } else {
+                owned.reserve(open, close + 1);
+            }
             candidates.push(LinkCandidate {
                 open,
                 label_start,
                 label_end,
                 close,
-                valid: label_start < label_end
-                    && !url.is_empty()
-                    && !url.chars().any(char::is_whitespace),
+                valid,
             });
         }
         cursor = close + 1;
