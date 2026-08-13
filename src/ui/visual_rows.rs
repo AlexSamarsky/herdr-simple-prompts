@@ -134,7 +134,7 @@ impl HistoryDocument {
                         .push(filled_timestamp_row(Some(timestamp.as_str()), None, width));
                 }
                 for line in &answer_lines(answer) {
-                    push_styled_rows(&mut document.rows, line, None, width);
+                    push_answer_rows(&mut document.rows, line, width);
                 }
             }
             document.rows.push(empty_row());
@@ -421,6 +421,17 @@ fn push_styled_rows(
 ) {
     for mut row in wrap_styled(source, width) {
         row.fill = fill;
+        rows.push(row);
+    }
+}
+
+fn push_answer_rows(rows: &mut Vec<VisualRow>, source: &StyledText, width: usize) {
+    for mut row in wrap_styled(source, width) {
+        for span in &mut row.spans {
+            if span.style.foreground.is_none() {
+                span.style.foreground = Some(AnsiColor::BrightWhite);
+            }
+        }
         rows.push(row);
     }
 }

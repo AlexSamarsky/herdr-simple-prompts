@@ -48,6 +48,18 @@ fn prompt_is_a_label_free_gray_block_and_answer_is_unboxed() {
 }
 
 #[test]
+fn unstyled_agent_answer_uses_a_bright_foreground() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+    app.apply(AppEvent::NativeFinal(Message::text("a1", "Z", None)));
+
+    let buffer = rendered_buffer(&app, 40, 12);
+    let answer = find_cell(&buffer, 40, 12, "Z");
+
+    assert_eq!(buffer[answer].style().fg, Some(Color::White));
+}
+
+#[test]
 fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
