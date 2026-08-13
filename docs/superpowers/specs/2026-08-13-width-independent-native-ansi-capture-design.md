@@ -45,13 +45,26 @@ native styling of shell commands, links, emphasis, and headings. It deliberately
 does not store the source pane's physical wrapping and does not implement a
 second syntax highlighter.
 
+## Native prompt-band tone
+
+The user-prompt band must match the reviewed Codex prompt surface rather than
+the terminal's bright `DarkGray` palette entry. Pixel sampling of two empty
+points in the supplied Codex reference gives RGB `52, 53, 54` (`#343536`); the
+current Simple Prompts band resolves to RGB `102, 102, 102` (`#666666`).
+
+Simple Prompts therefore uses `AnsiColor::Rgb(52, 53, 54)` as the prompt fill
+background while retaining the current bright foreground, full-width fill,
+one-row top and bottom padding, wrapping, and sticky behavior. This is an exact
+parity correction for the approved Herdr/Codex surface, not a new theme system.
+
 ## Boundaries and safety
 
-The implementation stays in `src/ansi.rs`; the runtime, history schema, and
-renderer contracts do not change. ANSI is sanitized before matching, and no
-escape sequence is replayed. Candidate discovery uses only the existing
-provider-specific role, continuation, trailing-boundary, composer, and footer
-contracts.
+The capture implementation stays in `src/ansi.rs`, and the prompt-tone change
+stays in the existing `prompt_fill` owner in `src/ui/visual_rows.rs`; the
+runtime, history schema, and renderer contracts do not change. ANSI is
+sanitized before matching, and no escape sequence is replayed. Candidate
+discovery uses only the existing provider-specific role, continuation,
+trailing-boundary, composer, and footer contracts.
 
 Whitespace-insensitive matching is intentionally narrow: only whitespace may
 differ. Punctuation, letters, digits, symbols, and their order must match
@@ -71,7 +84,12 @@ Regression tests in `tests/ansi_style.rs` cover:
 4. Duplicate normalized candidates are rejected as ambiguous.
 5. Existing strict Codex and Claude captures remain unchanged.
 
-Focused verification runs `cargo test --test ansi_style`. Full verification runs
+The rendered-buffer regression in `tests/ui_render.rs` additionally asserts
+that every cell in every wrapped prompt-band row uses
+`Color::Rgb(52, 53, 54)`.
+
+Focused verification runs `cargo test --test ansi_style` plus the prompt-band
+render regression in `cargo test --test ui_render`. Full verification runs
 `cargo test --all-targets` and
 `cargo clippy --all-targets --all-features -- -D warnings`, followed by a release
 build of the source-only plugin.
@@ -82,5 +100,5 @@ build of the source-only plugin.
 - Reconstructing native styles for final answers that have already been stored
   as fallback and are no longer present in source scrollback.
 - Relaxing equality for non-whitespace edits.
-- Changing prompt bands, scrolling, composer behavior, or blocked interaction
-  forwarding.
+- Changing prompt-band geometry, scrolling, composer behavior, or blocked
+  interaction forwarding.

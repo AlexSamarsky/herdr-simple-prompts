@@ -2,15 +2,70 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Before coding, invoke a tester-oriented skill. After each meaningful coding batch, invoke superpowers:requesting-code-review. Before any completion claim, invoke superpowers:verification-before-completion. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Preserve native Codex/Claude final-answer ANSI styles when the source pane wraps the same projected answer differently or omits the leading separator.
+**Goal:** Preserve native Codex/Claude final-answer ANSI styles across source-pane wrapping and match the native Codex prompt-band tone.
 
-**Architecture:** Keep the current exact line matcher as the preferred path. If it finds no candidate, scan provider-bounded final blocks, compare their non-whitespace Unicode scalar sequence with the projected transcript, and map styles from equal native scalars onto canonical byte ranges. Reject non-whitespace differences, duplicate candidates, unknown chrome, and unsafe footers.
+**Architecture:** Keep the current exact line matcher as the preferred path. If it finds no candidate, scan provider-bounded final blocks, compare their non-whitespace Unicode scalar sequence with the projected transcript, and map styles from equal native scalars onto canonical byte ranges. Reject non-whitespace differences, duplicate candidates, unknown chrome, and unsafe footers. Independently replace only the prompt fill background with the measured native Codex RGB tone; prompt geometry remains unchanged.
 
 **Tech Stack:** Rust 2024, existing dependency-free ANSI/Markdown projector, Cargo tests and Clippy.
 
 ---
 
-### Task 1: Lock the width-independent capture contract with failing tests
+### Task 1: Match the native Codex prompt-band tone
+
+**Files:**
+- Modify: `tests/ui_render.rs:209-238`
+- Modify: `src/ui/visual_rows.rs:402-410`
+
+**Required skill checkpoints:**
+- Use `superpowers:test-driven-development` before editing `src/ui/visual_rows.rs`.
+- Include this presentation change in the `superpowers:requesting-code-review` batch.
+- Use `superpowers:verification-before-completion` before any parity claim.
+
+- [ ] **Step 1: Change the rendered-buffer expectation and verify RED**
+
+In `wrapped_prompt_rows_fill_the_full_band_background`, replace the terminal
+palette expectation:
+
+```rust
+assert_eq!(buffer[(column, row)].style().bg, Some(Color::DarkGray));
+```
+
+with the sampled Codex reference tone:
+
+```rust
+assert_eq!(
+    buffer[(column, row)].style().bg,
+    Some(Color::Rgb(52, 53, 54)),
+);
+```
+
+Run:
+
+```bash
+cargo test --test ui_render wrapped_prompt_rows_fill_the_full_band_background -- --exact
+```
+
+Expected: FAIL because the current `AnsiColor::BrightBlack` maps to
+`Color::DarkGray` rather than the measured RGB color.
+
+- [ ] **Step 2: Apply the exact prompt fill and verify GREEN**
+
+Change only the background in `prompt_fill`:
+
+```rust
+fn prompt_fill() -> Option<CellStyle> {
+    Some(CellStyle {
+        foreground: Some(AnsiColor::BrightWhite),
+        background: Some(AnsiColor::Rgb(52, 53, 54)),
+        modifiers: StyleModifiers::default(),
+    })
+}
+```
+
+Run the same focused test. Expected: PASS with all prompt rows, padding, and
+right-edge cells using `Color::Rgb(52, 53, 54)`.
+
+### Task 2: Lock the width-independent capture contract with failing tests
 
 **Files:**
 - Modify: `tests/ansi_style.rs:552-582`
@@ -18,7 +73,7 @@
 
 **Required skill checkpoints:**
 - Use `superpowers:test-driven-development` before editing production code.
-- Use `superpowers:requesting-code-review` after the coding batch in Task 2.
+- Use `superpowers:requesting-code-review` after the coding batch in Task 3.
 - Use `superpowers:verification-before-completion` before any success claim.
 
 - [ ] **Step 1: Add a failing soft-wrap/no-leading-separator regression**
@@ -129,7 +184,7 @@ cargo test --test ansi_style native_final_capture_maps_wrapped_shell_styles_to_p
 Expected: both fail because `extract_native_final` returns `None`; this proves
 the regressions exercise missing behavior rather than existing strict capture.
 
-### Task 2: Add the width-independent candidate matcher
+### Task 3: Add the width-independent candidate matcher
 
 **Files:**
 - Modify: `src/ansi.rs:69-167`
@@ -308,7 +363,7 @@ Invoke `superpowers:requesting-code-review` against the diff from commit
 `efd6145`, address only correctness or maintainability findings inside the
 approved capture scope, and rerun `cargo test --test ansi_style` after any edit.
 
-### Task 3: Verify, build, install, and persist the fix
+### Task 4: Verify, build, install, and persist the fix
 
 **Files:**
 - Modify only if verification exposes a scoped defect: `src/ansi.rs`, `tests/ansi_style.rs`
@@ -349,7 +404,7 @@ Review `git diff --check` and `git status --short`, then commit only the approve
 capture change, regressions, and this plan:
 
 ```bash
-git add src/ansi.rs tests/ansi_style.rs docs/superpowers/plans/2026-08-13-width-independent-native-ansi-capture.md
+git add src/ansi.rs src/ui/visual_rows.rs tests/ansi_style.rs tests/ui_render.rs docs/superpowers/specs/2026-08-13-width-independent-native-ansi-capture-design.md docs/superpowers/plans/2026-08-13-width-independent-native-ansi-capture.md
 git commit -m "preserve native styles across terminal wraps"
 ```
 
