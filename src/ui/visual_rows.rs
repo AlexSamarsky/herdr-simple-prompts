@@ -3,9 +3,6 @@ use crate::model::{Delivery, Message};
 use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
 use unicode_width::UnicodeWidthChar;
 
-pub const PROMPT_PREFIX: &str = "YOU  ";
-pub const ANSWER_PREFIX: &str = "ANSWER  ";
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CellStyle {
     pub foreground: Option<AnsiColor>,
@@ -69,24 +66,12 @@ impl VisualRow {
             self.spans.push(VisualSpan { text, style });
         }
     }
-
-    fn push(&mut self, text: &str, style: CellStyle) {
-        if let Some(previous) = self.spans.last_mut()
-            && previous.style == style
-        {
-            previous.text.push_str(text);
-        } else {
-            self.spans.push(VisualSpan {
-                text: text.to_owned(),
-                style,
-            });
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PromptSection {
     pub start_row: usize,
+    pub content_start_row: usize,
     pub prompt_rows: usize,
     pub end_row: usize,
 }
@@ -110,49 +95,27 @@ impl HistoryDocument {
         let width = usize::from(width.max(1));
         for turn in &app.turns {
             let start_row = document.rows.len();
+            document.rows.push(filled_empty_row(prompt_fill()));
+            let content_start_row = document.rows.len();
             let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
             if prompt_lines.is_empty() {
                 prompt_lines.push(StyledText::default());
             }
-            for (index, line) in prompt_lines.iter().enumerate() {
-                push_labeled_rows(
-                    &mut document.rows,
-                    line,
-                    if index == 0 { PROMPT_PREFIX } else { "     " },
-                    if index == 0 {
-                        prompt_prefix_style()
-                    } else {
-                        CellStyle::default()
-                    },
-                    prompt_fill(),
-                    width,
-                );
+            for line in &prompt_lines {
+                push_styled_rows(&mut document.rows, line, prompt_fill(), width);
             }
-            let prompt_rows = document.rows.len() - start_row;
+            let prompt_rows = document.rows.len() - content_start_row;
+            document.rows.push(filled_empty_row(prompt_fill()));
 
             if let Some(answer) = &turn.final_answer {
-                for (index, line) in answer_lines(answer).iter().enumerate() {
-                    push_labeled_rows(
-                        &mut document.rows,
-                        line,
-                        if index == 0 {
-                            ANSWER_PREFIX
-                        } else {
-                            "        "
-                        },
-                        if index == 0 {
-                            answer_prefix_style()
-                        } else {
-                            CellStyle::default()
-                        },
-                        None,
-                        width,
-                    );
+                for line in &answer_lines(answer) {
+                    push_styled_rows(&mut document.rows, line, None, width);
                 }
             }
             document.rows.push(empty_row());
             document.prompts.push(PromptSection {
                 start_row,
+                content_start_row,
                 prompt_rows,
                 end_row: document.rows.len(),
             });
@@ -189,23 +152,27 @@ impl HistoryDocument {
 }
 
 pub fn sticky_overlay(sections: &[PromptSection], top: usize, height: usize) -> Option<StickyRows> {
-    let sticky_limit = 2.min(height.saturating_sub(1));
-    if sticky_limit == 0 {
-        return None;
-    }
     let section_index = sections
         .iter()
-        .rposition(|section| section.start_row < top && top < section.end_row)?;
+        .rposition(|section| section.content_start_row < top && top < section.end_row)?;
     let section = sections[section_index];
-    let mut count = sticky_limit.min(section.prompt_rows);
+    let content_count = 2.min(section.prompt_rows).min(height.saturating_sub(1));
+    if content_count == 0 {
+        return None;
+    }
+    let include_padding = height >= content_count + 2;
+    let desired_count = content_count + usize::from(include_padding);
+    let base_source_start = if include_padding {
+        section.start_row
+    } else {
+        section.content_start_row
+    };
+    let mut count = desired_count;
     if let Some(next) = sections.get(section_index + 1) {
-        let distance = next.start_row.saturating_sub(top);
-        if distance < count {
-            count = distance;
-        }
+        count = count.min(next.start_row.saturating_sub(top));
     }
     (count > 0).then_some(StickyRows {
-        source_start: section.start_row + (sticky_limit.min(section.prompt_rows) - count),
+        source_start: base_source_start + (desired_count - count),
         screen_start: 0,
         count,
     })
@@ -424,32 +391,13 @@ fn split_styled_lines(source: &StyledText) -> Vec<StyledText> {
     lines
 }
 
-fn push_labeled_rows(
+fn push_styled_rows(
     rows: &mut Vec<VisualRow>,
     source: &StyledText,
-    prefix: &str,
-    prefix_style: CellStyle,
     fill: Option<CellStyle>,
     width: usize,
 ) {
-    let prefix_width = prefix
-        .chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-        .sum::<usize>();
-    for (index, body) in wrap_styled(source, width.saturating_sub(prefix_width).max(1))
-        .into_iter()
-        .enumerate()
-    {
-        let label = if index == 0 {
-            prefix.to_owned()
-        } else {
-            " ".repeat(prefix_width)
-        };
-        let mut row = empty_row();
-        row.push(&label, prefix_style);
-        for span in body.spans {
-            row.push(&span.text, span.style);
-        }
+    for mut row in wrap_styled(source, width) {
         row.fill = fill;
         rows.push(row);
     }
@@ -463,30 +411,16 @@ fn prompt_fill() -> Option<CellStyle> {
     })
 }
 
-fn prompt_prefix_style() -> CellStyle {
-    CellStyle {
-        modifiers: StyleModifiers {
-            bold: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-fn answer_prefix_style() -> CellStyle {
-    CellStyle {
-        foreground: Some(AnsiColor::Green),
-        modifiers: StyleModifiers {
-            bold: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
 fn empty_row() -> VisualRow {
     VisualRow {
         spans: Vec::new(),
         fill: None,
+    }
+}
+
+fn filled_empty_row(fill: Option<CellStyle>) -> VisualRow {
+    VisualRow {
+        spans: Vec::new(),
+        fill,
     }
 }

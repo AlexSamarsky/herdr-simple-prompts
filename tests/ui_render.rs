@@ -19,7 +19,7 @@ fn rendered_buffer(app: &AppState, width: u16, height: u16) -> Buffer {
 }
 
 #[test]
-fn prompt_band_and_answer_label_distinguish_roles_without_color_only() {
+fn prompt_is_a_label_free_gray_block_and_answer_is_unboxed() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
@@ -33,17 +33,18 @@ fn prompt_band_and_answer_label_distinguish_roles_without_color_only() {
     )));
 
     let rendered = render_to_string(&app, &Editor::default(), 50, 14);
-    let buffer = rendered_buffer(&app, 50, 14);
+    let document = HistoryDocument::from_app(&app, 50);
 
-    assert!(rendered.contains("YOU  check dns"));
-    assert!(rendered.contains("ANSWER"));
-    let prompt_row = (0..14)
-        .find(|&row| buffer[(0, row)].symbol() == "Y")
-        .expect("prompt row should start with YOU");
-    let prompt_style = buffer[(0, prompt_row)].style();
-    assert_eq!(prompt_style.fg, Some(Color::White));
-    assert_eq!(prompt_style.bg, Some(Color::DarkGray));
-    assert!(prompt_style.add_modifier.contains(Modifier::BOLD));
+    assert!(!rendered.contains("YOU"));
+    assert!(!rendered.contains("ANSWER"));
+    assert_eq!(document.rows[0].plain_text(), "");
+    assert_eq!(document.rows[1].plain_text(), "check dns");
+    assert_eq!(document.rows[2].plain_text(), "");
+    assert_eq!(document.rows[3].plain_text(), "zone is pending");
+    assert_eq!(document.rows[0].fill, document.rows[1].fill);
+    assert_eq!(document.rows[1].fill, document.rows[2].fill);
+    assert!(document.rows[0].fill.is_some());
+    assert!(document.rows[3].fill.is_none());
 }
 
 #[test]
@@ -213,28 +214,39 @@ fn wrapped_prompt_rows_fill_the_full_band_background() {
     let width = 22;
     let height = 12;
     let buffer = rendered_buffer(&app, width, height);
+    let document = HistoryDocument::from_app(&app, width);
     let first = (0..height)
-        .find(|&row| buffer[(0, row)].symbol() == "Y")
+        .find(|&row| buffer[(0, row)].symbol() == "a")
         .expect("prompt row should be visible");
-    assert_eq!(buffer[(width - 1, first)].style().bg, Some(Color::DarkGray));
-    assert_eq!(
-        buffer[(width - 1, first + 1)].style().bg,
-        Some(Color::DarkGray)
-    );
+    let gray_rows = document
+        .rows
+        .iter()
+        .take_while(|row| row.fill.is_some())
+        .count() as u16;
+    let block_start = first - 1;
+    assert_eq!(buffer[(0, block_start)].symbol(), " ");
+    assert_eq!(buffer[(0, block_start + gray_rows - 1)].symbol(), " ");
+    for row in block_start..block_start + gray_rows {
+        for column in 0..width {
+            assert_eq!(buffer[(column, row)].style().bg, Some(Color::DarkGray));
+        }
+    }
 }
 
 #[test]
-fn wrapped_prompt_continuations_keep_the_prefix_width_indent() {
+fn wrapped_prompt_uses_the_full_width_without_a_role_indent() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
-        "one two three four five six",
+        "abcdefghijklmnopqrst",
         Some(1),
     )));
 
     let document = HistoryDocument::from_app(&app, 14);
-    assert!(document.rows[0].plain_text().starts_with("YOU  "));
-    assert_eq!(&document.rows[1].plain_text()[..5], "     ");
+    assert_eq!(document.rows[0].plain_text(), "");
+    assert_eq!(document.rows[1].plain_text(), "abcdefghijklmn");
+    assert_eq!(document.rows[2].plain_text(), "opqrst");
+    assert_eq!(document.rows[3].plain_text(), "");
 }
 
 #[test]
@@ -269,19 +281,20 @@ fn visual_rows_preserve_unicode_width_and_style_runs() {
 }
 
 #[test]
-fn sticky_overlay_only_pins_after_prompt_leaves_natural_view() {
+fn sticky_prompt_keeps_top_padding_and_two_content_rows_when_space_allows() {
     let sections = [PromptSection {
         start_row: 0,
+        content_start_row: 1,
         prompt_rows: 2,
-        end_row: 8,
+        end_row: 9,
     }];
-    assert_eq!(sticky_overlay(&sections, 0, 4), None);
+    assert_eq!(sticky_overlay(&sections, 1, 5), None);
     assert_eq!(
-        sticky_overlay(&sections, 1, 4),
+        sticky_overlay(&sections, 2, 5),
         Some(StickyRows {
             source_start: 0,
             screen_start: 0,
-            count: 2,
+            count: 3,
         })
     );
 }
@@ -291,27 +304,37 @@ fn later_prompt_pushes_sticky_copy_off_one_row_at_a_time() {
     let sections = [
         PromptSection {
             start_row: 0,
+            content_start_row: 1,
             prompt_rows: 4,
             end_row: 10,
         },
         PromptSection {
             start_row: 10,
+            content_start_row: 11,
             prompt_rows: 1,
             end_row: 14,
         },
     ];
     assert_eq!(
-        sticky_overlay(&sections, 8, 4),
+        sticky_overlay(&sections, 7, 5),
         Some(StickyRows {
             source_start: 0,
+            screen_start: 0,
+            count: 3,
+        })
+    );
+    assert_eq!(
+        sticky_overlay(&sections, 8, 5),
+        Some(StickyRows {
+            source_start: 1,
             screen_start: 0,
             count: 2,
         })
     );
     assert_eq!(
-        sticky_overlay(&sections, 9, 4),
+        sticky_overlay(&sections, 9, 5),
         Some(StickyRows {
-            source_start: 1,
+            source_start: 2,
             screen_start: 0,
             count: 1,
         })
@@ -327,12 +350,13 @@ fn generated_document_rows_above_u16_max_keep_manual_viewport_and_sticky_rows() 
             .collect(),
         prompts: vec![PromptSection {
             start_row: 70_000,
+            content_start_row: 70_001,
             prompt_rows: 2,
             end_row: 70_006,
         }],
     };
-    document.rows[70_000] = VisualRow::plain("prompt first");
-    document.rows[70_001] = VisualRow::plain("prompt second");
+    document.rows[70_001] = VisualRow::plain("prompt first");
+    document.rows[70_002] = VisualRow::plain("prompt second");
 
     assert_eq!(document.viewport(3, 0)[0].plain_text(), "row 70007");
     assert_eq!(
@@ -346,7 +370,7 @@ fn generated_document_rows_above_u16_max_keep_manual_viewport_and_sticky_rows() 
     assert_eq!(
         sticky_overlay(&document.prompts, 70_003, 3),
         Some(StickyRows {
-            source_start: 70_000,
+            source_start: 70_001,
             screen_start: 0,
             count: 2,
         })
@@ -423,18 +447,41 @@ fn wrapper_preserves_many_adjacent_and_gapped_runs_across_wrapped_unicode() {
 }
 
 #[test]
-fn sticky_one_row_prompt_pins_one_row_and_short_viewports_keep_natural_content() {
+fn sticky_short_viewports_prioritize_content_before_top_padding() {
     let sections = [PromptSection {
         start_row: 0,
-        prompt_rows: 1,
-        end_row: 5,
+        content_start_row: 1,
+        prompt_rows: 2,
+        end_row: 6,
     }];
-    assert_eq!(sticky_overlay(&sections, 1, 3).unwrap().count, 1);
-    assert_eq!(sticky_overlay(&sections, 1, 1), None);
-    assert!(sticky_overlay(&sections, 1, 2).unwrap().count < 2);
+    assert_eq!(sticky_overlay(&sections, 2, 1), None);
+    assert_eq!(
+        sticky_overlay(&sections, 2, 2),
+        Some(StickyRows {
+            source_start: 1,
+            screen_start: 0,
+            count: 1,
+        })
+    );
+    assert_eq!(
+        sticky_overlay(&sections, 2, 3),
+        Some(StickyRows {
+            source_start: 1,
+            screen_start: 0,
+            count: 2,
+        })
+    );
+    assert_eq!(
+        sticky_overlay(&sections, 2, 4),
+        Some(StickyRows {
+            source_start: 0,
+            screen_start: 0,
+            count: 3,
+        })
+    );
 
     let document = HistoryDocument {
-        rows: (0..5)
+        rows: (0..6)
             .map(|index| VisualRow::plain(format!("row {index}")))
             .collect(),
         prompts: sections.to_vec(),
