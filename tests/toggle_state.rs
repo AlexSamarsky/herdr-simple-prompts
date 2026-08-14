@@ -305,6 +305,43 @@ fn lifecycle_lock_serializes_registry_mutations() {
 }
 
 #[test]
+fn toggle_waits_for_an_active_lifecycle_transaction() {
+    let directory = test_state_directory("toggle-lifecycle-lock");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    let worker_store = store.clone();
+    let fake = support::ScriptedHerdr::start(vec![]);
+    let socket_path = fake.socket_path().to_owned();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let mut worker = None;
+
+    let result_while_locked = store
+        .with_lifecycle_lock(|| {
+            worker = Some(std::thread::spawn(move || {
+                let client = HerdrClient::connect(socket_path).unwrap();
+                result_tx
+                    .send(
+                        toggle(&client, &worker_store, "w1:p1").map_err(|error| error.to_string()),
+                    )
+                    .unwrap();
+            }));
+            Ok(result_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap())
+        })
+        .unwrap();
+
+    worker.take().unwrap().join().unwrap();
+    assert!(
+        result_while_locked
+            .unwrap_err()
+            .contains("timed out waiting for the lifecycle lock")
+    );
+    assert!(fake.requests().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn corrupt_draft_is_quarantined() {
     let directory = std::env::temp_dir().join(format!(
         "herdr-simple-prompts-corrupt-draft-{}",
@@ -609,7 +646,7 @@ fn replacement_open_failure_keeps_stale_cleanup_and_unrelated_mapping() {
 }
 
 #[test]
-fn failed_registry_write_closes_the_new_overlay() {
+fn invalid_state_root_fails_before_opening_an_overlay() {
     let directory = std::env::temp_dir().join(format!(
         "herdr-simple-prompts-toggle-save-failure-{}",
         std::process::id()
@@ -617,30 +654,43 @@ fn failed_registry_write_closes_the_new_overlay() {
     let _ = std::fs::remove_file(&directory);
     std::fs::write(&directory, b"blocks directory creation").unwrap();
     let store = StateStore::at(&directory);
-    let fake = support::ScriptedHerdr::start(vec![
-        json!({
-            "type":"agent_info",
-            "agent": {
-                "pane_id":"w1:p1",
-                "agent_status":"idle",
-                "foreground_cwd":"/tmp/project",
-                "agent_session":{"kind":"id","agent":"codex","value":"session-1"}
-            }
-        }),
-        json!({"plugin_pane":{"pane":{"pane_id":"w1:p9"}}}),
-        json!({"type":"plugin_pane_closed"}),
-    ]);
+    let fake = support::ScriptedHerdr::start(vec![]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
     assert!(toggle(&client, &store, "w1:p1").is_err());
 
-    let methods = fake
-        .requests()
-        .into_iter()
-        .map(|request| request["method"].as_str().unwrap().to_owned())
-        .collect::<Vec<_>>();
+    assert!(fake.requests().is_empty());
+    std::fs::remove_file(directory).unwrap();
+}
+
+#[test]
+fn failed_registry_write_closes_the_new_overlay() {
+    let directory = test_state_directory("toggle-save-failure-after-open");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    let sabotaged_root = directory.clone();
+    let fake = support::ScriptedHerdr::start_responses_with_before_reply(
+        vec![
+            Ok(agent_info("w1:p1", "session-1")),
+            Ok(json!({"plugin_pane":{"pane":{"pane_id":"w1:p9"}}})),
+            Ok(json!({"type":"plugin_pane_closed"})),
+        ],
+        move |request| {
+            if request["method"] == "plugin.pane.open" {
+                std::fs::remove_dir_all(&sabotaged_root).unwrap();
+                std::fs::write(&sabotaged_root, b"blocks state recreation").unwrap();
+            }
+        },
+    );
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    assert!(toggle(&client, &store, "w1:p1").is_err());
+
     assert_eq!(
-        methods,
+        fake.requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
         ["agent.get", "plugin.pane.open", "plugin.pane.close"]
     );
     std::fs::remove_file(directory).unwrap();

@@ -49,9 +49,12 @@ pub fn run_from_env() -> AppResult<()> {
     let client = HerdrClient::connect(Path::new(&socket))
         .map_err(|error| AppError::new("ui", error.to_string()))?;
     let state_store = StateStore::at(state_root);
-    state_store.validate_saved_namespaces(&client, now_ms())?;
-    let identity = agent_identity(&client, &source_pane)?;
-    state_store.bind_verified_namespace(&source_pane, &identity.session_id, now_ms())?;
+    let identity = state_store.with_lifecycle_lock(|| {
+        state_store.validate_saved_namespaces(&client, now_ms())?;
+        let identity = agent_identity(&client, &source_pane)?;
+        state_store.bind_verified_namespace(&source_pane, &identity.session_id, now_ms())?;
+        Ok(identity)
+    })?;
     let transcript = resolve_transcript(
         identity.kind,
         &identity.session_id,
@@ -121,7 +124,9 @@ pub fn run_from_env() -> AppResult<()> {
                     writer.cancel();
                 }
                 drop(draft_writer.take());
-                if let Err(error) = state_store.remove_pane_state(&source_pane) {
+                if let Err(error) =
+                    state_store.with_lifecycle_lock(|| state_store.remove_pane_state(&source_pane))
+                {
                     app.transcript_error = Some(format!("source cleanup: {error}"));
                 }
                 app.source_pane_closed();

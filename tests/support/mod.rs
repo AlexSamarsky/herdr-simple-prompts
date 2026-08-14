@@ -81,6 +81,13 @@ impl ScriptedHerdr {
     }
 
     pub fn start_responses(results: Vec<Result<Value, Value>>) -> Self {
+        Self::start_responses_with_before_reply(results, |_| {})
+    }
+
+    pub fn start_responses_with_before_reply(
+        results: Vec<Result<Value, Value>>,
+        mut before_reply: impl FnMut(&Value) + Send + 'static,
+    ) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "herdr-simple-prompts-scripted-{}-{}",
             std::process::id(),
@@ -100,6 +107,7 @@ impl ScriptedHerdr {
                     .unwrap();
                 let request: Value = serde_json::from_str(&request).unwrap();
                 worker_requests.lock().unwrap().push(request.clone());
+                before_reply(&request);
                 let response = match result {
                     Ok(result) => {
                         serde_json::json!({"id": request["id"], "result": result})

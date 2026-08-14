@@ -6,6 +6,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn toggle(client: &HerdrClient, state: &StateStore, current_pane: &str) -> AppResult<()> {
+    state.with_lifecycle_lock(|| toggle_unlocked(client, state, current_pane))
+}
+
+fn toggle_unlocked(client: &HerdrClient, state: &StateStore, current_pane: &str) -> AppResult<()> {
     if let Some(source) = state.source_for_overlay(current_pane)? {
         match client.pane_get(current_pane) {
             Ok(_) => {}
@@ -118,8 +122,10 @@ pub fn run_from_env() -> AppResult<()> {
     let client = HerdrClient::connect(Path::new(&socket))
         .map_err(|error| AppError::new("toggle", error.to_string()))?;
     let state = StateStore::at(state_root);
-    state.validate_saved_namespaces(&client, now_ms())?;
-    toggle(&client, &state, &current_pane)
+    state.with_lifecycle_lock(|| {
+        state.validate_saved_namespaces(&client, now_ms())?;
+        toggle_unlocked(&client, &state, &current_pane)
+    })
 }
 
 fn now_ms() -> u64 {
