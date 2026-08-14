@@ -836,7 +836,7 @@ fn native_final_capture_accepts_resized_reviewed_agent_boundaries() {
 }
 
 #[test]
-fn native_final_capture_accepts_only_known_optional_agent_footers() {
+fn native_final_capture_accepts_only_agent_owned_trailing_chrome() {
     let codex = concat!(
         "────────\n",
         "• answer\n",
@@ -867,8 +867,8 @@ fn native_final_capture_accepts_only_known_optional_agent_footers() {
     for (kind, unsafe_footer) in [
         (AgentKind::Codex, "gpt-unreviewed payload"),
         (AgentKind::Codex, "gpt-unreviewed · payload"),
-        (AgentKind::Claude, "ClaudeInjected · /repo"),
-        (AgentKind::Claude, "OpusInjected · /repo"),
+        (AgentKind::Claude, "⏺ an older answer"),
+        (AgentKind::Claude, "hint one\nhint two\nhint three"),
     ] {
         let prefix = match kind {
             AgentKind::Codex => "• answer\n────────\n› Write a prompt\n",
@@ -878,6 +878,42 @@ fn native_final_capture_accepts_only_known_optional_agent_footers() {
         assert!(
             extract_native_final(&ansi, "answer", kind).is_none(),
             "unsafe footer was accepted: {unsafe_footer:?}",
+        );
+    }
+}
+
+/// The chrome of the shipping Claude build, taken from a live pane dump.
+///
+/// It prints no `model · cwd` footer at all — below the composer there is a
+/// closing rule and a mode hint. Requiring a footer made native capture
+/// impossible for every Claude pane, so answers always fell back to the
+/// overlay's own markdown styling.
+#[test]
+fn native_final_capture_reads_the_shipping_claude_chrome() {
+    let ansi = concat!(
+        "────────────────────────────────\n",
+        "⏺ answer\n",
+        "────────────────────────────────\n",
+        "❯\u{a0}\n",
+        "────────────────────────────────\n",
+        "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt · ← for agents",
+    );
+
+    let styled = extract_native_final(ansi, "answer", AgentKind::Claude)
+        .expect("the live Claude chrome must be recognised");
+    assert_eq!(styled.text, "answer");
+}
+
+/// An empty Claude composer is `❯` followed by U+00A0, not by a space.
+#[test]
+fn native_final_capture_accepts_a_non_breaking_composer_separator() {
+    for composer in ["❯\u{a0}", "❯ ", "❯"] {
+        let ansi = format!(
+            "────────────────────────────────\n⏺ answer\n────────────────────────────────\n{composer}\n────────────────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt · ← for agents"
+        );
+        assert!(
+            extract_native_final(&ansi, "answer", AgentKind::Claude).is_some(),
+            "composer {composer:?} was not recognised",
         );
     }
 }
