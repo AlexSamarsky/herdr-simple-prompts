@@ -172,7 +172,15 @@ fn previous_nonempty_line(text: &str, lines: &[LineRange], before: usize) -> Opt
 }
 
 fn is_codex_boundary(line: &str) -> bool {
-    is_pure_separator(line, 8) || is_worked_boundary(line)
+    is_pure_separator(line, 8) || is_worked_boundary(line) || is_working_boundary(line)
+}
+
+fn is_working_boundary(line: &str) -> bool {
+    const PREFIX: &str = "• Working (";
+    const SUFFIX: &str = " • esc to interrupt)";
+    line.strip_prefix(PREFIX)
+        .and_then(|value| value.strip_suffix(SUFFIX))
+        .is_some_and(valid_elapsed_label)
 }
 
 fn is_worked_boundary(line: &str) -> bool {

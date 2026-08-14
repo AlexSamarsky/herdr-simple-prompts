@@ -32,6 +32,12 @@ fn codex_surface(prompt: &str) -> String {
     format!("────────\n• answer\n────────\n› {prompt}\ngpt-5.6-sol xhigh · /repo · weekly 75% left")
 }
 
+fn codex_working_surface(prompt: &str, elapsed: &str, separator: char, suffix: &str) -> String {
+    format!(
+        "• Working ({elapsed} {separator} {suffix})\n› {prompt}\ngpt-5.6-sol xhigh · /repo · weekly 47% left"
+    )
+}
+
 fn claude_surface(prompt: &str) -> String {
     format!("⏺ answer\n────────────────\n❯ {prompt}\n────────────────\nClaude Opus · /repo")
 }
@@ -221,6 +227,61 @@ fn codex_decorated_boundary_requires_a_numeric_elapsed_label() {
         classify_native_composer(AgentKind::Codex, &valid),
         NativeComposerState::Clear
     );
+}
+
+#[test]
+fn codex_working_boundary_accepts_a_dim_placeholder() {
+    let text = codex_working_surface("Write a prompt", "10m 20s", '•', "esc to interrupt");
+    let start_byte = text.find("Write a prompt").unwrap();
+    let surface = StyledText {
+        text,
+        runs: vec![StyleRun {
+            start_byte,
+            end_byte: start_byte + "Write a prompt".len(),
+            foreground: None,
+            background: None,
+            modifiers: StyleModifiers {
+                dim: true,
+                ..StyleModifiers::default()
+            },
+        }],
+    };
+
+    assert_eq!(
+        classify_native_composer(AgentKind::Codex, &surface),
+        NativeComposerState::Clear
+    );
+}
+
+#[test]
+fn codex_working_boundary_still_detects_unsent_text() {
+    let surface = plain(&codex_working_surface(
+        "unsent native text",
+        "2s",
+        '•',
+        "esc to interrupt",
+    ));
+
+    assert_eq!(
+        classify_native_composer(AgentKind::Codex, &surface),
+        NativeComposerState::Occupied
+    );
+}
+
+#[test]
+fn codex_working_boundary_requires_the_exact_native_shape() {
+    for surface in [
+        codex_working_surface("Write a prompt", "eventually", '•', "esc to interrupt"),
+        codex_working_surface("Write a prompt", "2m 3s", '·', "esc to interrupt"),
+        codex_working_surface("Write a prompt", "2m 3s", '•', "press esc"),
+        "• Working (2s • esc to interrupt)\n› Write a prompt".to_owned(),
+    ] {
+        assert_eq!(
+            classify_native_composer(AgentKind::Codex, &plain(&surface)),
+            NativeComposerState::Unknown,
+            "surface must fail closed: {surface:?}"
+        );
+    }
 }
 
 #[test]
