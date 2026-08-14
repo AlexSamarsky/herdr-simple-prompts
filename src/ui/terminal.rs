@@ -5,6 +5,15 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use std::io::{self, Stdout, Write};
+
+/// Alternate scroll: the terminal translates the wheel into arrow keys while an
+/// application holds the alternate screen.
+///
+/// It is not mouse reporting, so native text selection keeps working — the
+/// overlay deliberately never grabs the mouse. Without this the wheel reaches
+/// nobody: the alternate screen has no scrollback for the multiplexer to move.
+const ENABLE_ALTERNATE_SCROLL: &str = "\u{1b}[?1007h";
+const DISABLE_ALTERNATE_SCROLL: &str = "\u{1b}[?1007l";
 use std::sync::Once;
 
 static PANIC_HOOK: Once = Once::new();
@@ -15,7 +24,10 @@ impl TerminalGuard {
     pub fn enter(stdout: &mut Stdout) -> io::Result<Self> {
         install_panic_hook();
         enable_raw_mode()?;
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+        let entered = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide)
+            .and_then(|()| stdout.write_all(ENABLE_ALTERNATE_SCROLL.as_bytes()))
+            .and_then(|()| stdout.flush());
+        if let Err(error) = entered {
             let _ = write_restore_sequences(stdout);
             let _ = disable_raw_mode();
             return Err(error);
@@ -47,6 +59,7 @@ fn restore_terminal() {
 }
 
 fn write_restore_sequences<W: Write>(writer: &mut W) -> io::Result<()> {
+    writer.write_all(DISABLE_ALTERNATE_SCROLL.as_bytes())?;
     execute!(writer, Show, DisableBracketedPaste, LeaveAlternateScreen)
 }
 
@@ -64,6 +77,7 @@ mod tests {
 
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\u{1b}[?25h"));
+        assert!(output.contains("\u{1b}[?1007l"));
         assert!(!output.contains("\u{1b}[?1000l"));
         assert!(output.contains("\u{1b}[?2004l"));
         assert!(output.contains("\u{1b}[?1049l"));
@@ -104,11 +118,13 @@ mod tests {
         let transcript = String::from_utf8_lossy(&transcript);
         assert!(transcript.contains("\u{1b}[?2004h"), "{transcript}");
         assert!(transcript.contains("\u{1b}[?1049h"), "{transcript}");
+        assert!(transcript.contains("\u{1b}[?1007h"), "{transcript}");
         assert!(!transcript.contains("\u{1b}[?1000h"), "{transcript}");
         assert!(!transcript.contains("\u{1b}[?1002h"), "{transcript}");
         assert!(!transcript.contains("\u{1b}[?1003h"), "{transcript}");
         assert!(!transcript.contains("\u{1b}[?1006h"), "{transcript}");
         assert!(transcript.contains("\u{1b}[?2004l"), "{transcript}");
         assert!(transcript.contains("\u{1b}[?1049l"), "{transcript}");
+        assert!(transcript.contains("\u{1b}[?1007l"), "{transcript}");
     }
 }
