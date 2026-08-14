@@ -379,7 +379,7 @@ jq_bin="${JQ_BIN:-jq}"
 rg_bin="${RG_BIN:-rg}"
 sessions_root="${CODEX_SESSIONS_ROOT:-${CODEX_HOME:-$HOME/.codex}/sessions}"
 uuid_pattern='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-footer_pattern="^[[:space:]]*gpt-[A-Za-z0-9._ -]+[[:space:]]*·.*${uuid_pattern}"
+footer_pattern="^[[:space:]]*gpt-[A-Za-z0-9._ -]+[[:space:]]*·[[:space:]]*(~|/)[^·]*[[:space:]]*·.*[[:space:]]·[[:space:]]*${uuid_pattern}([[:space:]]*·[^·]+)*[[:space:]]*$"
 
 for command in "$herdr_bin" "$jq_bin" "$rg_bin"; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -410,8 +410,9 @@ while IFS=$'\t' read -r pane agent; do
     continue
   fi
 
+  footer_line="$(printf '%s\n' "$surface" | sed '/^[[:space:]]*$/d' | tail -n 1)"
   candidates="$(
-    printf '%s\n' "$surface" |
+    printf '%s\n' "$footer_line" |
       "$rg_bin" "$footer_pattern" |
       "$rg_bin" -o "$uuid_pattern" |
       tr '[:upper:]' '[:lower:]' |
