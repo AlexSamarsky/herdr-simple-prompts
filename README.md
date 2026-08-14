@@ -1,13 +1,97 @@
 # Herdr Simple Prompts
 
-Herdr Simple Prompts is a full-pane terminal view for
-[Herdr](https://herdr.dev) that keeps an agent conversation intentionally quiet.
-It shows real user prompts, final answers, the current native `Working`/status
-area, a multiline composer, and a compact status footer. Reasoning, commentary,
-tool calls, tool results, system context, and subagent traffic stay in the
-native agent pane.
+[![CI](https://github.com/AlexSamarsky/herdr_simple_prompts/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexSamarsky/herdr_simple_prompts/actions/workflows/ci.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+![Herdr 0.7.5+](https://img.shields.io/badge/herdr-0.7.5%2B-6f42c1.svg)
+![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
+
+Simple Prompts is a focused full-pane view for [Herdr](https://herdr.dev). It
+keeps real user prompts, final Codex or Claude answers, native `Working` status,
+and a capable composer visible while hiding reasoning, commentary, tool traffic,
+system context, and subagent noise.
+
+![Simple Prompts showing an English Codex conversation](assets/simple-prompts.png)
 
 Version 0.1 supports Codex CLI and Claude Code on macOS and Linux.
+
+## Why Simple Prompts?
+
+Native agent panes are excellent work logs, but their reasoning and tool output
+can make it hard to reread the actual conversation. Simple Prompts gives each
+session a calm transcript without replacing the agent or modifying its native
+history:
+
+- user prompts appear as clear full-width blocks;
+- only final agent answers enter the conversation history;
+- the live native `Working` state and blocked interactions remain available;
+- the editor supports multiline input, images, and compact large-paste tokens;
+- `prefix+m` switches back to the unchanged native pane at any time.
+
+## Quick start
+
+### Requirements
+
+- Herdr 0.7.5 or newer
+- Rust 1.85 or newer with Cargo
+- Codex CLI or Claude Code
+- the corresponding Herdr native integration
+
+Install the plugin directly from its public source repository:
+
+```bash
+herdr plugin install AlexSamarsky/herdr_simple_prompts
+```
+
+Install the integration for the agent you use:
+
+```bash
+herdr integration install codex
+# or
+herdr integration install claude
+```
+
+Add the toggle to `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+m"
+type = "plugin_action"
+command = "herdr.simple-prompts.toggle"
+description = "Toggle Simple Prompts"
+```
+
+Reload Herdr, focus a Codex or Claude pane, and press the Herdr prefix (normally
+`ctrl+b`) followed by `m`:
+
+```bash
+herdr server reload-config
+```
+
+Press `prefix+m` again to return to the unchanged native agent pane.
+
+## Existing sessions
+
+Sessions started before their Herdr integration was installed may not yet have
+native session metadata, so the hotkey cannot target them safely. This
+repository includes an optional, fail-closed recovery helper for already-running
+panes. It requires `jq` and `rg` in addition to Herdr.
+
+Clone the exact source, inspect the helper, then run it:
+
+```bash
+git clone https://github.com/AlexSamarsky/herdr_simple_prompts.git
+cd herdr_simple_prompts
+sed -n '1,240p' scripts/register-existing-sessions.sh
+bash scripts/register-existing-sessions.sh
+```
+
+The helper changes only unregistered Codex panes whose final visible footer has
+one unambiguous session identifier and exactly one matching local transcript.
+It never reads transcript contents or prints identifiers. Already registered
+panes are unchanged. Claude panes without metadata are skipped because their
+session identifier cannot currently be recovered with the same guarantees;
+restart or resume those panes after installing the Claude integration.
 
 ## Source-only trust model
 
@@ -23,27 +107,6 @@ telemetry, analytics, update checker, or runtime network access. Cargo still
 needs access to crates.io during the first local build unless the locked crate
 sources are already cached.
 
-## Requirements
-
-- Herdr 0.7.5 or newer
-- Rust 1.85 or newer with Cargo
-- Codex CLI or Claude Code
-- The corresponding Herdr native integration, so the plugin can identify the
-  exact native session:
-
-```bash
-herdr integration install codex
-herdr integration install claude
-```
-
-## Install from GitHub
-
-After this repository is published, install it with its GitHub owner:
-
-```bash
-herdr plugin install <github-owner>/herdr_simple_prompts
-```
-
 Herdr displays the manifest and build command in its trust preview before
 building. Confirm the plugin is available:
 
@@ -51,33 +114,17 @@ building. Confirm the plugin is available:
 herdr plugin list --plugin herdr.simple-prompts
 ```
 
-## Bind the toggle
-
-Add this command binding to `~/.config/herdr/config.toml`:
-
-```toml
-[[keys.command]]
-key = "prefix+m"
-type = "plugin_action"
-command = "herdr.simple-prompts.toggle"
-description = "Toggle Simple Prompts"
-```
-
-Reload configuration:
-
-```bash
-herdr server reload-config
-```
-
-Focus a running Codex or Claude pane and press the Herdr prefix (normally
-`ctrl+b`) followed by `m`. The same binding closes the view and restores the
-unchanged native agent pane.
+## Exact pane targeting
 
 Simple Prompts opens as a targeted zoomed plugin pane next to the exact source
 pane and immediately fills that source tab. This uses Herdr's explicit
 `target_pane_id` path, so a concurrent focus change cannot move the view to a
 different pane. Closing Simple Prompts removes its temporary split and restores
 the original source layout.
+
+The `zoomed` placement is intentional. Herdr 0.7.5 overlays target the active
+pane and reject `target_pane_id`, which would reintroduce a cross-pane focus
+race. See the official [plugin pane documentation](https://herdr.dev/docs/plugins/#panes).
 
 `prefix+p` is intentionally not used because Herdr assigns it to the previous
 tab by default.
@@ -103,8 +150,12 @@ terminal widget.
   when the viewport has room. The next prompt pushes the old block away one row
   at a time. The sticky copy never replaces or truncates the complete prompt in
   ordinary history.
-- `PageUp`, `PageDown`, and the mouse wheel scroll the conversation. Returning
-  the offset to the bottom resumes live bottom-following.
+- `PageUp` and `PageDown` scroll the conversation. Returning the offset to the
+  bottom resumes live bottom-following.
+
+Drag across text and release the mouse to use Herdr's native selection and
+automatic copy behavior. Simple Prompts deliberately leaves mouse capture off;
+OSC 8 links remain clickable through the terminal or Herdr.
 
 For every final answer, the transcript's `Message.text` remains the
 canonical Markdown value used for identity and replay. Simple Prompts separately
@@ -144,7 +195,6 @@ offsets cannot safely describe the new visible projection.
 | `Ctrl+V` | Attach an image through the native agent |
 | `Esc` | Interrupt the agent while it is working |
 | `PageUp` / `PageDown` | Scroll conversation history |
-| Mouse wheel | Scroll conversation history |
 
 Pastes below 1,000 characters remain directly editable. A paste of 1,000
 characters or more appears as one atomic `[Pasted Content · N chars]` token in
@@ -266,7 +316,7 @@ created.
 ## Local development
 
 ```bash
-git clone https://github.com/<github-owner>/herdr_simple_prompts
+git clone https://github.com/AlexSamarsky/herdr_simple_prompts.git
 cd herdr_simple_prompts
 cargo test --all-targets --all-features
 cargo build --locked --release
@@ -318,8 +368,9 @@ sequence with synthetic, non-sensitive input:
    capture succeeds; the link label opens its HTTP(S) destination in an OSC
    8-capable terminal; and the last line is reachable by scrolling. Also
    confirm a `mailto:` fixture remains an ordinary non-clickable label,
-   `PageUp`/`PageDown` and the mouse wheel scroll, and the first two prompt rows
-   stick and are pushed away by the following prompt.
+   `PageUp`/`PageDown` scroll, native drag-and-release selection automatically
+   copies, and the first two prompt rows stick and are pushed away by the
+   following prompt.
 3. Paste 1,000 or more characters. Confirm the composer and saved prompt show
    only the compact marker while the native agent receives the complete text.
 4. Use a workflow that asks a question or permission. Confirm
@@ -353,11 +404,10 @@ herdr integration install codex
 herdr integration install claude
 ```
 
-A bulk command that filters `herdr agent list` with
-`agent_session == null` is only a one-off repair for panes missing native
-integration metadata. It intentionally prints nothing when every live agent
-already has session metadata, and it is not a general Simple Prompts hotkey
-activation or repair command.
+For already-running Codex panes that predate the integration, use the audited
+recovery helper from [Existing sessions](#existing-sessions). It deliberately
+skips any pane that cannot be identified unambiguously. Restart or resume a
+skipped pane after installing its integration.
 
 ### `prefix+m` does not open Simple Prompts
 
