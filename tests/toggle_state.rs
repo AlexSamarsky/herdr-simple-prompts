@@ -232,6 +232,79 @@ fn state_is_private_and_supports_reverse_overlay_lookup() {
 }
 
 #[test]
+fn lifecycle_lock_serializes_registry_mutations() {
+    const CHILD_STATE_ROOT: &str = "HERDR_SIMPLE_PROMPTS_TEST_LOCK_CHILD";
+    if let Some(root) = std::env::var_os(CHILD_STATE_ROOT) {
+        let directory = std::path::PathBuf::from(root);
+        let store = StateStore::at(&directory);
+        std::fs::write(directory.join("child-ready"), []).unwrap();
+        store
+            .with_lifecycle_lock(|| {
+                std::fs::write(directory.join("child-entered"), [])?;
+                store.save_overlay("w2:p1", "w2:p9")
+            })
+            .unwrap();
+        return;
+    }
+
+    let directory = test_state_directory("lifecycle-lock");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    let observer = store.clone();
+    let ready = directory.join("child-ready");
+    let entered = directory.join("child-entered");
+    let mut child = None;
+
+    store
+        .with_lifecycle_lock(|| {
+            store.save_overlay("w1:p1", "w1:p9")?;
+            child = Some(
+                std::process::Command::new(std::env::current_exe()?)
+                    .arg("lifecycle_lock_serializes_registry_mutations")
+                    .arg("--exact")
+                    .arg("--nocapture")
+                    .env(CHILD_STATE_ROOT, &directory)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()?,
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while !ready.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                ready.exists(),
+                "child process did not reach the lock attempt"
+            );
+            assert!(
+                !entered.exists(),
+                "child process entered while the parent held the lifecycle lock"
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    let output = child.take().unwrap().wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "child test failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(entered.exists());
+
+    assert_eq!(
+        observer.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:p9")
+    );
+    assert_eq!(
+        observer.overlay_for_source("w2:p1").unwrap().as_deref(),
+        Some("w2:p9")
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn corrupt_draft_is_quarantined() {
     let directory = std::env::temp_dir().join(format!(
         "herdr-simple-prompts-corrupt-draft-{}",

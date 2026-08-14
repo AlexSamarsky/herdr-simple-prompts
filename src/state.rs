@@ -8,16 +8,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PANE_NAMESPACE_VERSION: u8 = 1;
 const DRAFT_VERSION: u8 = 3;
 const ORPHAN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const LIFECYCLE_LOCK_WAIT_LIMIT: Duration = Duration::from_secs(2);
+const LIFECYCLE_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+const STATE_LOCK_EX: std::os::raw::c_int = 2;
+const STATE_LOCK_UN: std::os::raw::c_int = 8;
+const STATE_LOCK_NB: std::os::raw::c_int = 4;
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(target_os = "linux")]
@@ -83,6 +89,64 @@ pub struct PaneNamespaceState {
 #[derive(Clone)]
 pub struct StateStore {
     root: PathBuf,
+}
+
+struct LifecycleLock {
+    file: File,
+}
+
+impl LifecycleLock {
+    fn acquire(root: &Path) -> AppResult<Self> {
+        ensure_private_directory(root)?;
+        let path = root.join(".lifecycle.lock");
+        require_exact_parent(&path, root)?;
+        reject_symlink(&path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+
+        let deadline = Instant::now() + LIFECYCLE_LOCK_WAIT_LIMIT;
+        loop {
+            match state_flock(file.as_raw_fd(), STATE_LOCK_EX | STATE_LOCK_NB) {
+                Ok(()) => return Ok(Self { file }),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(AppError::new(
+                            "plugin state",
+                            "timed out waiting for the lifecycle lock",
+                        ));
+                    }
+                    thread::sleep(LIFECYCLE_LOCK_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+impl Drop for LifecycleLock {
+    fn drop(&mut self) {
+        let _ = state_flock(self.file.as_raw_fd(), STATE_LOCK_UN);
+    }
+}
+
+fn state_flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::io::Result<()> {
+    unsafe extern "C" {
+        #[link_name = "flock"]
+        fn os_flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int)
+        -> std::os::raw::c_int;
+    }
+
+    if unsafe { os_flock(fd, operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 struct DraftSnapshot {
@@ -192,6 +256,11 @@ impl StateStore {
         Self {
             root: root.as_ref().to_owned(),
         }
+    }
+
+    pub fn with_lifecycle_lock<T>(&self, operation: impl FnOnce() -> AppResult<T>) -> AppResult<T> {
+        let _lock = LifecycleLock::acquire(&self.root)?;
+        operation()
     }
 
     pub fn save_overlay(&self, source: &str, overlay: &str) -> AppResult<()> {
