@@ -164,10 +164,10 @@ pub fn run_from_env() -> AppResult<()> {
             draft_dirty = false;
         }
         if let Some(error) = draft_writer.as_ref().and_then(DraftWriter::take_error) {
-            app.send_error = Some(error);
+            app.background_error = Some(format!("draft: {error}"));
         }
         if let Some(error) = history_writer.as_ref().and_then(HistoryWriter::take_error) {
-            app.send_error = Some(error);
+            app.background_error = Some(format!("history: {error}"));
         }
 
         render::draw_terminal(&mut terminal, &app, &editor, &mut history_cache)?;
@@ -688,6 +688,34 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].stable_id, "final-9");
         assert_eq!(app.turns.len(), 10);
+    }
+
+    /// Style capture is an enhancement layered on top of an answer that
+    /// already renders. A saturated queue must not surface as an error line.
+    #[test]
+    fn saturated_capture_queue_is_not_reported_as_an_error() {
+        let (runtime, captures) = runtime::capture_test_runtime(2);
+        let mut app = AppState::default();
+        let mut cache = render::HistoryRenderCache::default();
+        let mut events = Vec::new();
+        for index in 0..5 {
+            events.push(FollowerEvent::Conversation(ConversationEvent::User(
+                Message::text(format!("prompt-{index}"), format!("prompt {index}"), None),
+            )));
+            events.push(final_event(index));
+        }
+
+        apply_follower_events_with_policy(
+            &mut app,
+            events,
+            &mut cache,
+            &runtime,
+            CapturePolicy::AllFinals,
+        );
+
+        assert_eq!(captures.try_iter().count(), 2);
+        assert_eq!(app.transcript_error, None);
+        assert_eq!(app.turns.len(), 5);
     }
 
     #[test]

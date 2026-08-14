@@ -160,3 +160,27 @@ fn claude_finalizes_when_done_arrives_before_the_assistant_line() {
 
     assert!(matches!(done.as_slice(), [FollowerEvent::Conversation(_)]));
 }
+
+/// Reported line numbers must match the transcript file. They also seed the
+/// fallback record id, so a drifting counter can hand the same record a
+/// different id after a reload and duplicate the turn.
+#[test]
+fn blank_transcript_lines_still_advance_the_line_counter() {
+    let file = support::GrowingFile::new();
+    let mut follower = TranscriptFollower::new(file.path(), Box::new(CodexAdapter)).unwrap();
+    file.append("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\",\"images\":[]}}\n");
+    file.append("\n");
+    file.append("\n");
+    file.append("not json\n");
+
+    let events = follower.poll().unwrap();
+
+    let line = events
+        .iter()
+        .find_map(|event| match event {
+            FollowerEvent::ParseError { line, .. } => Some(*line),
+            _ => None,
+        })
+        .expect("the malformed record should be reported");
+    assert_eq!(line, 4, "line number must match the transcript file");
+}
