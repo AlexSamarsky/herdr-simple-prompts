@@ -1,4 +1,7 @@
 use crate::agent::AgentKind;
+use crate::native_chrome::{
+    LineRange, is_known_footer, is_pure_separator, line_ranges, line_text, valid_elapsed_label,
+};
 use crate::style::{AnsiColor, StyleRun, StyledText, validate_styled_text};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,38 +47,10 @@ pub fn classify_native_composer(kind: AgentKind, surface: &StyledText) -> Native
     classify_content(surface, &chunks)
 }
 
-#[derive(Clone, Copy)]
-struct LineRange {
-    start: usize,
-    end: usize,
-}
-
-fn line_ranges(text: &str) -> Vec<LineRange> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            lines.push(LineRange { start, end: index });
-            start = index + 1;
-        }
-    }
-    if start < text.len() || text.ends_with('\n') {
-        lines.push(LineRange {
-            start,
-            end: text.len(),
-        });
-    }
-    lines
-}
-
-fn line_text(text: &str, range: LineRange) -> &str {
-    &text[range.start..range.end]
-}
-
 fn codex_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     let footer = lines
         .iter()
-        .rposition(|line| is_known_footer(line_text(text, *line), AgentKind::Codex))?;
+        .rposition(|line| is_known_footer(line_text(text, *line)))?;
     if lines[footer + 1..]
         .iter()
         .any(|line| !line_text(text, *line).trim().is_empty())
@@ -120,7 +95,7 @@ fn codex_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
 fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     let footer = lines
         .iter()
-        .rposition(|line| is_known_footer(line_text(text, *line), AgentKind::Claude))?;
+        .rposition(|line| is_known_footer(line_text(text, *line)))?;
     if lines[footer + 1..]
         .iter()
         .any(|line| !line_text(text, *line).trim().is_empty())
@@ -194,57 +169,6 @@ fn is_worked_boundary(line: &str) -> bool {
     valid_elapsed_label(elapsed)
         && !suffix.is_empty()
         && suffix.chars().all(|character| character == '─')
-}
-
-fn valid_elapsed_label(label: &str) -> bool {
-    let mut parts = label.split_ascii_whitespace().peekable();
-    if parts.peek().is_none() {
-        return false;
-    }
-    parts.all(|part| {
-        let Some(unit) = part.chars().last() else {
-            return false;
-        };
-        matches!(unit, 'h' | 'm' | 's')
-            && part.len() > unit.len_utf8()
-            && part[..part.len() - unit.len_utf8()]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
-    })
-}
-
-fn is_pure_separator(line: &str, minimum_width: usize) -> bool {
-    line.chars().count() >= minimum_width && line.chars().all(|character| character == '─')
-}
-
-fn is_known_footer(line: &str, kind: AgentKind) -> bool {
-    let fields = line
-        .split('·')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .collect::<Vec<_>>();
-    let [model, cwd, ..] = fields.as_slice() else {
-        return false;
-    };
-    let model_is_known = match kind {
-        AgentKind::Codex => model.starts_with("gpt-") && valid_model_label(model),
-        AgentKind::Claude => {
-            model
-                .split_ascii_whitespace()
-                .any(|word| matches!(word, "Claude" | "Opus"))
-                && valid_model_label(model)
-        }
-    };
-    model_is_known && (*cwd == "~" || cwd.starts_with("~/") || cwd.starts_with('/'))
-}
-
-fn valid_model_label(model: &str) -> bool {
-    !model.is_empty()
-        && model.chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || character.is_ascii_whitespace()
-                || matches!(character, '-' | '_' | '.')
-        })
 }
 
 fn classify_content(surface: &StyledText, chunks: &[LineRange]) -> NativeComposerState {

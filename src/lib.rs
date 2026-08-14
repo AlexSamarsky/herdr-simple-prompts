@@ -9,6 +9,7 @@ pub mod history;
 pub mod local_time;
 pub mod markdown;
 pub mod model;
+pub(crate) mod native_chrome;
 pub mod paste;
 pub mod state;
 pub mod status;
