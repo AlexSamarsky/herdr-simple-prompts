@@ -37,6 +37,15 @@ struct RenderEffects {
     cursor: Option<Position>,
 }
 
+fn horizontal_content_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(u16::from(area.width > 0)),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct HistoryRenderCache {
     generation: u64,
@@ -139,7 +148,7 @@ fn render(
         render_blocked(frame, app);
         return RenderEffects::default();
     }
-    let area = frame.area();
+    let area = horizontal_content_area(frame.area());
     let display_text = editor.display_text();
     let working_height = u16::from(app.agent_status == AgentStatus::Working);
     let composer_guard = app
@@ -268,7 +277,7 @@ fn render(
     );
     frame.render_widget(Paragraph::new(footer(app)), areas[4]);
 
-    if app.input_enabled && composer_guard.is_none() {
+    if app.input_enabled && composer_guard.is_none() && areas[3].width > 0 {
         let (cursor_row, cursor_column) =
             editor_cursor(areas[3], cursor_content_row, editor_column, composer_scroll);
         let cursor = Position::new(cursor_column, cursor_row);
@@ -394,7 +403,7 @@ fn hyperlink_cells(buffer: &Buffer, patches: &[HyperlinkPatch]) -> Vec<(u16, u16
 }
 
 fn render_blocked(frame: &mut Frame<'_>, app: &AppState) {
-    let area = frame.area();
+    let area = horizontal_content_area(frame.area());
     let error_height = u16::from(app.interaction_error.is_some());
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -886,8 +895,8 @@ mod tests {
             + osc.len();
         assert!(
             bytes[osc_end..]
-                .windows(b"\x1b[12;1H".len())
-                .any(|window| window == b"\x1b[12;1H"),
+                .windows(b"\x1b[12;2H".len())
+                .any(|window| window == b"\x1b[12;2H"),
             "cursor restoration must be emitted after the OSC close"
         );
     }

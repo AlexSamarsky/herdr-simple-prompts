@@ -24,6 +24,57 @@ fn rendered_buffer(app: &AppState, width: u16, height: u16) -> Buffer {
     render_to_buffer(app, &Editor::default(), width, height)
 }
 
+fn assert_clear_horizontal_gutters(buffer: &Buffer, width: u16, height: u16) {
+    assert!(width >= 2);
+    for y in 0..height {
+        for x in [0, width - 1] {
+            assert_clear_cell(buffer, x, y);
+        }
+    }
+}
+
+fn assert_clear_cell(buffer: &Buffer, x: u16, y: u16) {
+    let cell = &buffer[(x, y)];
+    let style = cell.style();
+    assert_eq!(cell.symbol(), " ", "painted gutter at ({x}, {y})");
+    assert!(
+        matches!(style.fg, None | Some(Color::Reset)),
+        "foreground-styled gutter at ({x}, {y}): {style:?}"
+    );
+    assert!(
+        matches!(style.bg, None | Some(Color::Reset)),
+        "background-styled gutter at ({x}, {y}): {style:?}"
+    );
+    assert!(
+        style.add_modifier.is_empty() && style.sub_modifier.is_empty(),
+        "modifier-styled gutter at ({x}, {y}): {style:?}"
+    );
+}
+
+#[test]
+fn ordinary_view_uses_one_clear_cell_on_both_horizontal_edges() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "abcdefghijklmnop",
+        None,
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1", "answer", None,
+    )));
+    app.agent_status = AgentStatus::Working;
+    app.working_since = Some(Instant::now());
+    let editor = Editor::default();
+
+    let (buffer, cursor) = render_terminal_to_buffer(&app, &editor, 16, 12);
+
+    assert_clear_horizontal_gutters(&buffer, 16, 12);
+    assert_eq!(buffer[(1, 1)].symbol(), "a");
+    assert_eq!(buffer[(14, 1)].symbol(), "n");
+    assert_eq!(buffer[(1, 2)].symbol(), "o");
+    assert_eq!(cursor.0, 1);
+}
+
 #[test]
 fn prompt_is_a_label_free_gray_block_and_answer_is_unboxed() {
     let mut app = AppState::default();
@@ -467,7 +518,7 @@ fn narrow_multiword_answer_scrolls_to_its_real_last_visual_row() {
 }
 
 #[test]
-fn wrapped_prompt_rows_fill_the_full_band_background() {
+fn wrapped_prompt_rows_fill_only_the_content_band_between_gutters() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
@@ -478,9 +529,9 @@ fn wrapped_prompt_rows_fill_the_full_band_background() {
     let width = 22;
     let height = 12;
     let buffer = rendered_buffer(&app, width, height);
-    let document = HistoryDocument::from_app(&app, width);
+    let document = HistoryDocument::from_app(&app, width - 2);
     let first = (0..height)
-        .find(|&row| buffer[(0, row)].symbol() == "a")
+        .find(|&row| buffer[(1, row)].symbol() == "a")
         .expect("prompt row should be visible");
     let gray_rows = document
         .rows
@@ -488,10 +539,12 @@ fn wrapped_prompt_rows_fill_the_full_band_background() {
         .take_while(|row| row.fill.is_some())
         .count() as u16;
     let block_start = first - 1;
-    assert_eq!(buffer[(0, block_start)].symbol(), " ");
-    assert_eq!(buffer[(0, block_start + gray_rows - 1)].symbol(), " ");
+    assert_eq!(buffer[(1, block_start)].symbol(), " ");
+    assert_eq!(buffer[(1, block_start + gray_rows - 1)].symbol(), " ");
     for row in block_start..block_start + gray_rows {
-        for column in 0..width {
+        assert_clear_cell(&buffer, 0, row);
+        assert_clear_cell(&buffer, width - 1, row);
+        for column in 1..width - 1 {
             assert_eq!(
                 buffer[(column, row)].style().bg,
                 Some(Color::Rgb(52, 53, 54)),
@@ -1130,7 +1183,7 @@ fn terminal_draw_emits_balanced_osc_8_and_restores_the_composer_cursor() {
             .count(),
         1
     );
-    assert_eq!(cursor, (0, 11));
+    assert_eq!(cursor, (1, 11));
 }
 
 #[test]
@@ -1213,6 +1266,39 @@ fn blocked_view_replaces_history_working_row_and_composer_with_native_surface() 
 }
 
 #[test]
+fn blocked_view_uses_the_same_clear_horizontal_gutters() {
+    let mut app = AppState {
+        agent_status: AgentStatus::Blocked,
+        ..AppState::default()
+    };
+    app.blocked_surface = Some(Ok(StyledText {
+        text: "Allow command?\n  Yes\n  No".into(),
+        runs: Vec::new(),
+    }));
+
+    let buffer = rendered_buffer(&app, 32, 8);
+
+    assert_clear_horizontal_gutters(&buffer, 32, 8);
+    assert_eq!(buffer[(1, 0)].symbol(), "I");
+    assert_eq!(buffer[(1, 1)].symbol(), "A");
+}
+
+#[test]
+fn sub_three_cell_widths_render_without_painting_or_panicking() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
+
+    for width in 1..3 {
+        let buffer = rendered_buffer(&app, width, 8);
+        for y in 0..8 {
+            for x in 0..width {
+                assert_clear_cell(&buffer, x, y);
+            }
+        }
+    }
+}
+
+#[test]
 fn blocked_snapshot_styles_are_sanitized_and_confined_to_body() {
     let mut app = AppState {
         agent_status: AgentStatus::Blocked,
@@ -1225,8 +1311,8 @@ fn blocked_snapshot_styles_are_sanitized_and_confined_to_body() {
     let buffer = render_to_buffer(&app, &Editor::default(), 72, 8);
     let rendered = render_to_string(&app, &Editor::default(), 72, 8);
     let header = find_cell(&buffer, 72, 8, "I");
-    let danger = (0, 1);
-    let footer = (0, 7);
+    let danger = (1, 1);
+    let footer = (1, 7);
 
     assert!(!rendered.contains("rewrite-title"));
     assert_eq!(buffer[header].style().fg, Some(Color::Yellow));
