@@ -1253,6 +1253,38 @@ fn terminal_draw_emits_balanced_osc_8_and_restores_the_composer_cursor() {
 }
 
 #[test]
+fn terminal_draw_emits_balanced_local_file_osc_8() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text("u1", "show link", None)));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "[TDD](/Users/example/skills/тест/SKILL.md)",
+        None,
+    )));
+
+    let (buffer, _) = render_terminal_to_buffer(&app, &Editor::default(), 90, 14);
+    let expected = concat!(
+        "\u{1b}]8;;file:///Users/example/skills/тест/SKILL.md\u{7}",
+        "/Users/example/skills/тест/SKILL.md",
+        "\u{1b}]8;;\u{7}",
+    );
+    let symbols = buffer
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<Vec<_>>();
+
+    assert!(symbols.contains(&expected));
+    assert_eq!(
+        symbols
+            .iter()
+            .filter(|symbol| symbol.contains("file:///Users/example/skills/тест/SKILL.md"))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn native_presentation_renders_owned_visible_text_not_canonical_markdown() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(

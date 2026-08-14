@@ -58,10 +58,16 @@ pub struct MarkdownProjection {
 }
 
 #[derive(Debug)]
-struct SourceLink<'a> {
-    label_start: usize,
-    label_end: usize,
-    clickable_url: Option<&'a str>,
+struct SourceLink {
+    visible_start: usize,
+    visible_end: usize,
+    clickable_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkTarget<'a> {
+    Http(&'a str),
+    AbsolutePath(&'a str),
 }
 
 #[derive(Debug)]
@@ -183,7 +189,7 @@ fn project_visible(
     text: &str,
     slots: &[StyleSlot],
     visible: &[bool],
-    source_links: &[SourceLink<'_>],
+    source_links: &[SourceLink],
 ) -> MarkdownProjection {
     let mut projected = String::with_capacity(text.len());
     let mut builder = StyleRunBuilder::new();
@@ -200,20 +206,20 @@ fn project_visible(
     let mut hyperlinks = Vec::new();
     let mut non_clickable_links = Vec::new();
     for link in source_links {
-        let Some(start_byte) = projected_offsets[link.label_start] else {
+        let Some(start_byte) = projected_offsets[link.visible_start] else {
             continue;
         };
-        let Some(end_byte) = projected_offsets[link.label_end] else {
+        let Some(end_byte) = projected_offsets[link.visible_end] else {
             continue;
         };
         if start_byte >= end_byte {
             continue;
         }
-        if let Some(url) = link.clickable_url {
+        if let Some(url) = &link.clickable_url {
             hyperlinks.push(HyperlinkRange {
                 start_byte,
                 end_byte,
-                url: url.to_owned(),
+                url: url.clone(),
             });
         } else {
             non_clickable_links.push(NonClickableLinkRange {
@@ -232,13 +238,13 @@ fn project_visible(
     }
 }
 
-fn style_inline<'a>(
-    text: &'a str,
+fn style_inline(
+    text: &str,
     start: usize,
     end: usize,
     slots: &mut [StyleSlot],
     visible: &mut [bool],
-    hyperlinks: &mut Vec<SourceLink<'a>>,
+    hyperlinks: &mut Vec<SourceLink>,
 ) {
     if start >= end {
         return;
@@ -367,12 +373,12 @@ fn style_inline_code(
     }
 }
 
-fn style_links<'a>(
-    text: &'a str,
+fn style_links(
+    text: &str,
     candidates: &[LinkCandidate],
     slots: &mut [StyleSlot],
     visible: &mut [bool],
-    hyperlinks: &mut Vec<SourceLink<'a>>,
+    hyperlinks: &mut Vec<SourceLink>,
 ) {
     for candidate in candidates.iter().filter(|candidate| candidate.valid) {
         apply_style(
@@ -383,24 +389,66 @@ fn style_links<'a>(
             StyleState::default(),
         );
         let url = &text[candidate.url_start..candidate.close];
-        let clickable = is_safe_http_url(url);
-        if clickable {
+        let target = classify_link_target(url);
+        let (visible_start, visible_end, clickable_url) = match target {
+            Some(LinkTarget::Http(url)) => {
+                discard(visible, candidate.open, candidate.label_start);
+                discard(visible, candidate.label_end, candidate.close + 1);
+                (
+                    candidate.label_start,
+                    candidate.label_end,
+                    Some(url.to_owned()),
+                )
+            }
+            Some(LinkTarget::AbsolutePath(path)) => {
+                discard(visible, candidate.open, candidate.url_start);
+                discard(visible, candidate.close, candidate.close + 1);
+                (
+                    candidate.url_start,
+                    candidate.close,
+                    Some(format!("file://{path}")),
+                )
+            }
+            None => {
+                discard(visible, candidate.open, candidate.label_start);
+                discard(visible, candidate.label_end, candidate.close + 1);
+                (candidate.label_start, candidate.label_end, None)
+            }
+        };
+        if clickable_url.is_some() {
             apply_style(
                 slots,
-                candidate.label_start,
-                candidate.label_end,
+                visible_start,
+                visible_end,
                 LINK_LABEL_PRIORITY,
                 link_style(),
             );
         }
         hyperlinks.push(SourceLink {
-            label_start: candidate.label_start,
-            label_end: candidate.label_end,
-            clickable_url: clickable.then_some(url),
+            visible_start,
+            visible_end,
+            clickable_url,
         });
-        discard(visible, candidate.open, candidate.label_start);
-        discard(visible, candidate.label_end, candidate.close + 1);
     }
+}
+
+fn classify_link_target(target: &str) -> Option<LinkTarget<'_>> {
+    if is_safe_http_url(target) {
+        Some(LinkTarget::Http(target))
+    } else if is_safe_absolute_path(target) {
+        Some(LinkTarget::AbsolutePath(target))
+    } else {
+        None
+    }
+}
+
+fn is_safe_absolute_path(path: &str) -> bool {
+    path.len() > 1
+        && path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || matches!(character, '#' | '?')
+        })
 }
 
 pub(crate) fn is_safe_http_url(url: &str) -> bool {
@@ -421,6 +469,20 @@ pub(crate) fn is_safe_http_url(url: &str) -> bool {
         && !url
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
+}
+
+pub(crate) fn is_safe_local_file_url(url: &str) -> bool {
+    let Some(scheme) = url.get(.."file://".len()) else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("file://") {
+        return false;
+    }
+    is_safe_absolute_path(&url["file://".len()..])
+}
+
+pub(crate) fn is_safe_hyperlink_url(url: &str) -> bool {
+    is_safe_http_url(url) || is_safe_local_file_url(url)
 }
 
 fn style_strong(

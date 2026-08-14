@@ -2,7 +2,7 @@ use crate::agent::AgentStatus;
 use crate::app::AppState;
 use crate::composer::ComposerAccess;
 use crate::editor::Editor;
-use crate::markdown::is_safe_http_url;
+use crate::markdown::is_safe_hyperlink_url;
 use crate::style::AnsiColor;
 use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow, wrap_styled};
 use ratatui::Frame;
@@ -337,7 +337,7 @@ fn hyperlink_patches(rows: &[VisualRow], area: Rect) -> Vec<HyperlinkPatch> {
                 .min(area.right().saturating_sub(x));
             if let Some(url) = span.hyperlink.as_deref()
                 && width > 0
-                && is_safe_http_url(url)
+                && is_safe_hyperlink_url(url)
                 && !span.text.chars().any(char::is_control)
             {
                 patches.push(HyperlinkPatch {
@@ -676,11 +676,13 @@ pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryRenderCache, HyperlinkArea, editor_visual_cursor, plain_cells, wrapped_text_height,
+        HistoryRenderCache, HyperlinkArea, editor_visual_cursor, hyperlink_patches, plain_cells,
+        wrapped_text_height,
     };
     use crate::app::{AppEvent, AppState};
     use crate::model::Message;
     use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
+    use crate::ui::visual_rows::{CellStyle, VisualRow, VisualSpan};
     use ratatui::Terminal;
     use ratatui::backend::{CrosstermBackend, TestBackend};
     use ratatui::layout::Rect;
@@ -892,6 +894,34 @@ mod tests {
             continuation_only.is_empty(),
             "a stale area starting inside a wide glyph must not erase it"
         );
+    }
+
+    #[test]
+    fn hyperlink_patches_allow_only_local_file_urls() {
+        let row = |url: &str| VisualRow {
+            spans: vec![VisualSpan {
+                text: "/Users/example/SKILL.md".into(),
+                style: CellStyle::default(),
+                hyperlink: Some(url.into()),
+            }],
+            fill: None,
+        };
+        let area = Rect::new(0, 0, 80, 1);
+
+        let allowed = hyperlink_patches(&[row("file:///Users/example/SKILL.md")], area);
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].url, "file:///Users/example/SKILL.md");
+
+        for rejected in [
+            "file://host/share.md",
+            "file:////host/share.md",
+            "file:///tmp/unsafe\u{1b}]8;;injected",
+        ] {
+            assert!(
+                hyperlink_patches(&[row(rejected)], area).is_empty(),
+                "destination must be rejected: {rejected:?}"
+            );
+        }
     }
 
     #[test]

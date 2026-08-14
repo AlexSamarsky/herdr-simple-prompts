@@ -871,6 +871,40 @@ mod tests {
     }
 
     #[test]
+    fn capture_resolution_projects_local_file_path_before_exact_match() {
+        let canonical = "Basis: [TDD](/Users/example/SKILL.md).";
+        let (presentation, diagnostic) = resolve_capture(
+            AgentKind::Codex,
+            canonical,
+            || {
+                Ok(concat!(
+                    "────────\n",
+                    "• Basis: \u{1b}[34;4m/Users/example/SKILL.md\u{1b}[0m.\n",
+                    "────────\n",
+                    "› Write a prompt",
+                )
+                .into())
+            },
+            1,
+            Duration::ZERO,
+        );
+
+        assert!(diagnostic.is_none());
+        let MessagePresentation::NativeAnsi(styled) = presentation else {
+            panic!("projected local path must keep native ANSI provenance")
+        };
+        assert_eq!(styled.text, "Basis: /Users/example/SKILL.md.");
+        let path_start = styled.text.find("/Users/example/SKILL.md").unwrap();
+        let path_style = styled
+            .runs
+            .iter()
+            .find(|run| run.start_byte <= path_start && path_start < run.end_byte)
+            .expect("captured path style");
+        assert_eq!(path_style.foreground, Some(AnsiColor::Blue));
+        assert!(path_style.modifiers.underline);
+    }
+
+    #[test]
     fn capture_resolution_is_bounded_and_falls_back_after_read_errors() {
         let mut reads = 0;
         let read: &mut dyn FnMut() -> AppResult<String> = &mut || {

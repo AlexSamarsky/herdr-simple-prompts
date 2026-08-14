@@ -353,6 +353,46 @@ fn markdown_hyperlink_projection_accepts_only_safe_http_targets() {
 }
 
 #[test]
+fn markdown_local_file_links_project_absolute_path_and_target() {
+    let text = "Read [TDD](/Users/example/skills/тест/SKILL.md).";
+
+    let projected = style_markdown_with_links(text);
+
+    assert_eq!(
+        projected.styled.text,
+        "Read /Users/example/skills/тест/SKILL.md."
+    );
+    assert_eq!(projected.hyperlinks.len(), 1);
+    let path = "/Users/example/skills/тест/SKILL.md";
+    let start = projected.styled.text.find(path).unwrap();
+    assert_eq!(projected.hyperlinks[0].start_byte, start);
+    assert_eq!(projected.hyperlinks[0].end_byte, start + path.len());
+    assert_eq!(
+        projected.hyperlinks[0].url,
+        "file:///Users/example/skills/тест/SKILL.md"
+    );
+    let style = style_at(&projected.styled, start).unwrap();
+    assert_eq!(style.foreground, Some(AnsiColor::Cyan));
+    assert!(style.modifiers.underline);
+}
+
+#[test]
+fn markdown_local_file_links_reject_unsafe_targets() {
+    let text = concat!(
+        "[relative](relative/file.md)\n",
+        "[network](//host/share.md)\n",
+        "[remote](file://host/share.md)\n",
+        "[space](/tmp/has space.md)\n",
+        "[control](/tmp/unsafe\u{1b}]8;;injected)",
+    );
+
+    let projected = style_markdown_with_links(text);
+
+    assert!(projected.hyperlinks.is_empty());
+    assert!(!projected.styled.text.contains('\u{1b}'));
+}
+
+#[test]
 fn markdown_projection_keeps_malformed_constructs_literal() {
     let text = concat!(
         "unclosed **strong\n",
