@@ -205,7 +205,7 @@ fn answer_timestamp_is_an_undimmed_gray_row_above_the_styled_body() {
         HistoryDocument::from_app_at_offset(&app, 50, FixedOffset::east_opt(3 * 60 * 60).unwrap());
 
     assert_eq!(document.rows.len(), 6);
-    assert_eq!(document.rows[3].plain_text(), "13.08.2026 19:32");
+    assert_eq!(document.rows[3].plain_text(), "  13.08.2026 19:32");
     assert!(document.rows[3].fill.is_none());
     assert_eq!(
         document.rows[3].spans[0].style.foreground,
@@ -218,6 +218,18 @@ fn answer_timestamp_is_an_undimmed_gray_row_above_the_styled_body() {
         Some(AnsiColor::Green)
     );
     assert!(document.rows[4].spans[0].style.modifiers.bold);
+
+    let buffer = rendered_buffer(&app, 50, 14);
+    assert_clear_cell(&buffer, 0, 3);
+    assert_eq!(buffer[(1, 3)].symbol(), " ");
+    assert_eq!(buffer[(2, 3)].symbol(), " ");
+    assert!(
+        buffer[(3, 3)]
+            .symbol()
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+    );
 }
 
 #[test]
@@ -233,7 +245,7 @@ fn answer_timestamp_is_clipped_to_one_visual_row() {
     let document =
         HistoryDocument::from_app_at_offset(&app, 8, FixedOffset::east_opt(3 * 60 * 60).unwrap());
 
-    assert_eq!(document.rows[3].plain_text(), "13.08.20");
+    assert_eq!(document.rows[3].plain_text(), "  13.08.");
     assert_eq!(document.rows[3].cell_width(), 8);
     assert_eq!(document.rows[4].plain_text(), "done");
 }
@@ -298,7 +310,7 @@ fn answer_timestamp_survives_visible_history_hydration() {
     let document =
         HistoryDocument::from_app_at_offset(&app, 50, FixedOffset::east_opt(3 * 60 * 60).unwrap());
 
-    assert_eq!(document.rows[3].plain_text(), "13.08.2026 19:32");
+    assert_eq!(document.rows[3].plain_text(), "  13.08.2026 19:32");
     assert_eq!(document.rows[4].plain_text(), "hydrated answer");
 }
 

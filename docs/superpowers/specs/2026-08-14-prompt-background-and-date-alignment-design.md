@@ -17,8 +17,9 @@ timestamps currently begin at the same horizontal position as prompt text.
 - Keep user-prompt body text at column `1`.
 - Start a present user-prompt timestamp at column `3`, two cells to the right
   of the prompt body text.
-- Do not change answer timestamps, answer text, wrapping width, hyperlink
-  coordinates, scrolling, composer cursor placement, or blocked mode.
+- Start a present answer timestamp at column `3` as well.
+- Do not change answer text, wrapping width, hyperlink coordinates, scrolling,
+  composer cursor placement, or blocked mode.
 - For terminal widths below three cells, preserve the existing safe empty
   rendering behavior.
 
@@ -28,8 +29,8 @@ History continues to render inside the shared one-cell content rectangle so
 text geometry and wrapping remain unchanged. After the visible history rows
 are selected, the renderer paints only the two outer edge cells for rows whose
 `VisualRow::fill` is present, using that row's fill style. The history document
-adds a two-cell prefix only to the user timestamp row; clipping accounts for
-the prefix so the timestamp remains a single visual row.
+adds a two-cell prefix to both user and answer timestamp rows; clipping accounts
+for the prefix so each timestamp remains a single visual row.
 
 This keeps background geometry in the renderer and message content geometry in
 the history-document builder without introducing widget-local padding.
@@ -41,6 +42,7 @@ Regression coverage will prove that:
 1. all user-prompt background rows reach both terminal edges;
 2. prompt text still starts at column `1`;
 3. a user timestamp starts at column `3`;
-4. answer rows and non-prompt UI retain clear edge gutters;
+4. an answer timestamp starts at column `3`, while answer text and non-prompt
+   UI retain clear edge gutters;
 5. sticky and wrapped prompt rows preserve the same full-width background;
 6. widths `1` and `2` remain safe and unpainted.

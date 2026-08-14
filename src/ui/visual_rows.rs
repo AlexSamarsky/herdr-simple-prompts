@@ -149,7 +149,7 @@ impl HistoryDocument {
                         None,
                         width,
                         false,
-                        0,
+                        2,
                     ));
                 }
                 for line in &answer_lines(answer) {

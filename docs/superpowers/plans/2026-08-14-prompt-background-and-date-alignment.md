@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Before coding, invoke a tester-oriented skill. After each meaningful coding batch, invoke superpowers:requesting-code-review. Before any completion claim, invoke superpowers:verification-before-completion. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let user-prompt gray backgrounds touch both terminal edges while keeping prompt text at column 1 and moving user timestamps to column 3.
+**Goal:** Let user-prompt gray backgrounds touch both terminal edges while keeping prompt text at column 1 and moving user and answer timestamps to column 3.
 
-**Architecture:** Keep all text rendering inside the existing one-cell content rectangle. Paint only the two outer history cells for visible rows that carry a prompt fill, and add a two-cell content prefix only when a user timestamp exists.
+**Architecture:** Keep all text rendering inside the existing one-cell content rectangle. Paint only the two outer history cells for visible rows that carry a prompt fill, and add a two-cell content prefix when either timestamp exists.
 
 **Tech Stack:** Rust, Ratatui 0.29, Cargo integration tests.
 
@@ -53,7 +53,7 @@ assert_eq!(buffer[(2, timestamp_row)].symbol(), " ");
 ```
 
 Also assert that both terminal-edge cells on this row carry the prompt gray
-background. Keep answer timestamp expectations unchanged.
+background. Require the answer timestamp to use the same column `3` alignment.
 
 - [ ] **Step 3: Require wrapped and sticky prompt backgrounds to reach both edges**
 
@@ -139,7 +139,7 @@ cargo test --locked --test ui_render sub_three_cell_widths_render_without_painti
 
 Expected: all selected tests pass.
 
-### Task 3: Move only the user timestamp two cells right
+### Task 3: Move both timestamps two cells right
 
 **Files:**
 - Modify: `src/ui/visual_rows.rs:118-153`
@@ -153,9 +153,9 @@ Extend `filled_timestamp_row` with `left_padding: usize`. Clip the timestamp to
 `" ".repeat(left_padding)` to its span text. Missing or invalid timestamps must
 still produce an empty span list.
 
-- [ ] **Step 2: Apply padding only to user timestamps**
+- [ ] **Step 2: Apply padding to user and answer timestamps**
 
-Pass `2` for the prompt timestamp row and `0` for the answer timestamp row.
+Pass `2` for both the prompt timestamp row and the answer timestamp row.
 Keep the row fill and timestamp color unchanged.
 
 - [ ] **Step 3: Run timestamp and document regressions**
@@ -169,7 +169,7 @@ cargo test --locked --test ui_render answer_timestamp_is_an_undimmed_gray_row_ab
 cargo test --locked --test ui_render missing_or_invalid_timestamp_leaves_the_existing_top_gray_row_blank
 ```
 
-Expected: all selected tests pass and answer timestamp geometry is unchanged.
+Expected: all selected tests pass and both timestamp types start at column `3`.
 
 ### Task 4: Review, verify, integrate, and reload
 
