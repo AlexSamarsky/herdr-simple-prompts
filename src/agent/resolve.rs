@@ -1,10 +1,7 @@
 use super::AgentKind;
 use crate::{AppError, AppResult};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-/// Transcript roots are two or three levels deep; the bound stops a runaway
-/// walk from recursing through an unrelated tree that was placed there.
-const MAX_TRANSCRIPT_DEPTH: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct AgentPaths {
@@ -63,7 +60,8 @@ pub fn resolve_transcript(
         )
     })?;
     let mut matches = Vec::new();
-    visit_files(&root, 0, &mut |path| {
+    let mut visited = HashSet::new();
+    visit_files(&root, &root, &mut visited, &mut |path| {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             return;
         };
@@ -110,39 +108,45 @@ fn validate_session_id(session_id: &str) -> AppResult<()> {
     }
 }
 
-/// Walks the transcript root without following symbolic links.
-///
-/// Refusing to follow links keeps the walk inside the configured root without
-/// a `canonicalize` syscall for every entry — the previous shape resolved each
-/// file in `~/.claude/projects`, which is the whole session history, on every
-/// start of the overlay.
-fn visit_files(directory: &Path, depth: usize, visitor: &mut impl FnMut(&Path)) -> AppResult<()> {
-    if depth > MAX_TRANSCRIPT_DEPTH {
-        return Ok(());
-    }
-    let entries = std::fs::read_dir(directory).map_err(|error| {
+fn visit_files(
+    path: &Path,
+    allowed_root: &Path,
+    visited: &mut HashSet<PathBuf>,
+    visitor: &mut impl FnMut(&Path),
+) -> AppResult<()> {
+    let resolved = std::fs::canonicalize(path).map_err(|error| {
         AppError::new(
             "transcript",
-            format!("cannot read {}: {error}", directory.display()),
+            format!("cannot resolve {}: {error}", path.display()),
         )
     })?;
-    for entry in entries {
+    if !resolved.starts_with(allowed_root) {
+        return Ok(());
+    }
+    let metadata = std::fs::metadata(&resolved).map_err(|error| {
+        AppError::new(
+            "transcript",
+            format!("cannot inspect {}: {error}", resolved.display()),
+        )
+    })?;
+    if metadata.is_file() {
+        visitor(&resolved);
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    if !visited.insert(resolved.clone()) {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&resolved).map_err(|error| {
+        AppError::new(
+            "transcript",
+            format!("cannot read {}: {error}", resolved.display()),
+        )
+    })? {
         let entry = entry.map_err(|error| AppError::new("transcript", error.to_string()))?;
-        let file_type = entry.file_type().map_err(|error| {
-            AppError::new(
-                "transcript",
-                format!("cannot inspect {}: {error}", entry.path().display()),
-            )
-        })?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if file_type.is_dir() {
-            visit_files(&path, depth.saturating_add(1), visitor)?;
-        } else if file_type.is_file() {
-            visitor(&path);
-        }
+        visit_files(&entry.path(), allowed_root, visited, visitor)?;
     }
     Ok(())
 }

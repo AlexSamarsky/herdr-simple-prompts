@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnsiColor {
     Black,
@@ -21,20 +21,15 @@ pub enum AnsiColor {
     Rgb(u8, u8, u8),
 }
 
-#[derive(
-    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StyleModifiers {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
     pub underline: bool,
-    /// Persisted history predates this field, so it must stay optional on read.
-    #[serde(default)]
-    pub reverse: bool,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StyleRun {
     pub start_byte: usize,
     pub end_byte: usize,

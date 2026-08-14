@@ -152,7 +152,6 @@ fn sanitizer_supports_named_colors_and_individual_resets() {
             dim: true,
             italic: true,
             underline: true,
-            reverse: false,
         }
     );
     assert_eq!(styled.runs[1].foreground, Some(AnsiColor::BrightRed));
@@ -837,7 +836,7 @@ fn native_final_capture_accepts_resized_reviewed_agent_boundaries() {
 }
 
 #[test]
-fn native_final_capture_accepts_only_structural_agent_footers() {
+fn native_final_capture_accepts_only_known_optional_agent_footers() {
     let codex = concat!(
         "────────\n",
         "• answer\n",
@@ -865,153 +864,20 @@ fn native_final_capture_accepts_only_structural_agent_footers() {
     );
     assert!(extract_native_final(arbitrary, "answer", AgentKind::Codex).is_none());
 
-    for (kind, rejected_footer) in [
+    for (kind, unsafe_footer) in [
         (AgentKind::Codex, "gpt-unreviewed payload"),
         (AgentKind::Codex, "gpt-unreviewed · payload"),
-        (AgentKind::Claude, "Sonnet 4.5 · not-a-path"),
-        (AgentKind::Claude, "❯ decorated · /repo"),
+        (AgentKind::Claude, "ClaudeInjected · /repo"),
+        (AgentKind::Claude, "OpusInjected · /repo"),
     ] {
         let prefix = match kind {
             AgentKind::Codex => "• answer\n────────\n› Write a prompt\n",
             AgentKind::Claude => "⏺ answer\n────────────────────────────────\n❯ \n",
         };
-        let ansi = format!("{prefix}{rejected_footer}");
+        let ansi = format!("{prefix}{unsafe_footer}");
         assert!(
             extract_native_final(&ansi, "answer", kind).is_none(),
-            "footer without agent chrome was accepted: {rejected_footer:?}",
+            "unsafe footer was accepted: {unsafe_footer:?}",
         );
     }
-}
-
-/// A footer is recognised by its shape, not by the model's name. Matching a
-/// name list silently disabled capture for every pane that was not running the
-/// two hard-coded Claude models.
-#[test]
-fn native_final_capture_accepts_footers_for_unlisted_models() {
-    for footer in [
-        "Sonnet 4.5 · /repo",
-        "Haiku 4.5 · ~/projects/demo",
-        "claude-sonnet-4-5 · ~",
-    ] {
-        let ansi = format!(
-            "────────────────────────────────\n⏺ answer\n────────────────────────────────\n❯ \n{footer}"
-        );
-        assert!(
-            extract_native_final(&ansi, "answer", AgentKind::Claude).is_some(),
-            "footer was rejected: {footer:?}",
-        );
-    }
-
-    let ansi = "────────\n• answer\n────────\n› Write a prompt\no4-mini · /repo · 12% left";
-    assert!(extract_native_final(ansi, "answer", AgentKind::Codex).is_some());
-}
-
-/// `_` inside a word is part of the word.
-///
-/// Eating it rewrote `user_id_map` as `useridmap`, and because the answer text
-/// is also matched against the live pane, every answer containing snake_case
-/// silently lost its native colours and clickable links.
-#[test]
-fn markdown_projection_keeps_intraword_underscores() {
-    for text in [
-        "call user_id_map here",
-        "see src/my_module/other_file.rs",
-        "MAX_RETRY_COUNT and __init__",
-        "a_b_c_d_e",
-        "trailing underscore_",
-        "_leading underscore",
-    ] {
-        let styled = style_markdown(text);
-
-        assert_eq!(styled.text, text, "projection rewrote: {text:?}");
-        assert!(styled.runs.is_empty(), "unexpected emphasis in {text:?}");
-    }
-}
-
-#[test]
-fn markdown_projection_still_emphasises_at_word_boundaries() {
-    let styled = style_markdown("plain _emphasised_ and _snake_case_ tail");
-
-    assert_eq!(styled.text, "plain emphasised and snake_case tail");
-    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
-    let first = styled.text.find("emphasised").unwrap();
-    assert!(style_at(&styled, first).unwrap().modifiers.italic);
-    let second = styled.text.find("snake_case").unwrap();
-    assert!(style_at(&styled, second).unwrap().modifiers.italic);
-}
-
-/// Projection may only remove markup. Any word character in the source has to
-/// survive, or the overlay is showing the user something the agent never said.
-///
-/// The corpus deliberately carries no emphasis delimiters, links or fences —
-/// those are markup and are supposed to disappear.
-#[test]
-fn markdown_projection_never_drops_word_characters() {
-    for text in [
-        "call user_id_map here",
-        "see src/my_module/other_file.rs",
-        "run `cargo test --all` first",
-        "**strong** mixed with snake_case_ident",
-        "# Heading with under_score",
-        "1. item_one and item_two",
-        "- bullet_with_underscores and **bold_inside**",
-        "Привет мир_с_подчёркиваниями",
-    ] {
-        let styled = style_markdown(text);
-
-        let projected = styled
-            .text
-            .chars()
-            .filter(|character| character.is_alphanumeric() || *character == '_')
-            .collect::<String>();
-        let source = text
-            .chars()
-            .filter(|character| character.is_alphanumeric() || *character == '_')
-            .collect::<String>();
-        assert_eq!(projected, source, "word characters lost in {text:?}");
-        assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
-    }
-}
-
-/// Tabs were dropped outright, so captured code lost its indentation and
-/// adjacent columns merged into one word.
-#[test]
-fn sanitizer_expands_tabs_to_the_next_tab_stop() {
-    let styled = sanitize_ansi("fn main() {\n\tlet x = 1;\n}");
-    assert_eq!(styled.text, "fn main() {\n        let x = 1;\n}");
-
-    let columns = sanitize_ansi("ab\tc\td");
-    assert_eq!(columns.text, "ab      c       d");
-
-    let wide = sanitize_ansi("界\tx");
-    assert_eq!(wide.text, "界      x");
-}
-
-#[test]
-fn sanitizer_tracks_reverse_video() {
-    let styled = sanitize_ansi("\u{1b}[7mflip\u{1b}[27mback\u{1b}[0m");
-
-    assert_eq!(styled.text, "flipback");
-    assert_eq!(styled.runs.len(), 1);
-    assert!(styled.runs[0].modifiers.reverse);
-    assert_eq!(
-        &styled.text[styled.runs[0].start_byte..styled.runs[0].end_byte],
-        "flip"
-    );
-}
-
-/// `58` carries the same sub-parameters as `38`/`48`. Without skipping them the
-/// colour components were re-read as SGR codes and reset the run.
-#[test]
-fn sanitizer_skips_underline_colour_sub_parameters() {
-    let styled = sanitize_ansi("\u{1b}[4;58;2;255;128;0munder\u{1b}[0m");
-
-    assert_eq!(styled.text, "under");
-    assert_eq!(styled.runs.len(), 1);
-    assert!(styled.runs[0].modifiers.underline);
-    assert!(!styled.runs[0].modifiers.dim);
-
-    let indexed = sanitize_ansi("\u{1b}[1;58;5;196mbold\u{1b}[0m");
-    assert_eq!(indexed.runs.len(), 1);
-    assert!(indexed.runs[0].modifiers.bold);
 }

@@ -38,30 +38,6 @@ fn codex_working_surface(prompt: &str, elapsed: &str, separator: char, suffix: &
     )
 }
 
-/// The composer is gated on recognising the native footer. A name-based rule
-/// made the whole overlay read-only on any pane that was not running Opus.
-#[test]
-fn unlisted_models_keep_the_composer_usable() {
-    for footer in [
-        "Sonnet 4.5 · /repo",
-        "Haiku 4.5 · ~/projects/demo",
-        "claude-sonnet-4-5 · ~",
-    ] {
-        let surface = format!("⏺ answer\n────────────────\n❯ \n────────────────\n{footer}");
-        assert_eq!(
-            classify_native_composer(AgentKind::Claude, &plain(&surface)),
-            NativeComposerState::Clear,
-            "composer was blocked by footer: {footer:?}",
-        );
-    }
-
-    let codex = "────────\n› \ngpt-6-next · /repo · weekly 75% left";
-    assert_eq!(
-        classify_native_composer(AgentKind::Codex, &plain(codex)),
-        NativeComposerState::Clear,
-    );
-}
-
 fn claude_surface(prompt: &str) -> String {
     format!("⏺ answer\n────────────────\n❯ {prompt}\n────────────────\nClaude Opus · /repo")
 }

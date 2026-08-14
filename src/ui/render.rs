@@ -4,7 +4,7 @@ use crate::composer::ComposerAccess;
 use crate::editor::Editor;
 use crate::markdown::is_safe_hyperlink_url;
 use crate::style::AnsiColor;
-use crate::ui::visual_rows::{CellStyle, HistoryDocument, TurnRenderCache, VisualRow, wrap_styled};
+use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow, wrap_styled};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
@@ -52,7 +52,6 @@ pub(crate) struct HistoryRenderCache {
     cached_generation: Option<u64>,
     width: Option<u16>,
     document: HistoryDocument,
-    turns: TurnRenderCache,
     scroll_from_bottom: usize,
     maximum_offset: usize,
     viewport_height: Option<usize>,
@@ -69,7 +68,7 @@ impl HistoryRenderCache {
 
     fn document_for(&mut self, app: &AppState, width: u16) -> &HistoryDocument {
         if self.cached_generation != Some(self.generation) || self.width != Some(width) {
-            self.document = HistoryDocument::from_app_cached(app, width, &mut self.turns);
+            self.document = HistoryDocument::from_app(app, width);
             self.cached_generation = Some(self.generation);
             self.width = Some(width);
             #[cfg(test)]
@@ -511,7 +510,6 @@ fn merge_styles(base: CellStyle, overlay: CellStyle) -> CellStyle {
             dim: base.modifiers.dim || overlay.modifiers.dim,
             italic: base.modifiers.italic || overlay.modifiers.italic,
             underline: base.modifiers.underline || overlay.modifiers.underline,
-            reverse: base.modifiers.reverse || overlay.modifiers.reverse,
         },
     }
 }
@@ -535,9 +533,6 @@ fn ratatui_style(style: CellStyle) -> Style {
     }
     if style.modifiers.underline {
         rendered = rendered.add_modifier(Modifier::UNDERLINED);
-    }
-    if style.modifiers.reverse {
-        rendered = rendered.add_modifier(Modifier::REVERSED);
     }
     rendered
 }

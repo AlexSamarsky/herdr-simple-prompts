@@ -49,9 +49,6 @@ pub struct AppState {
     pub connection_error: Option<String>,
     pub transcript_error: Option<String>,
     pub send_error: Option<String>,
-    /// Draft and history writer failures. They are not send failures and must
-    /// not masquerade as one, or the user retries a prompt that was delivered.
-    pub background_error: Option<String>,
     pub blocked_surface: Option<Result<StyledText, String>>,
     pub interaction_error: Option<String>,
     pub source_pane_closed: bool,
@@ -83,7 +80,6 @@ impl Default for AppState {
             connection_error: None,
             transcript_error: None,
             send_error: None,
-            background_error: None,
             blocked_surface: None,
             interaction_error: None,
             source_pane_closed: false,
@@ -210,25 +206,18 @@ impl AppState {
             }
             AppEvent::TranscriptReplayComplete => self.replay_insert_at = None,
             AppEvent::SendFailed { local_id, reason } => {
-                let target = self.turns.iter().position(|turn| {
+                if let Some(turn) = self.turns.iter_mut().find(|turn| {
                     matches!(
                         &turn.delivery,
                         Delivery::Optimistic { local_id: candidate, .. } if candidate == &local_id
                     )
-                });
-                if let Some(index) = target {
-                    let previous = std::mem::replace(
-                        &mut self.turns[index].delivery,
-                        Delivery::Failed { reason },
-                    );
-                    match previous {
-                        Delivery::Optimistic { recovery, .. } => {
-                            self.draft = recovery;
-                            self.draft_attachments
-                                .clone_from(&self.turns[index].prompt.attachments);
-                        }
-                        other => self.turns[index].delivery = other,
-                    }
+                }) {
+                    let Delivery::Optimistic { recovery, .. } = &turn.delivery else {
+                        unreachable!("matched only optimistic turns");
+                    };
+                    self.draft.clone_from(recovery);
+                    self.draft_attachments.clone_from(&turn.prompt.attachments);
+                    turn.delivery = Delivery::Failed { reason };
                 }
             }
             AppEvent::FinalPresentation {
@@ -313,7 +302,6 @@ impl AppState {
             .as_deref()
             .or(self.connection_error.as_deref())
             .or(self.transcript_error.as_deref())
-            .or(self.background_error.as_deref())
     }
 
     fn reconcile_user(&mut self, mut message: Message) -> usize {
@@ -362,19 +350,17 @@ impl AppState {
                     RECONCILE_WINDOW_MS,
                 )
         }) {
-            let previous = std::mem::replace(&mut self.turns[index].delivery, Delivery::Native);
-            let (complete_text, paste_ranges) = match previous {
-                Delivery::Optimistic {
-                    complete_text,
-                    paste_ranges,
-                    ..
-                } => (complete_text, paste_ranges),
-                other => {
-                    self.turns[index].delivery = other;
-                    return index;
-                }
-            };
             let turn = &mut self.turns[index];
+            let Delivery::Optimistic {
+                complete_text,
+                paste_ranges,
+                ..
+            } = &turn.delivery
+            else {
+                unreachable!("matched only optimistic turns");
+            };
+            let complete_text = complete_text.clone();
+            let paste_ranges = paste_ranges.clone();
             let display_text = if normalized_text(&provider_text) == normalized_text(&complete_text)
             {
                 turn.prompt.text.clone()
@@ -389,6 +375,7 @@ impl AppState {
                 attachments: message.attachments,
                 timestamp_ms: message.timestamp_ms,
             };
+            turn.delivery = Delivery::Native;
 
             if paste_ranges.is_empty() {
                 self.prompt_displays.retain(|existing| {

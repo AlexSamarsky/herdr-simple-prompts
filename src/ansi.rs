@@ -1,11 +1,5 @@
 use crate::agent::AgentKind;
-use crate::native_chrome::{
-    LineRange, is_known_footer, is_pure_separator, line_ranges, line_text, valid_elapsed_label,
-};
 use crate::style::{AnsiColor, StyleRun, StyleRunBuilder, StyleState, StyledText};
-use unicode_width::UnicodeWidthChar;
-
-const TAB_WIDTH: usize = 8;
 
 struct NativeChrome {
     role_prefixes: &'static [&'static str],
@@ -33,31 +27,20 @@ const CLAUDE_CHROME: NativeChrome = NativeChrome {
 
 pub fn sanitize_ansi(input: &str) -> StyledText {
     let bytes = input.as_bytes();
-    let mut cells: Vec<(char, StyleState)> = Vec::with_capacity(input.len());
-    let mut column = 0;
+    let mut text = String::with_capacity(input.len());
+    let mut runs = StyleRunBuilder::new();
     let mut style = StyleState::default();
     let mut index = 0;
 
     while index < bytes.len() {
         match bytes[index] {
-            b'\x1b' => index = consume_escape(bytes, index, &mut style),
+            b'\x1b' => index = consume_escape(bytes, index, &mut style, &mut runs, text.len()),
             b'\r' => {
-                // The source is a rendered pane grid, so a carriage return is a
-                // line terminator here, never an overwrite.
-                cells.push(('\n', style));
-                column = 0;
+                text.push('\n');
                 index += usize::from(bytes.get(index + 1) == Some(&b'\n')) + 1;
             }
             b'\n' => {
-                cells.push(('\n', style));
-                column = 0;
-                index += 1;
-            }
-            b'\t' => {
-                // Dropping tabs collapsed the indentation of captured code.
-                let advance = TAB_WIDTH - (column % TAB_WIDTH);
-                cells.extend(std::iter::repeat_n((' ', style), advance));
-                column += advance;
+                text.push('\n');
                 index += 1;
             }
             0x00..=0x1f | 0x7f => index += 1,
@@ -67,20 +50,13 @@ pub fn sanitize_ansi(input: &str) -> StyledText {
                     .next()
                     .expect("index is always on a UTF-8 boundary");
                 if !character.is_control() {
-                    cells.push((character, style));
-                    column += UnicodeWidthChar::width(character).unwrap_or(0);
+                    text.push(character);
                 }
                 index += character.len_utf8();
             }
         }
     }
 
-    let mut text = String::with_capacity(cells.len());
-    let mut runs = StyleRunBuilder::new();
-    for (character, style) in cells {
-        runs.set_style(style, text.len());
-        text.push(character);
-    }
     StyledText {
         runs: runs.finish(text.len()),
         text,
@@ -150,7 +126,7 @@ pub fn extract_native_final(
         .iter()
         .map(|range| line_text(&sanitized.text, *range))
         .filter(|line| !line.is_empty())
-        .any(|line| !is_known_footer(line))
+        .any(|line| !is_known_footer(line, kind))
     {
         return None;
     }
@@ -241,6 +217,12 @@ fn strict_final_candidates(
     candidates
 }
 
+#[derive(Clone, Copy)]
+struct LineRange {
+    start: usize,
+    end: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ScalarRange {
     character: char,
@@ -309,6 +291,33 @@ fn reflow_candidate_runs(
     Some(slice_mapped_runs(&sanitized.runs, &mappings))
 }
 
+fn line_ranges(text: &str) -> Vec<LineRange> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            ranges.push(LineRange { start, end: index });
+            start = index + 1;
+        }
+    }
+    if start < text.len() || text.ends_with('\n') {
+        ranges.push(LineRange {
+            start,
+            end: text.len(),
+        });
+    }
+    ranges
+}
+
+fn line_text(text: &str, range: LineRange) -> &str {
+    &text[range.start..range.end]
+}
+
+fn is_pure_separator(line: &str, minimum_width: usize) -> bool {
+    let width = line.chars().count();
+    width >= minimum_width && line.chars().all(|character| character == '─')
+}
+
 fn is_trailing_boundary(line: &str, chrome: &NativeChrome) -> bool {
     is_pure_separator(line, chrome.separator_min_width)
         || chrome
@@ -330,8 +339,55 @@ fn matches_decorated_boundary(line: &str, prefix: &str, minimum_width: usize) ->
         && suffix.chars().all(|character| character == '─')
 }
 
+fn valid_elapsed_label(label: &str) -> bool {
+    let mut parts = label.split_ascii_whitespace().peekable();
+    if parts.peek().is_none() {
+        return false;
+    }
+    parts.all(|part| {
+        let Some(unit) = part.chars().last() else {
+            return false;
+        };
+        matches!(unit, 'h' | 'm' | 's')
+            && part.len() > unit.len_utf8()
+            && part[..part.len() - unit.len_utf8()]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+    })
+}
+
 fn starts_with_any(line: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| line.starts_with(prefix))
+}
+
+fn is_known_footer(line: &str, kind: AgentKind) -> bool {
+    let fields = line
+        .split('·')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let [model, cwd, ..] = fields.as_slice() else {
+        return false;
+    };
+    let model_is_known = match kind {
+        AgentKind::Codex => model.starts_with("gpt-") && valid_model_label(model),
+        AgentKind::Claude => {
+            model
+                .split_ascii_whitespace()
+                .any(|word| matches!(word, "Claude" | "Opus"))
+                && valid_model_label(model)
+        }
+    };
+    model_is_known && (*cwd == "~" || cwd.starts_with("~/") || cwd.starts_with('/'))
+}
+
+fn valid_model_label(model: &str) -> bool {
+    !model.is_empty()
+        && model.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character.is_ascii_whitespace()
+                || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn slice_mapped_runs(runs: &[StyleRun], mappings: &[(usize, usize, usize)]) -> Vec<StyleRun> {
@@ -365,12 +421,18 @@ fn slice_mapped_runs(runs: &[StyleRun], mappings: &[(usize, usize, usize)]) -> V
     sliced
 }
 
-fn consume_escape(bytes: &[u8], start: usize, style: &mut StyleState) -> usize {
+fn consume_escape(
+    bytes: &[u8],
+    start: usize,
+    style: &mut StyleState,
+    runs: &mut StyleRunBuilder,
+    output_position: usize,
+) -> usize {
     let Some(&kind) = bytes.get(start + 1) else {
         return bytes.len();
     };
     match kind {
-        b'[' => consume_csi(bytes, start, style),
+        b'[' => consume_csi(bytes, start, style, runs, output_position),
         b']' => consume_osc(bytes, start),
         b'P' | b'_' | b'^' => consume_st_string(bytes, start + 2),
         0x20..=0x2f => consume_escape_with_intermediate(bytes, start + 2),
@@ -379,12 +441,18 @@ fn consume_escape(bytes: &[u8], start: usize, style: &mut StyleState) -> usize {
     }
 }
 
-fn consume_csi(bytes: &[u8], start: usize, style: &mut StyleState) -> usize {
+fn consume_csi(
+    bytes: &[u8],
+    start: usize,
+    style: &mut StyleState,
+    runs: &mut StyleRunBuilder,
+    output_position: usize,
+) -> usize {
     let mut index = start + 2;
     while let Some(&byte) = bytes.get(index) {
         if (0x40..=0x7e).contains(&byte) {
             if byte == b'm' {
-                apply_sgr(&bytes[start + 2..index], style);
+                apply_sgr(&bytes[start + 2..index], style, runs, output_position);
             }
             return index + 1;
         }
@@ -428,7 +496,12 @@ fn consume_escape_with_intermediate(bytes: &[u8], mut index: usize) -> usize {
     }
 }
 
-fn apply_sgr(parameters: &[u8], style: &mut StyleState) {
+fn apply_sgr(
+    parameters: &[u8],
+    style: &mut StyleState,
+    runs: &mut StyleRunBuilder,
+    output_position: usize,
+) {
     let Some(parameters) = parse_parameters(parameters) else {
         return;
     };
@@ -441,14 +514,12 @@ fn apply_sgr(parameters: &[u8], style: &mut StyleState) {
             2 => next.modifiers.dim = true,
             3 => next.modifiers.italic = true,
             4 => next.modifiers.underline = true,
-            7 => next.modifiers.reverse = true,
             22 => {
                 next.modifiers.bold = false;
                 next.modifiers.dim = false;
             }
             23 => next.modifiers.italic = false,
             24 => next.modifiers.underline = false,
-            27 => next.modifiers.reverse = false,
             30..=37 | 90..=97 => next.foreground = named_color(parameters[index]),
             39 => next.foreground = None,
             40..=47 | 100..=107 => next.background = named_color(parameters[index]),
@@ -464,14 +535,11 @@ fn apply_sgr(parameters: &[u8], style: &mut StyleState) {
                 }
                 index += consumed.saturating_sub(1);
             }
-            // Underline colour carries the same sub-parameters as 38/48. Not
-            // skipping them let `58;2;r;g;b` be re-read as ordinary SGR codes,
-            // so an underline colour could silently reset the run's styling.
-            58 => index += color_parameter_len(&parameters[index..]).saturating_sub(1),
             _ => {}
         }
         index += 1;
     }
+    runs.set_style(next, output_position);
     *style = next;
 }
 

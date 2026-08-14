@@ -965,24 +965,3 @@ fn occupied_unknown_and_source_close_are_never_ready() {
     assert_eq!(app.native_composer, NativeComposerState::Unknown);
     assert_eq!(app.composer_access(), ComposerAccess::Unknown);
 }
-
-/// A draft or journal write failure must not be shown as a send failure: the
-/// prompt did reach the agent, and a "send failed" line invites a resend.
-#[test]
-fn background_storage_failures_do_not_masquerade_as_send_failures() {
-    let mut app = AppState {
-        background_error: Some("history: no space left on device".into()),
-        ..AppState::default()
-    };
-
-    assert_eq!(
-        app.visible_error(),
-        Some("history: no space left on device")
-    );
-
-    app.send_error = Some("native composer contains unsent input".into());
-    assert_eq!(
-        app.visible_error(),
-        Some("native composer contains unsent input"),
-    );
-}

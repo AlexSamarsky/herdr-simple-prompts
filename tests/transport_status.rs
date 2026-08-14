@@ -327,21 +327,3 @@ fn interaction_key_is_not_forwarded_after_agent_leaves_blocked() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["method"], "agent.get");
 }
-
-/// The footer model is whatever chip the agent printed; a name list dropped it
-/// from the status bar for every unlisted model.
-#[test]
-fn status_line_keeps_the_model_chip_for_unlisted_models() {
-    for (kind, line, model) in [
-        (AgentKind::Claude, "Sonnet 4.5 · /repo", "Sonnet 4.5"),
-        (AgentKind::Claude, "Haiku 4.5 · ~/demo", "Haiku 4.5"),
-        (
-            AgentKind::Codex,
-            "o4-mini · /repo · weekly 75% left",
-            "o4-mini",
-        ),
-    ] {
-        let status = extract_status(kind, line, PathBuf::from("/repo"));
-        assert_eq!(status.model.as_deref(), Some(model), "line: {line:?}");
-    }
-}

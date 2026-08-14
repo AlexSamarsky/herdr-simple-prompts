@@ -198,24 +198,18 @@ impl UiRuntime {
         self.send_action(ActionCommand::StagedImage { attachment, path })
     }
 
-    /// Queues a final answer for native style capture.
-    ///
-    /// Returns `Ok(false)` when the queue is saturated. Capture only upgrades
-    /// colours on an answer that already renders through the markdown
-    /// fallback, so backpressure is normal and must not reach the user as an
-    /// error line.
-    pub fn capture_final(&self, stable_id: String, canonical_text: String) -> AppResult<bool> {
-        match self.capture_tx.try_send(CaptureCommand {
-            stable_id,
-            canonical_text,
-        }) {
-            Ok(()) => Ok(true),
-            Err(TrySendError::Full(_)) => Ok(false),
-            Err(TrySendError::Disconnected(_)) => Err(AppError::new(
-                "ui",
-                "final style capture worker has stopped",
-            )),
-        }
+    pub fn capture_final(&self, stable_id: String, canonical_text: String) -> AppResult<()> {
+        self.capture_tx
+            .try_send(CaptureCommand {
+                stable_id,
+                canonical_text,
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => AppError::new("ui", "final style capture queue is full"),
+                TrySendError::Disconnected(_) => {
+                    AppError::new("ui", "final style capture worker has stopped")
+                }
+            })
     }
 
     fn send_action(&self, command: ActionCommand) -> AppResult<()> {
@@ -806,22 +800,17 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
         };
-        assert!(
-            runtime
-                .capture_final("answer-1".into(), "first".into())
-                .unwrap()
-        );
-
-        let started = Instant::now();
-        let queued = runtime
-            .capture_final("answer-2".into(), "second".into())
+        runtime
+            .capture_final("answer-1".into(), "first".into())
             .unwrap();
 
+        let started = Instant::now();
+        let error = runtime
+            .capture_final("answer-2".into(), "second".into())
+            .unwrap_err();
+
         assert!(started.elapsed() < Duration::from_millis(20));
-        assert!(
-            !queued,
-            "a saturated queue drops the request, it does not fail"
-        );
+        assert!(error.to_string().contains("capture queue is full"));
         assert_eq!(
             capture_rx.try_recv().unwrap(),
             CaptureCommand {

@@ -92,19 +92,11 @@ impl TranscriptFollower {
         if reloaded {
             events.push(FollowerEvent::Reloaded);
         }
-        // The drained buffer always ends with a newline, so the last split
-        // segment is the empty remainder rather than a line. Every other
-        // segment counts, including a blank one: skipping those made reported
-        // line numbers and fallback record ids drift from the real file.
-        let mut segments = complete.split(|byte| *byte == b'\n').peekable();
-        while let Some(bytes) = segments.next() {
-            if segments.peek().is_none() {
-                break;
-            }
-            self.line_number += 1;
+        for bytes in complete.split(|byte| *byte == b'\n') {
             if bytes.is_empty() {
                 continue;
             }
+            self.line_number += 1;
             let line = match std::str::from_utf8(bytes) {
                 Ok(line) => line,
                 Err(error) => {

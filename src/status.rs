@@ -1,5 +1,4 @@
 use crate::agent::AgentKind;
-use crate::native_chrome::{footer_fields, valid_model_label};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,9 +21,13 @@ pub fn extract_status(kind: AgentKind, visible: &str, known_cwd: PathBuf) -> Sta
     let Some(line) = visible.lines().rev().find(|line| !line.trim().is_empty()) else {
         return status;
     };
-    let fields = footer_fields(line);
+    let fields = line
+        .split('·')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
     match kind {
-        AgentKind::Codex if fields.len() >= 3 && valid_model_label(fields[0]) => {
+        AgentKind::Codex if fields.len() >= 3 && fields[0].starts_with("gpt-") => {
             status.model = Some(fields[0].to_owned());
             let usage_fields = fields
                 .iter()
@@ -36,7 +39,10 @@ pub fn extract_status(kind: AgentKind, visible: &str, known_cwd: PathBuf) -> Sta
                 status.usage = Some(usage_fields.join(" · "));
             }
         }
-        AgentKind::Claude if fields.len() >= 2 && valid_model_label(fields[0]) => {
+        AgentKind::Claude
+            if fields.len() >= 2
+                && (fields[0].contains("Claude") || fields[0].contains("Opus")) =>
+        {
             status.model = Some(fields[0].to_owned());
             if let Some(usage) = fields.iter().copied().find(|field| field.contains('%')) {
                 status.usage = Some(usage.to_owned());
