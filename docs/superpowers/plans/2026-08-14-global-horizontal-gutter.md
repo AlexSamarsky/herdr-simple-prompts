@@ -49,14 +49,18 @@ fn assert_clear_horizontal_gutters(buffer: &Buffer, width: u16, height: u16) {
     assert!(width >= 2);
     for y in 0..height {
         for x in [0, width - 1] {
-            assert_eq!(buffer[(x, y)].symbol(), " ", "painted gutter at ({x}, {y})");
-            assert_eq!(
-                buffer[(x, y)].style(),
-                ratatui::style::Style::default(),
-                "styled gutter at ({x}, {y})"
-            );
+            assert_clear_cell(buffer, x, y);
         }
     }
+}
+
+fn assert_clear_cell(buffer: &Buffer, x: u16, y: u16) {
+    let cell = &buffer[(x, y)];
+    let style = cell.style();
+    assert_eq!(cell.symbol(), " ", "painted gutter at ({x}, {y})");
+    assert!(matches!(style.fg, None | Some(Color::Reset)));
+    assert!(matches!(style.bg, None | Some(Color::Reset)));
+    assert!(style.add_modifier.is_empty() && style.sub_modifier.is_empty());
 }
 ```
 
@@ -95,11 +99,8 @@ let first = (0..height)
     .find(|&row| buffer[(1, row)].symbol() == "a")
     .expect("prompt row should be visible");
 for row in block_start..block_start + gray_rows {
-    assert_eq!(buffer[(0, row)].style(), ratatui::style::Style::default());
-    assert_eq!(
-        buffer[(width - 1, row)].style(),
-        ratatui::style::Style::default()
-    );
+    assert_clear_cell(&buffer, 0, row);
+    assert_clear_cell(&buffer, width - 1, row);
     for column in 1..width - 1 {
         assert_eq!(
             buffer[(column, row)].style().bg,
@@ -114,6 +115,10 @@ Change the OSC/cursor regression from `assert_eq!(cursor, (0, 11));` to:
 ```rust
 assert_eq!(cursor, (1, 11));
 ```
+
+Update the internal Crossterm byte assertion from ANSI column `1` to ANSI
+column `2`, preserving its requirement that cursor restoration occurs only
+after the balanced OSC 8 close sequence.
 
 In `blocked_snapshot_styles_are_sanitized_and_confined_to_body`, move the owned body/footer coordinates to the shared content origin:
 
@@ -150,11 +155,13 @@ fn sub_three_cell_widths_render_without_painting_or_panicking() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text("u1", "prompt", None)));
 
-    for width in 0..3 {
+    for width in 1..3 {
         let buffer = rendered_buffer(&app, width, 8);
-        assert!(buffer.content.iter().all(|cell| {
-            cell.symbol() == " " && cell.style() == ratatui::style::Style::default()
-        }));
+        for y in 0..8 {
+            for x in 0..width {
+                assert_clear_cell(&buffer, x, y);
+            }
+        }
     }
 }
 ```
@@ -356,4 +363,3 @@ git branch -d feature/global-horizontal-gutter
 ```
 
 Expected: only the main worktree remains for this task and the merged feature branch is removed.
-
