@@ -17,9 +17,7 @@ use crate::model::{Attachment, ConversationEvent};
 use crate::state::{DraftWriter, StateStore};
 use crate::status::extract_status;
 use crate::{AppError, AppResult};
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use interaction::{map_interaction_key, map_interaction_paste};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -215,18 +213,6 @@ pub fn run_from_env() -> AppResult<()> {
                 }
             }
             Event::Resize(_, _) => {}
-            Event::Mouse(mouse) => match mouse.kind {
-                _ if app.agent_status == AgentStatus::Blocked => {}
-                MouseEventKind::ScrollUp => {
-                    history_cache.scroll_up(3);
-                    app.scroll_from_bottom = history_cache.scroll_from_bottom();
-                }
-                MouseEventKind::ScrollDown => {
-                    history_cache.scroll_down(3);
-                    app.scroll_from_bottom = history_cache.scroll_from_bottom();
-                }
-                _ => {}
-            },
             _ => {}
         }
     }

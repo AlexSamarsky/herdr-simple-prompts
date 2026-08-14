@@ -1,7 +1,5 @@
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -17,13 +15,7 @@ impl TerminalGuard {
     pub fn enter(stdout: &mut Stdout) -> io::Result<Self> {
         install_panic_hook();
         enable_raw_mode()?;
-        if let Err(error) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture,
-            Hide
-        ) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
             let _ = write_restore_sequences(stdout);
             let _ = disable_raw_mode();
             return Err(error);
@@ -55,13 +47,7 @@ fn restore_terminal() {
 }
 
 fn write_restore_sequences<W: Write>(writer: &mut W) -> io::Result<()> {
-    execute!(
-        writer,
-        Show,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    )
+    execute!(writer, Show, DisableBracketedPaste, LeaveAlternateScreen)
 }
 
 #[cfg(test)]
@@ -78,7 +64,7 @@ mod tests {
 
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\u{1b}[?25h"));
-        assert!(output.contains("\u{1b}[?1000l"));
+        assert!(!output.contains("\u{1b}[?1000l"));
         assert!(output.contains("\u{1b}[?2004l"));
         assert!(output.contains("\u{1b}[?1049l"));
     }
@@ -116,6 +102,12 @@ mod tests {
         let mut transcript = output.stdout;
         transcript.extend(output.stderr);
         let transcript = String::from_utf8_lossy(&transcript);
+        assert!(transcript.contains("\u{1b}[?2004h"), "{transcript}");
+        assert!(transcript.contains("\u{1b}[?1049h"), "{transcript}");
+        assert!(!transcript.contains("\u{1b}[?1000h"), "{transcript}");
+        assert!(!transcript.contains("\u{1b}[?1002h"), "{transcript}");
+        assert!(!transcript.contains("\u{1b}[?1003h"), "{transcript}");
+        assert!(!transcript.contains("\u{1b}[?1006h"), "{transcript}");
         assert!(transcript.contains("\u{1b}[?2004l"), "{transcript}");
         assert!(transcript.contains("\u{1b}[?1049l"), "{transcript}");
     }
