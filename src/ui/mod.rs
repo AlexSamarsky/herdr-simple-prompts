@@ -291,6 +291,16 @@ fn handle_key(
             app.scroll_from_bottom = history_cache.scroll_from_bottom();
             return Ok(DraftChange::None);
         }
+        KeyCode::Up if scrolls_history(app, editor) => {
+            history_cache.scroll_up(1);
+            app.scroll_from_bottom = history_cache.scroll_from_bottom();
+            return Ok(DraftChange::None);
+        }
+        KeyCode::Down if scrolls_history(app, editor) => {
+            history_cache.scroll_down(1);
+            app.scroll_from_bottom = history_cache.scroll_from_bottom();
+            return Ok(DraftChange::None);
+        }
         KeyCode::Esc if app.agent_status == AgentStatus::Working => {
             if let Err(error) = runtime.interrupt() {
                 app.send_error = Some(error.to_string());
@@ -407,6 +417,13 @@ fn handle_key(
 
 fn ordinary_input_allowed(app: &AppState) -> bool {
     app.input_enabled && app.composer_access() == ComposerAccess::Ready
+}
+
+/// The wheel arrives as arrow keys, so the arrows drive the history whenever
+/// the composer has no text for a cursor to move through — and always while the
+/// composer is guarded, so navigation never depends on the native pane.
+fn scrolls_history(app: &AppState, editor: &Editor) -> bool {
+    !ordinary_input_allowed(app) || editor.display_text().is_empty()
 }
 
 fn apply_runtime_event(
@@ -901,6 +918,96 @@ mod tests {
             assert!(app.pending_attachments.is_empty());
             assert!(actions.try_recv().is_err());
         }
+    }
+
+    /// The wheel is delivered as arrow keys (alternate scroll), so the arrows
+    /// have to drive the history when the composer holds nothing to move a
+    /// cursor through — and must not steal the cursor when it does.
+    #[test]
+    fn arrows_scroll_the_history_only_when_the_composer_has_no_text() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::Clear,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+        for index in 0..8 {
+            app.apply(crate::app::AppEvent::NativeUser(Message::text(
+                format!("u{index}"),
+                format!("prompt {index}"),
+                Some(index),
+            )));
+        }
+        cache.viewport_rows(&app, 40, 3);
+
+        let mut press = |key, app: &mut AppState, editor: &mut Editor, cache: &mut _| {
+            handle_key(
+                KeyEvent::new(key, KeyModifiers::NONE),
+                app,
+                editor,
+                &runtime,
+                &mut sequence,
+                cache,
+            )
+            .unwrap()
+        };
+
+        press(KeyCode::Up, &mut app, &mut editor, &mut cache);
+        assert!(
+            app.scroll_from_bottom > 0,
+            "an empty composer must scroll the history"
+        );
+        let scrolled = app.scroll_from_bottom;
+        press(KeyCode::Down, &mut app, &mut editor, &mut cache);
+        assert!(app.scroll_from_bottom < scrolled);
+
+        editor.insert_paste("draft line one\ndraft line two");
+        let offset = app.scroll_from_bottom;
+        let cursor = editor.display_cursor_byte();
+        press(KeyCode::Up, &mut app, &mut editor, &mut cache);
+
+        assert_eq!(
+            app.scroll_from_bottom, offset,
+            "a composer with text must keep the arrows for the cursor"
+        );
+        assert_ne!(editor.display_cursor_byte(), cursor);
+    }
+
+    #[test]
+    fn arrows_scroll_the_history_while_the_composer_is_guarded() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::Occupied,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("preserved draft");
+        let before = editor.snapshot();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+        for index in 0..8 {
+            app.apply(crate::app::AppEvent::NativeUser(Message::text(
+                format!("u{index}"),
+                format!("prompt {index}"),
+                Some(index),
+            )));
+        }
+        cache.viewport_rows(&app, 40, 3);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(app.scroll_from_bottom > 0);
+        assert_eq!(editor.snapshot(), before);
     }
 
     #[test]
