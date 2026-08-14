@@ -51,6 +51,16 @@ fn assert_clear_cell(buffer: &Buffer, x: u16, y: u16) {
     );
 }
 
+fn assert_prompt_fill_cell(buffer: &Buffer, x: u16, y: u16) {
+    let cell = &buffer[(x, y)];
+    assert_eq!(cell.symbol(), " ", "prompt edge is not blank at ({x}, {y})");
+    assert_eq!(
+        cell.style().bg,
+        Some(Color::Rgb(52, 53, 54)),
+        "prompt background does not reach ({x}, {y})"
+    );
+}
+
 #[test]
 fn ordinary_view_uses_one_clear_cell_on_both_horizontal_edges() {
     let mut app = AppState::default();
@@ -68,7 +78,14 @@ fn ordinary_view_uses_one_clear_cell_on_both_horizontal_edges() {
 
     let (buffer, cursor) = render_terminal_to_buffer(&app, &editor, 16, 12);
 
-    assert_clear_horizontal_gutters(&buffer, 16, 12);
+    for y in 0..=3 {
+        assert_prompt_fill_cell(&buffer, 0, y);
+        assert_prompt_fill_cell(&buffer, 15, y);
+    }
+    for y in [4, 7, 8, 11] {
+        assert_clear_cell(&buffer, 0, y);
+        assert_clear_cell(&buffer, 15, y);
+    }
     assert_eq!(buffer[(1, 1)].symbol(), "a");
     assert_eq!(buffer[(14, 1)].symbol(), "n");
     assert_eq!(buffer[(1, 2)].symbol(), "o");
@@ -130,7 +147,7 @@ fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
         HistoryDocument::from_app_at_offset(&app, 50, FixedOffset::east_opt(3 * 60 * 60).unwrap());
 
     assert_eq!(document.rows.len(), 5);
-    assert_eq!(document.rows[0].plain_text(), "13.08.2026 19:32");
+    assert_eq!(document.rows[0].plain_text(), "  13.08.2026 19:32");
     assert_eq!(document.rows[1].plain_text(), "check dns");
     assert_eq!(document.rows[2].plain_text(), "");
     assert_eq!(document.rows[3].plain_text(), "zone is pending");
@@ -141,6 +158,19 @@ fn timestamp_uses_the_existing_top_prompt_row_at_a_fixed_offset() {
         Some(AnsiColor::BrightBlack)
     );
     assert!(!document.rows[0].spans[0].style.modifiers.dim);
+
+    let buffer = rendered_buffer(&app, 50, 14);
+    assert_prompt_fill_cell(&buffer, 0, 0);
+    assert_prompt_fill_cell(&buffer, 49, 0);
+    assert_eq!(buffer[(1, 0)].symbol(), " ");
+    assert_eq!(buffer[(2, 0)].symbol(), " ");
+    assert!(
+        buffer[(3, 0)]
+            .symbol()
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+    );
 }
 
 #[test]
@@ -285,7 +315,7 @@ fn narrow_timestamp_is_clipped_to_one_gray_row_without_growing_the_prompt() {
         HistoryDocument::from_app_at_offset(&app, 8, FixedOffset::east_opt(3 * 60 * 60).unwrap());
 
     assert_eq!(document.rows.len(), 4);
-    assert_eq!(document.rows[0].plain_text(), "13.08.20");
+    assert_eq!(document.rows[0].plain_text(), "  13.08.");
     assert_eq!(document.rows[0].cell_width(), 8);
     assert_eq!(document.rows[1].plain_text(), "prompt");
     assert_eq!(document.rows[2].plain_text(), "");
@@ -330,7 +360,10 @@ fn optimistic_and_hydrated_prompts_render_their_owned_timestamps() {
 
     let optimistic_document = HistoryDocument::from_app_at_offset(&optimistic, 50, offset);
 
-    assert_eq!(optimistic_document.rows[0].plain_text(), "13.08.2026 19:32");
+    assert_eq!(
+        optimistic_document.rows[0].plain_text(),
+        "  13.08.2026 19:32"
+    );
     assert_eq!(
         optimistic_document.rows[1].plain_text(),
         "optimistic prompt"
@@ -354,7 +387,7 @@ fn optimistic_and_hydrated_prompts_render_their_owned_timestamps() {
 
     let hydrated_document = HistoryDocument::from_app_at_offset(&hydrated, 50, offset);
 
-    assert_eq!(hydrated_document.rows[0].plain_text(), "13.08.2026 19:32");
+    assert_eq!(hydrated_document.rows[0].plain_text(), "  13.08.2026 19:32");
     assert_eq!(hydrated_document.rows[1].plain_text(), "hydrated prompt");
 }
 
@@ -518,7 +551,7 @@ fn narrow_multiword_answer_scrolls_to_its_real_last_visual_row() {
 }
 
 #[test]
-fn wrapped_prompt_rows_fill_only_the_content_band_between_gutters() {
+fn wrapped_prompt_rows_fill_the_full_terminal_width() {
     let mut app = AppState::default();
     app.apply(AppEvent::NativeUser(Message::text(
         "u1",
@@ -542,15 +575,36 @@ fn wrapped_prompt_rows_fill_only_the_content_band_between_gutters() {
     assert_eq!(buffer[(1, block_start)].symbol(), " ");
     assert_eq!(buffer[(1, block_start + gray_rows - 1)].symbol(), " ");
     for row in block_start..block_start + gray_rows {
-        assert_clear_cell(&buffer, 0, row);
-        assert_clear_cell(&buffer, width - 1, row);
-        for column in 1..width - 1 {
+        for column in 0..width {
             assert_eq!(
                 buffer[(column, row)].style().bg,
                 Some(Color::Rgb(52, 53, 54)),
             );
         }
     }
+}
+
+#[test]
+fn sticky_prompt_background_reaches_both_terminal_edges() {
+    let mut app = AppState::default();
+    app.apply(AppEvent::NativeUser(Message::text(
+        "u1",
+        "sticky question",
+        None,
+    )));
+    app.apply(AppEvent::NativeFinal(Message::final_text(
+        "a1",
+        "one two three four five six seven eight nine ten eleven twelve thirteen fourteen",
+        None,
+    )));
+
+    let buffer = rendered_buffer(&app, 20, 9);
+
+    for y in 0..=1 {
+        assert_prompt_fill_cell(&buffer, 0, y);
+        assert_prompt_fill_cell(&buffer, 19, y);
+    }
+    assert_eq!(buffer[(1, 1)].symbol(), "s");
 }
 
 #[test]

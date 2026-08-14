@@ -148,7 +148,8 @@ fn render(
         render_blocked(frame, app);
         return RenderEffects::default();
     }
-    let area = horizontal_content_area(frame.area());
+    let frame_area = frame.area();
+    let area = horizontal_content_area(frame_area);
     let display_text = editor.display_text();
     let working_height = u16::from(app.agent_status == AgentStatus::Working);
     let composer_guard = app
@@ -198,6 +199,7 @@ fn render(
             .collect::<Vec<_>>(),
     );
     frame.render_widget(Paragraph::new(history), areas[0]);
+    render_prompt_edge_fills(frame, frame_area, areas[0], &history_rows);
     if let Some(error) = app.visible_error() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -285,6 +287,34 @@ fn render(
         effects.cursor = Some(cursor);
     }
     effects
+}
+
+fn render_prompt_edge_fills(
+    frame: &mut Frame<'_>,
+    frame_area: Rect,
+    history_area: Rect,
+    rows: &[VisualRow],
+) {
+    if frame_area.width < 3 {
+        return;
+    }
+    for (offset, row) in rows.iter().enumerate() {
+        let Some(fill) = row.fill else {
+            continue;
+        };
+        let Ok(offset) = u16::try_from(offset) else {
+            break;
+        };
+        let Some(y) = history_area.y.checked_add(offset) else {
+            break;
+        };
+        if y >= history_area.bottom() {
+            break;
+        }
+        let style = ratatui_style(fill);
+        frame.buffer_mut()[(frame_area.x, y)].set_style(style);
+        frame.buffer_mut()[(frame_area.right() - 1, y)].set_style(style);
+    }
 }
 
 fn hyperlink_patches(rows: &[VisualRow], area: Rect) -> Vec<HyperlinkPatch> {

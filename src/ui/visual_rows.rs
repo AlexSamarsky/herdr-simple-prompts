@@ -129,6 +129,7 @@ impl HistoryDocument {
                 prompt_fill(),
                 width,
                 false,
+                2,
             ));
             let content_start_row = document.rows.len();
             let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
@@ -148,6 +149,7 @@ impl HistoryDocument {
                         None,
                         width,
                         false,
+                        0,
                     ));
                 }
                 for line in &answer_lines(answer) {
@@ -599,13 +601,15 @@ fn filled_timestamp_row(
     fill: Option<CellStyle>,
     width: usize,
     dim: bool,
+    left_padding: usize,
 ) -> VisualRow {
-    let clipped = timestamp.map(|timestamp| clip_to_width(timestamp, width));
+    let clipped =
+        timestamp.map(|timestamp| clip_to_width(timestamp, width.saturating_sub(left_padding)));
     let spans = clipped
         .filter(|timestamp| !timestamp.is_empty())
         .map(|timestamp| {
             vec![VisualSpan {
-                text: timestamp,
+                text: format!("{}{timestamp}", " ".repeat(left_padding)),
                 style: CellStyle {
                     foreground: Some(AnsiColor::BrightBlack),
                     modifiers: StyleModifiers {
