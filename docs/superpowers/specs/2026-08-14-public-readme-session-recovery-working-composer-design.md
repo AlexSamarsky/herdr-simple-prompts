@@ -1,4 +1,4 @@
-# Public README, Existing-Session Recovery, and Working Composer Safety
+# Public README, Session Recovery, Working Composer Safety, and Native Selection
 
 ## Context
 
@@ -16,6 +16,12 @@ composer boundary. It therefore reports `Unknown` even when the native composer
 contains only a dim placeholder, and Simple Prompts replaces its editor with an
 unnecessary safety warning.
 
+Simple Prompts also enables Crossterm mouse capture so it can consume wheel
+events for history scrolling. That capture prevents Herdr from receiving an
+ordinary drag selection. The main Herdr view instead owns selection itself: the
+user drags across text and releasing the mouse automatically copies the selected
+text, without `Cmd+C`. Simple Prompts should behave the same way.
+
 ## Goals
 
 - Present Simple Prompts clearly to a first-time GitHub visitor in English.
@@ -26,6 +32,8 @@ unnecessary safety warning.
   Codex panes whose native session metadata is absent from Herdr.
 - Treat the exact native Codex `Working` row as a valid current-composer
   boundary without weakening protection against unsent native input.
+- Restore Herdr-native drag selection and automatic copy-on-release throughout
+  Simple Prompts.
 - Keep distribution source-only and preserve the existing Herdr 0.7.5+, Rust
   1.85+, macOS/Linux, Codex/Claude, history, and privacy contracts.
 
@@ -38,6 +46,10 @@ unnecessary safety warning.
   directory alone.
 - Do not weaken the fail-closed behavior for malformed or unfamiliar composer
   layouts.
+- Do not implement a second selection model, clipboard writer, or selection-mode
+  hotkey inside the plugin.
+- Do not preserve plugin-owned mouse-wheel scrolling at the cost of native text
+  selection.
 - Do not modify Herdr or the native Codex/Claude applications.
 
 ## Public README design
@@ -69,6 +81,11 @@ The screenshot will be captured from a temporary English demo session. It will
 show only the Simple Prompts pane, with invented prompt/answer content, no local
 usernames, private paths, session identifiers, unrelated panes, or repository
 data. The asset is documentation, not a separately maintained UI mockup.
+
+Interaction documentation will state that history scrolls with `PageUp` and
+`PageDown`, while ordinary mouse drag/release uses Herdr's native selection and
+automatic clipboard behavior. It will no longer claim that Simple Prompts owns
+mouse-wheel scrolling.
 
 ## Existing-session registration helper
 
@@ -130,6 +147,26 @@ existing content classifier still decides:
 Submission retains its second, immediate preflight. No new race or path around
 the native-draft protection is introduced.
 
+## Native text selection
+
+Remove Crossterm mouse capture from the Simple Prompts terminal lifecycle and
+remove the plugin's `MouseEventKind::ScrollUp`/`ScrollDown` handling. Mouse input
+then remains available to Herdr instead of being encoded and consumed by the
+nested TUI.
+
+The resulting behavior matches the ordinary Herdr pane shown by the user:
+
+1. press and drag across visible Simple Prompts text;
+2. release the mouse button;
+3. Herdr keeps the visible selection and automatically copies it.
+
+Simple Prompts does not send an OSC 52 clipboard command and does not require
+`Cmd+C`. `PageUp` and `PageDown` remain the explicit in-app history controls.
+Keyboard editing, bracketed paste, image paste, blocked interactions, and
+alternate-screen restoration remain unchanged. HTTP(S) links remain OSC 8
+terminal hyperlinks; their click behavior is owned by the terminal/Herdr and
+does not require plugin mouse-event handling.
+
 ## Testing
 
 ### Composer regression
@@ -141,6 +178,16 @@ the native-draft protection is introduced.
   truncated surfaces classify `Unknown`.
 - Existing completed-turn, Claude, attachment-count, and submission-preflight
   tests remain green.
+
+### Native selection
+
+- Terminal entry does not emit any mouse-capture enable sequence.
+- Terminal restoration still restores cursor, bracketed paste, raw mode, and
+  alternate-screen state without relying on mouse capture.
+- The UI event loop no longer consumes mouse drag or wheel events.
+- `PageUp` and `PageDown` still change the history offset.
+- OSC 8 hyperlink rendering, ordinary input, large paste, image paste, and
+  blocked keyboard forwarding remain green.
 
 ### Helper
 
@@ -178,7 +225,9 @@ bash -n scripts/register-existing-sessions.sh
 Run the helper tests, verify the README links locally, rebuild/reload the
 source-linked plugin, and smoke-test a live Codex turn. During Working, the
 Simple Prompts editor must remain visible for an empty native composer; real
-native input must still replace it with the occupied warning.
+native input must still replace it with the occupied warning. Dragging across
+Simple Prompts history and releasing the mouse must select and automatically
+copy through Herdr exactly as in an ordinary Herdr pane.
 
 ## Privacy and security
 
