@@ -308,3 +308,34 @@ fn access_policy_requires_an_exact_attachment_count() {
         ComposerAccess::Unknown
     );
 }
+
+/// A live Claude pane: an empty composer separated by U+00A0, a closing rule
+/// and a mode hint instead of a footer.
+///
+/// Requiring `"❯ "` and a `model · cwd` footer left the overlay unable to
+/// verify the composer, so it refused every keystroke.
+#[test]
+fn shipping_claude_chrome_classifies_the_composer() {
+    let surface = |composer: &str| {
+        plain(&format!(
+            "⏺ answer\n\n✳ Topsy-turvying… (35s · ↓ 1.9k tokens)\n────────────────────────────────\n{composer}\n────────────────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt · ← for agents"
+        ))
+    };
+
+    assert_eq!(
+        classify_native_composer(AgentKind::Claude, &surface("❯\u{a0}")),
+        NativeComposerState::Clear,
+    );
+    assert_eq!(
+        classify_native_composer(AgentKind::Claude, &surface("❯")),
+        NativeComposerState::Clear,
+    );
+    assert_eq!(
+        classify_native_composer(AgentKind::Claude, &surface("❯ unsent text")),
+        NativeComposerState::Occupied,
+    );
+    assert_eq!(
+        classify_native_composer(AgentKind::Claude, &surface("❯ [Image #1]")),
+        NativeComposerState::OwnedAttachments(1),
+    );
+}

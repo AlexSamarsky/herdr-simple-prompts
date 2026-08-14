@@ -1,4 +1,5 @@
 use crate::agent::AgentKind;
+use crate::composer::composer_content_start;
 use crate::style::{AnsiColor, StyleRun, StyleRunBuilder, StyleState, StyledText};
 
 struct NativeChrome {
@@ -6,7 +7,18 @@ struct NativeChrome {
     continuation_prefixes: &'static [&'static str],
     separator_min_width: usize,
     trailing_boundary_prefixes: &'static [&'static str],
-    composer_prefixes: &'static [&'static str],
+    composer_marker: char,
+    trailing: TrailingRule,
+}
+
+/// What an agent prints below its composer.
+#[derive(Clone, Copy)]
+enum TrailingRule {
+    /// Codex ends with a real `model · cwd` footer.
+    KnownFooter,
+    /// Claude ends with a closing rule and a mode hint; neither names the
+    /// model or the working directory, so the shape is all there is to check.
+    ChromeLines(usize),
 }
 
 const CODEX_CHROME: NativeChrome = NativeChrome {
@@ -14,7 +26,8 @@ const CODEX_CHROME: NativeChrome = NativeChrome {
     continuation_prefixes: &["  "],
     separator_min_width: 8,
     trailing_boundary_prefixes: &["─ Worked for "],
-    composer_prefixes: &["› "],
+    composer_marker: '›',
+    trailing: TrailingRule::KnownFooter,
 };
 
 const CLAUDE_CHROME: NativeChrome = NativeChrome {
@@ -22,7 +35,8 @@ const CLAUDE_CHROME: NativeChrome = NativeChrome {
     continuation_prefixes: &["  "],
     separator_min_width: 16,
     trailing_boundary_prefixes: &[],
-    composer_prefixes: &["❯ "],
+    composer_marker: '❯',
+    trailing: TrailingRule::ChromeLines(2),
 };
 
 pub fn sanitize_ansi(input: &str) -> StyledText {
@@ -90,10 +104,7 @@ pub fn extract_native_final(
                 }
                 let composer = trailing + 1;
                 if composer >= lines.len()
-                    || !starts_with_any(
-                        line_text(&sanitized.text, lines[composer]),
-                        chrome.composer_prefixes,
-                    )
+                    || !is_composer_line(line_text(&sanitized.text, lines[composer]), chrome)
                 {
                     continue;
                 }
@@ -122,12 +133,7 @@ pub fn extract_native_final(
         _ => None,
     }?;
     let (runs, composer) = candidate;
-    if lines[composer + 1..]
-        .iter()
-        .map(|range| line_text(&sanitized.text, *range))
-        .filter(|line| !line.is_empty())
-        .any(|line| !is_known_footer(line, kind))
-    {
+    if !trailing_is_chrome(&sanitized.text, &lines[composer + 1..], chrome, kind) {
         return None;
     }
     Some(StyledText {
@@ -158,10 +164,7 @@ fn strict_final_candidates(
         let composer = trailing + 1;
         if composer >= lines.len()
             || !is_trailing_boundary(line_text(&sanitized.text, lines[trailing]), chrome)
-            || !starts_with_any(
-                line_text(&sanitized.text, lines[composer]),
-                chrome.composer_prefixes,
-            )
+            || !is_composer_line(line_text(&sanitized.text, lines[composer]), chrome)
         {
             continue;
         }
@@ -358,6 +361,34 @@ fn valid_elapsed_label(label: &str) -> bool {
 
 fn starts_with_any(line: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| line.starts_with(prefix))
+}
+
+fn is_composer_line(line: &str, chrome: &NativeChrome) -> bool {
+    composer_content_start(line, chrome.composer_marker).is_some()
+}
+
+/// Everything below the composer has to be the agent's own chrome, so that a
+/// matched region is really the tail of the pane and not an older answer.
+fn trailing_is_chrome(
+    text: &str,
+    ranges: &[LineRange],
+    chrome: &NativeChrome,
+    kind: AgentKind,
+) -> bool {
+    let trailing = ranges
+        .iter()
+        .map(|range| line_text(text, *range))
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    match chrome.trailing {
+        TrailingRule::KnownFooter => trailing.iter().all(|line| is_known_footer(line, kind)),
+        TrailingRule::ChromeLines(limit) => {
+            trailing.len() <= limit
+                && !trailing
+                    .iter()
+                    .any(|line| starts_with_any(line, chrome.role_prefixes))
+        }
+    }
 }
 
 fn is_known_footer(line: &str, kind: AgentKind) -> bool {

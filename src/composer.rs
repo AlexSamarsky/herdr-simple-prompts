@@ -83,21 +83,16 @@ fn codex_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
         return None;
     }
 
-    let prompt = (0..footer).rev().find(|index| {
-        let line = line_text(text, lines[*index]);
-        line == "›" || line.starts_with("› ")
-    })?;
+    let prompt = (0..footer)
+        .rev()
+        .find(|index| composer_content_start(line_text(text, lines[*index]), '›').is_some())?;
     let boundary = previous_nonempty_line(text, lines, prompt)?;
     if !is_codex_boundary(line_text(text, lines[boundary])) {
         return None;
     }
 
     let first = lines[prompt];
-    let prefix_len = if line_text(text, first).starts_with("› ") {
-        "› ".len()
-    } else {
-        "›".len()
-    };
+    let prefix_len = composer_content_start(line_text(text, first), '›')?;
     let mut chunks = vec![LineRange {
         start: first.start + prefix_len,
         end: first.end,
@@ -117,33 +112,32 @@ fn codex_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     Some(chunks)
 }
 
+/// Claude's composer is bounded by a pair of rule lines, and what follows them
+/// is a mode hint rather than a footer.
+///
+/// The shipping build prints `⏵⏵ accept edits on (shift+tab to cycle) · esc to
+/// interrupt · ← for agents` there — no model, no working directory. Demanding
+/// a `model · cwd` footer therefore never matched, and the overlay treated
+/// every Claude pane as unverifiable. Anchor on the rules instead and require
+/// only that nothing agent-authored follows them.
 fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
-    let footer = lines
+    let close = lines
         .iter()
-        .rposition(|line| is_known_footer(line_text(text, *line), AgentKind::Claude))?;
-    if lines[footer + 1..]
+        .rposition(|line| is_pure_separator(line_text(text, *line), 16))?;
+    let trailing = lines[close + 1..]
         .iter()
-        .any(|line| !line_text(text, *line).trim().is_empty())
-    {
+        .map(|line| line_text(text, *line))
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if trailing.len() > 1 || trailing.iter().any(|line| line.starts_with("⏺ ")) {
         return None;
     }
 
-    let close = (0..footer)
-        .rev()
-        .find(|index| is_pure_separator(line_text(text, lines[*index]), 16))?;
-    if lines[close + 1..footer]
-        .iter()
-        .any(|line| !line_text(text, *line).trim().is_empty())
-    {
-        return None;
-    }
     let open = (0..close)
         .rev()
         .find(|index| is_pure_separator(line_text(text, lines[*index]), 16))?;
-    let prompt = (open + 1..close).find(|index| {
-        let line = line_text(text, lines[*index]);
-        line == "❯" || line.starts_with("❯ ")
-    })?;
+    let prompt = (open + 1..close)
+        .find(|index| composer_content_start(line_text(text, lines[*index]), '❯').is_some())?;
     if lines[open + 1..prompt]
         .iter()
         .any(|line| !line_text(text, *line).trim().is_empty())
@@ -152,17 +146,30 @@ fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     }
 
     let first = lines[prompt];
-    let prefix_len = if line_text(text, first).starts_with("❯ ") {
-        "❯ ".len()
-    } else {
-        "❯".len()
-    };
+    let prefix_len = composer_content_start(line_text(text, first), '❯')?;
     let mut chunks = vec![LineRange {
         start: first.start + prefix_len,
         end: first.end,
     }];
     chunks.extend(lines[prompt + 1..close].iter().copied());
     Some(chunks)
+}
+
+/// Byte offset of the composer content on a prompt line, if the line is one.
+///
+/// The separator after the marker is any whitespace, not just an ASCII space:
+/// Claude renders an *empty* composer as `❯` followed by U+00A0, so requiring
+/// `"❯ "` failed to recognise the composer in the one state where typing into
+/// it is safe, and the overlay refused all input.
+pub(crate) fn composer_content_start(line: &str, marker: char) -> Option<usize> {
+    let rest = line.strip_prefix(marker)?;
+    match rest.chars().next() {
+        None => Some(marker.len_utf8()),
+        Some(character) if character.is_whitespace() => {
+            Some(marker.len_utf8() + character.len_utf8())
+        }
+        Some(_) => None,
+    }
 }
 
 fn previous_nonempty_line(text: &str, lines: &[LineRange], before: usize) -> Option<usize> {
