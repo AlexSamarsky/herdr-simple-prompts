@@ -1,6 +1,6 @@
 use crate::agent::{AgentKind, agent_identity, agent_identity_from_response};
 use crate::ansi::sanitize_ansi;
-use crate::composer::{NativeComposerState, classify_native_composer};
+use crate::composer::{ComposerAccess, classify_native_composer};
 use crate::editor::EditorSnapshot;
 use crate::herdr::HerdrClient;
 use crate::state::StateStore;
@@ -63,15 +63,14 @@ fn hand_back_overlay_draft(
     source: &str,
 ) -> AppResult<()> {
     let draft = state.load_draft(source)?;
-    // Attachments live in the native composer already; a draft carrying them
-    // has nothing to move and must not be cleared.
-    if draft.text.trim().is_empty() || !draft.attachments.is_empty() {
+    if draft.text.trim().is_empty() {
         return Ok(());
     }
     let identity = agent_identity(client, source)?;
     let handed_back = hand_back_draft(
         identity.kind,
         &draft.text,
+        draft.attachments.len(),
         || {
             client
                 .pane_read_visible_ansi(source, 200)
@@ -110,6 +109,7 @@ fn hand_back_overlay_draft(
 fn hand_back_draft(
     kind: AgentKind,
     text: &str,
+    attachments: usize,
     mut read: impl FnMut() -> AppResult<String>,
     mut send: impl FnMut(&str) -> AppResult<()>,
     attempts: usize,
@@ -118,21 +118,29 @@ fn hand_back_draft(
     if text.trim().is_empty() {
         return Ok(false);
     }
-    if !native_composer_is_clear(kind, &read()?) {
+    if !native_composer_is_ready(kind, &read()?, attachments) {
         return Ok(false);
     }
     send(text)?;
     for _ in 0..attempts {
         thread::sleep(retry_delay);
-        if !native_composer_is_clear(kind, &read()?) {
+        if !native_composer_is_ready(kind, &read()?, attachments) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn native_composer_is_clear(kind: AgentKind, ansi: &str) -> bool {
-    classify_native_composer(kind, &sanitize_ansi(ansi)) == NativeComposerState::Clear
+/// Whether the native composer holds exactly what the overlay knows about.
+///
+/// Not "empty": images pasted through the overlay live in the native composer
+/// from the moment they are pasted, so a draft carrying them would otherwise
+/// never be handed back — the image arrived and the text was left behind.
+/// The same predicate then confirms the text landed, because a composer that
+/// gains text no longer matches the attachments alone.
+fn native_composer_is_ready(kind: AgentKind, ansi: &str, attachments: usize) -> bool {
+    classify_native_composer(kind, &sanitize_ansi(ansi)).access(attachments)
+        == ComposerAccess::Ready
 }
 
 fn recover_stale_overlay_context(
@@ -256,6 +264,7 @@ mod tests {
         let handed_back = hand_back_draft(
             AgentKind::Codex,
             "half written prompt",
+            0,
             || {
                 Ok(if sent.get() == 0 {
                     EMPTY.to_owned()
@@ -284,6 +293,7 @@ mod tests {
         let handed_back = hand_back_draft(
             AgentKind::Codex,
             "half written prompt",
+            0,
             || Ok(OCCUPIED.to_owned()),
             |_| {
                 sent.set(sent.get() + 1);
@@ -298,12 +308,81 @@ mod tests {
         assert_eq!(sent.get(), 0, "nothing may be written over live input");
     }
 
+    /// An image pasted through the overlay is already sitting in the native
+    /// composer, so a draft carrying one must still hand its text back — it used
+    /// to be skipped, and the image arrived without a word of the prompt.
+    #[test]
+    fn a_draft_with_an_image_still_hands_its_text_back() {
+        const WITH_IMAGE: &str = concat!(
+            "• answer\n",
+            "────────\n",
+            "› [Image #1]\n",
+            "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+        );
+        const WITH_IMAGE_AND_TEXT: &str = concat!(
+            "• answer\n",
+            "────────\n",
+            "› [Image #1] describe it\n",
+            "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+        );
+        let sent = Cell::new(0);
+
+        let handed_back = hand_back_draft(
+            AgentKind::Codex,
+            "describe it",
+            1,
+            || {
+                Ok(if sent.get() == 0 {
+                    WITH_IMAGE.to_owned()
+                } else {
+                    WITH_IMAGE_AND_TEXT.to_owned()
+                })
+            },
+            |_| {
+                sent.set(sent.get() + 1);
+                Ok(())
+            },
+            8,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert!(handed_back);
+        assert_eq!(sent.get(), 1);
+    }
+
+    /// More images than the overlay knows about means someone else has been
+    /// typing there, and writing over it would splice two prompts.
+    #[test]
+    fn a_composer_holding_unknown_attachments_is_left_alone() {
+        const TWO_IMAGES: &str = concat!(
+            "• answer\n",
+            "────────\n",
+            "› [Image #1] [Image #2]\n",
+            "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+        );
+
+        let handed_back = hand_back_draft(
+            AgentKind::Codex,
+            "describe it",
+            1,
+            || Ok(TWO_IMAGES.to_owned()),
+            |_| panic!("an unexpected composer must not be written to"),
+            8,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert!(!handed_back);
+    }
+
     #[test]
     fn an_empty_draft_touches_nothing() {
         let reads = Cell::new(0);
         let handed_back = hand_back_draft(
             AgentKind::Codex,
             "   \n  ",
+            0,
             || {
                 reads.set(reads.get() + 1);
                 Ok(EMPTY.to_owned())
@@ -324,6 +403,7 @@ mod tests {
         let handed_back = hand_back_draft(
             AgentKind::Codex,
             "half written prompt",
+            0,
             || Ok(EMPTY.to_owned()),
             |_| Ok(()),
             3,
