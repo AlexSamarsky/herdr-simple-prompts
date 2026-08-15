@@ -83,25 +83,30 @@ impl AgentTransport {
         Ok(())
     }
 
-    pub fn forward_local_image_paste(&self) -> AppResult<()> {
-        let before = self.image_marker_count()?;
+    /// Pastes the clipboard image and reports the number the pane gave it.
+    ///
+    /// The number has to come from the pane: it is a session counter there, and
+    /// a guess made here would name a different picture — which is the one the
+    /// overlay would later ask to have removed.
+    pub fn forward_local_image_paste(&self) -> AppResult<usize> {
+        let before = self.image_markers()?;
         self.validate_source()?;
         self.client
             .agent_send_keys(&self.original.pane_id, &["ctrl+v"])
             .map_err(|error| AppError::new("image paste", error.to_string()))?;
-        self.verify_new_image_marker(before)
+        self.verify_new_image_marker(&before)
     }
 
-    pub fn forward_staged_image(&self, path: &Path) -> AppResult<()> {
+    pub fn forward_staged_image(&self, path: &Path) -> AppResult<usize> {
         let text = path
             .to_str()
             .ok_or_else(|| AppError::new("image paste", "image path is not UTF-8"))?;
-        let before = self.image_marker_count()?;
+        let before = self.image_markers()?;
         self.validate_source()?;
         self.client
             .pane_send_input(&self.original.pane_id, Some(text), &[])
             .map_err(|error| AppError::new("image paste", error.to_string()))?;
-        self.verify_new_image_marker(before)
+        self.verify_new_image_marker(&before)
     }
 
     pub fn remove_attachment(&self, marker: usize) -> AppResult<()> {
@@ -182,15 +187,22 @@ impl AgentTransport {
         Ok(current)
     }
 
-    fn image_marker_count(&self) -> AppResult<usize> {
-        Ok(self.visible_source(20)?.matches("[Image #").count())
+    fn image_markers(&self) -> AppResult<Vec<usize>> {
+        Ok(composer_markers(
+            self.original.kind,
+            &self.read_visible_source_ansi(200)?,
+        ))
     }
 
-    fn verify_new_image_marker(&self, before: usize) -> AppResult<()> {
+    fn verify_new_image_marker(&self, before: &[usize]) -> AppResult<usize> {
         let deadline = Instant::now() + Duration::from_millis(800);
         while Instant::now() < deadline {
-            if self.image_marker_count()? > before {
-                return Ok(());
+            if let Some(marker) = self
+                .image_markers()?
+                .into_iter()
+                .find(|marker| !before.contains(marker))
+            {
+                return Ok(marker);
             }
             thread::sleep(Duration::from_millis(40));
         }
