@@ -1481,7 +1481,6 @@ fn the_image_under_the_cursor_is_drawn_highlighted() {
     app.draft_attachments = editor.attachments();
     app.native_composer = NativeComposerState::OwnedAttachments(1);
     editor.move_document_start();
-    editor.move_right();
 
     let buffer = render_to_buffer(&app, &editor, 60, 20);
     let highlighted = buffer
