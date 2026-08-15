@@ -223,6 +223,27 @@ impl Editor {
         }
     }
 
+    /// Where the image under the cursor sits in the shown text.
+    ///
+    /// The native composer highlights a marker whole when the cursor reaches
+    /// it, which is how it says the thing is one piece rather than a run of
+    /// characters. The overlay says the same.
+    pub fn attachment_span_at_cursor(&self) -> Option<(usize, usize)> {
+        let index = self.cursor.checked_sub(1)?;
+        if !matches!(self.atoms.get(index), Some(EditorAtom::Attachment(_))) {
+            return None;
+        }
+        let start = *self.display_boundaries.get(index)?;
+        let end = *self.display_boundaries.get(index + 1)?;
+        // The marker is drawn with a trailing space; the highlight is not.
+        let end = if self.display_text[start..end].ends_with(' ') {
+            end - 1
+        } else {
+            end
+        };
+        (start < end).then_some((start, end))
+    }
+
     /// Drops an image once the pane has confirmed it is gone there too.
     pub fn remove_attachment(&mut self, id: &str) {
         let Some(index) = self.atoms.iter().position(

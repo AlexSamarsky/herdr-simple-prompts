@@ -573,3 +573,40 @@ fn an_image_keeps_the_number_the_pane_gave_it() {
 
     assert_eq!(editor.display_text(), "[Image #3] [Image #4] ");
 }
+
+/// The native composer highlights a marker whole when the cursor reaches it,
+/// which is how it shows the thing is one piece rather than a run of characters.
+#[test]
+fn the_image_under_the_cursor_is_reported_whole() {
+    let mut editor = Editor::default();
+    editor.insert_paste("before ");
+    editor.insert_attachment(Attachment {
+        id: "image-1".into(),
+        display: "Image #12".into(),
+        native_path: None,
+    });
+    editor.insert_paste("after");
+
+    assert_eq!(
+        editor.attachment_span_at_cursor(),
+        None,
+        "the cursor is in the text"
+    );
+
+    editor.move_word_left();
+    let (start, end) = editor
+        .attachment_span_at_cursor()
+        .expect("the cursor stands on the image");
+    assert_eq!(
+        &editor.display_text()[start..end],
+        "[Image #12]",
+        "the trailing space is not part of the marker"
+    );
+
+    editor.move_left();
+    assert_eq!(
+        editor.attachment_span_at_cursor(),
+        None,
+        "and past it again"
+    );
+}

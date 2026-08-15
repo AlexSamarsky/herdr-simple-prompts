@@ -263,7 +263,14 @@ fn render(
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        composer_lines.extend(wrapped_draft.rows.iter().map(|row| Line::from(row.clone())));
+        let highlight = editor.attachment_span_at_cursor();
+        composer_lines.extend(
+            wrapped_draft
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| composer_row(row, wrapped_draft.row_start(index), highlight)),
+        );
     }
     let composer = Text::from(composer_lines);
     let (editor_row, editor_column) = wrapped_draft.cell_of(editor.display_cursor_byte());
@@ -288,6 +295,34 @@ fn render(
         effects.cursor = Some(cursor);
     }
     effects
+}
+
+/// Draws one row of the draft, marking the image the cursor is sitting on.
+///
+/// The native composer highlights a marker whole rather than letting the cursor
+/// walk through it, which is how it shows the thing is one piece. The overlay
+/// treats it as one piece too, so it says so the same way.
+fn composer_row(row: &str, row_start: usize, highlight: Option<(usize, usize)>) -> Line<'static> {
+    let Some((start, end)) = highlight else {
+        return Line::from(row.to_owned());
+    };
+    let row_end = row_start + row.len();
+    let (start, end) = (start.max(row_start), end.min(row_end));
+    if start >= end {
+        return Line::from(row.to_owned());
+    }
+    let (start, end) = (start - row_start, end - row_start);
+    if !row.is_char_boundary(start) || !row.is_char_boundary(end) {
+        return Line::from(row.to_owned());
+    }
+    Line::from(vec![
+        Span::raw(row[..start].to_owned()),
+        Span::styled(
+            row[start..end].to_owned(),
+            Style::default().add_modifier(Modifier::REVERSED),
+        ),
+        Span::raw(row[end..].to_owned()),
+    ])
 }
 
 fn render_prompt_edge_fills(

@@ -381,6 +381,11 @@ impl WrappedText {
         (row, column)
     }
 
+    /// Where a row begins in the text it was wrapped from.
+    pub fn row_start(&self, row: usize) -> usize {
+        self.row_starts.get(row).copied().unwrap_or(0)
+    }
+
     pub fn height(&self) -> usize {
         self.rows.len().max(1)
     }

@@ -1465,3 +1465,31 @@ fn leaving_blocked_view_restores_the_exact_ordinary_content() {
     assert!(blocked.contains("Choose one"));
     assert_eq!(restored, ordinary);
 }
+
+/// The marker under the cursor is drawn as one piece, the way the native
+/// composer draws it.
+#[test]
+fn the_image_under_the_cursor_is_drawn_highlighted() {
+    let mut app = AppState::default();
+    let mut editor = Editor::default();
+    editor.insert_attachment(Attachment {
+        id: "image-1".into(),
+        display: "Image #12".into(),
+        native_path: None,
+    });
+    editor.insert_paste("describe it");
+    app.draft_attachments = editor.attachments();
+    app.native_composer = NativeComposerState::OwnedAttachments(1);
+    editor.move_document_start();
+    editor.move_right();
+
+    let buffer = render_to_buffer(&app, &editor, 60, 20);
+    let highlighted = buffer
+        .content
+        .iter()
+        .filter(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+        .map(|cell| cell.symbol().to_owned())
+        .collect::<String>();
+
+    assert_eq!(highlighted, "[Image #12]");
+}
