@@ -295,26 +295,33 @@ pub fn remove_native_attachment(
         };
         let placed = probed.contains(&needle);
         press(&["backspace"], None)?;
-        let Some(cleaned) = settle(kind, &mut read, |content| {
-            content.matches(CURSOR_PROBE).count() == baseline_probes
-        })?
-        else {
-            return Err(walk_failure(
-                "the probe would not come back out of the composer",
-                kind,
-                &mut read,
-            ));
-        };
         if placed {
+            // The place is found, so both keys go at once and the outcome is
+            // checked instead of the step between: the image gone and the probe
+            // with it. Waiting on the probe first was one more thing that could
+            // time out with everything actually going to plan.
             press(&["backspace"], None)?;
             let gone = format!("[Image #{marker}]");
-            if settle(kind, &mut read, |content| !content.contains(&gone))?.is_none() {
+            let finished = settle(kind, &mut read, |content| {
+                !content.contains(&gone) && content.matches(CURSOR_PROBE).count() == baseline_probes
+            })?;
+            if finished.is_none() {
                 return Err(walk_failure("the image did not go", kind, &mut read));
             }
             let left = composer_markers(kind, &read()?);
             return Ok(!left.contains(&marker) && left.len() + 1 == markers.len());
         }
-        let _ = cleaned;
+        if settle(kind, &mut read, |content| {
+            content.matches(CURSOR_PROBE).count() == baseline_probes
+        })?
+        .is_none()
+        {
+            return Err(walk_failure(
+                &format!("the probe would not come back out (wanted {baseline_probes} of them)"),
+                kind,
+                &mut read,
+            ));
+        }
         press(&["left"], None)?;
     }
     Err(walk_failure(
