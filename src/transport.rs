@@ -1,8 +1,6 @@
 use crate::agent::{AgentIdentity, AgentKind, AgentStatus, agent_identity};
 use crate::ansi::sanitize_ansi;
-use crate::composer::{
-    ComposerAccess, classify_native_composer, native_composer_content, native_composer_parts,
-};
+use crate::composer::{ComposerAccess, classify_native_composer, native_composer_content};
 use crate::herdr::HerdrClient;
 use crate::{AppError, AppResult};
 use std::path::Path;
@@ -195,7 +193,10 @@ impl AgentTransport {
     }
 
     fn verify_new_image_marker(&self, before: &[usize]) -> AppResult<usize> {
-        let deadline = Instant::now() + Duration::from_millis(800);
+        // An image takes longer to appear than a keystroke — the agent has to
+        // take it from the clipboard before it can draw it — and how much
+        // longer is not ours to know, so this waits as patiently as the walk.
+        let deadline = Instant::now() + PANE_SETTLE * PANE_SETTLE_ATTEMPTS as u32;
         while Instant::now() < deadline {
             if let Some(marker) = self
                 .image_markers()?
@@ -204,7 +205,7 @@ impl AgentTransport {
             {
                 return Ok(marker);
             }
-            thread::sleep(Duration::from_millis(40));
+            thread::sleep(PANE_SETTLE);
         }
         Err(AppError::new(
             "image paste",
@@ -340,10 +341,32 @@ fn settle(
     Ok(None)
 }
 
+/// Every image the composer is showing, wherever it sits.
+///
+/// This reads the markers where they are rather than insisting they come before
+/// the text: a composer caught mid-edit is a normal thing to look at, and a
+/// count that quietly returns none for it made a freshly pasted image look like
+/// it had never arrived.
 fn composer_markers(kind: AgentKind, ansi: &str) -> Vec<usize> {
-    native_composer_parts(kind, &sanitize_ansi(ansi))
-        .map(|parts| parts.markers)
+    native_composer_content(kind, &sanitize_ansi(ansi))
+        .map(|content| scan_markers(&content))
         .unwrap_or_default()
+}
+
+fn scan_markers(content: &str) -> Vec<usize> {
+    let mut markers = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("[Image #") {
+        let after = &rest[start + "[Image #".len()..];
+        let digits = after.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(']') {
+            if let Ok(number) = after[..digits].parse() {
+                markers.push(number);
+            }
+        }
+        rest = &after[digits..];
+    }
+    markers
 }
 
 #[cfg(test)]
@@ -425,6 +448,19 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    /// A composer caught mid-edit still has to be counted: an image typed after
+    /// text, or a probe sitting beside one, is a normal thing to look at, and a
+    /// count that returned none for it made a pasted image look like it had
+    /// never arrived.
+    #[test]
+    fn images_are_counted_wherever_they_sit() {
+        assert_eq!(super::scan_markers("[Image #5] [Image #6] "), [5, 6]);
+        assert_eq!(super::scan_markers("describe [Image #5] it"), [5]);
+        assert_eq!(super::scan_markers("[Image #5]~ [Image #6]"), [5, 6]);
+        assert_eq!(super::scan_markers("no images here"), Vec::<usize>::new());
+        assert_eq!(super::scan_markers("[Image #] [Image #7]"), [7]);
     }
 
     #[test]
