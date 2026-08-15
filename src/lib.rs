@@ -5,6 +5,7 @@ pub mod composer;
 pub mod editor;
 mod error;
 pub mod herdr;
+pub(crate) mod highlight;
 pub mod history;
 pub mod local_time;
 pub mod markdown;
