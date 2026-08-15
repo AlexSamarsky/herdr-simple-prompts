@@ -238,8 +238,11 @@ pub fn remove_native_attachment(
 ) -> AppResult<bool> {
     let markers = composer_markers(kind, &read()?);
     let Some(position) = markers.iter().position(|held| *held == marker) else {
-        // Already gone: nothing to remove and nothing to report.
-        return Ok(true);
+        // The pane holds no such image. Only when it holds none at all is that
+        // the picture already being gone; otherwise the overlay is naming an
+        // image by a number that has gone stale, and reporting success would
+        // drop a chip while the picture stays.
+        return Ok(markers.is_empty());
     };
     let trailing = markers.len() - position - 1;
     let needle = format!("[Image #{marker}]{CURSOR_PROBE}");
@@ -387,15 +390,27 @@ mod tests {
         );
     }
 
+    /// A number the pane does not know is not proof the picture is gone — it is
+    /// proof the overlay is naming it wrongly. Reporting success there would
+    /// drop a chip while the picture stays, which is the disagreement the whole
+    /// guard exists to prevent.
     #[test]
-    fn an_image_that_is_already_gone_is_reported_as_removed() {
+    fn a_number_the_pane_does_not_know_is_refused_while_it_holds_images() {
         let composer = RefCell::new(three_images());
 
-        assert!(remove(&composer, 99).unwrap());
+        assert!(!remove(&composer, 99).unwrap());
         assert_eq!(
             composer.borrow().markers(),
             ["[Image #5]", "[Image #6]", "[Image #7]"],
         );
+    }
+
+    #[test]
+    fn an_image_is_reported_removed_when_the_composer_holds_none() {
+        let composer = RefCell::new(Composer::new(&["describe it"]));
+
+        assert!(remove(&composer, 5).unwrap());
+        assert!(composer.borrow().markers().is_empty());
     }
 
     #[test]
