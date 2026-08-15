@@ -1618,6 +1618,16 @@ mod tests {
         let mut sequence = 1;
         let mut cache = render::HistoryRenderCache::default();
 
+        // The gap after the marker goes first, as it does in the pane.
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
         let change = handle_key(
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
             &mut app,
@@ -1723,7 +1733,11 @@ mod tests {
 
         assert!(editor.attachments().is_empty());
         assert!(app.draft_attachments.is_empty());
-        assert_eq!(editor.submission_text(), "describe it");
+        assert_eq!(
+            editor.submission_text().trim_start(),
+            "describe it",
+            "the gap the marker stood beside is ordinary text and stays"
+        );
     }
 
     #[test]

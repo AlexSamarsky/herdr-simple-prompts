@@ -111,6 +111,10 @@ pub struct EditorSubmission {
 #[derive(Clone)]
 enum EditorAtom {
     Character(char),
+    /// The gap beside an image: a place for the cursor to stand, and nothing
+    /// more. It is drawn, so the markers do not run together, and it is not
+    /// part of the prompt, so standing there costs the text nothing.
+    Gap,
     LargePaste {
         source_text: String,
         character_count: usize,
@@ -189,6 +193,12 @@ impl Editor {
         self.atoms
             .insert(self.cursor, EditorAtom::Attachment(attachment));
         self.cursor += 1;
+        // The gap after a marker is a place of its own, so the cursor has
+        // somewhere to stand between two images — as it does in the pane. Drawn
+        // as part of the marker, that place did not exist and a step left
+        // jumped straight from one picture to the previous one.
+        self.atoms.insert(self.cursor, EditorAtom::Gap);
+        self.cursor += 1;
         self.preferred_column = None;
         self.rebuild_projections();
     }
@@ -215,14 +225,27 @@ impl Editor {
                 attachment.display = format!("Image #{marker}");
                 true
             }
-            EditorAtom::Character(_) | EditorAtom::LargePaste { .. } => true,
+            EditorAtom::Character(_) | EditorAtom::LargePaste { .. } | EditorAtom::Gap => true,
         });
+        // A gap belongs to the marker in front of it; one left behind by a
+        // marker that has gone would show as a stray space.
+        let mut kept: Vec<EditorAtom> = Vec::with_capacity(self.atoms.len());
+        for atom in self.atoms.drain(..) {
+            if matches!(atom, EditorAtom::Gap)
+                && !matches!(kept.last(), Some(EditorAtom::Attachment(_)))
+            {
+                continue;
+            }
+            kept.push(atom);
+        }
+        self.atoms = kept;
         for marker in markers.iter().skip(seen) {
             self.atoms.push(EditorAtom::Attachment(Attachment {
                 id: format!("native-image-{marker}"),
                 display: format!("Image #{marker}"),
                 native_path: None,
             }));
+            self.atoms.push(EditorAtom::Gap);
         }
         self.cursor = self.cursor.min(self.atoms.len());
         self.preferred_column = None;
@@ -252,12 +275,6 @@ impl Editor {
         }
         let start = *self.display_boundaries.get(index)?;
         let end = *self.display_boundaries.get(index + 1)?;
-        // The marker is drawn with a trailing space; the highlight is not.
-        let end = if self.display_text[start..end].ends_with(' ') {
-            end - 1
-        } else {
-            end
-        };
         (start < end).then_some((start, end))
     }
 
@@ -281,7 +298,7 @@ impl Editor {
             .iter()
             .filter_map(|atom| match atom {
                 EditorAtom::Attachment(attachment) => Some(attachment.clone()),
-                EditorAtom::Character(_) | EditorAtom::LargePaste { .. } => None,
+                EditorAtom::Character(_) | EditorAtom::LargePaste { .. } | EditorAtom::Gap => None,
             })
             .collect()
     }
@@ -467,6 +484,9 @@ impl Editor {
                         display: attachment.display.clone(),
                     });
                 }
+                // The gap belongs to the marker beside it and is put back with
+                // it, so it is not written down twice.
+                EditorAtom::Gap => {}
                 EditorAtom::LargePaste {
                     source_text,
                     character_count,
@@ -508,6 +528,7 @@ impl Editor {
                         display,
                         native_path: None,
                     }));
+                    self.atoms.push(EditorAtom::Gap);
                 }
             }
         }
@@ -651,6 +672,7 @@ impl Editor {
                     self.display_text
                         .push_str(&attachment_marker(&attachment.display, attachment_index));
                 }
+                EditorAtom::Gap => self.display_text.push(' '),
             }
             self.source_boundaries.push(self.source_text.len());
             self.display_boundaries.push(self.display_text.len());
@@ -671,7 +693,7 @@ impl Editor {
                     end_byte: range[1],
                     character_count: *character_count,
                 }),
-                EditorAtom::Character(_) | EditorAtom::Attachment(_) => None,
+                EditorAtom::Character(_) | EditorAtom::Attachment(_) | EditorAtom::Gap => None,
             })
             .collect()
     }
@@ -759,9 +781,9 @@ pub fn staged_image_path(text: &str) -> Option<PathBuf> {
 /// in the line. Only an image with no label of its own falls back to counting.
 fn attachment_marker(label: &str, index: usize) -> String {
     if label.starts_with("Image #") {
-        format!("[{label}] ")
+        format!("[{label}]")
     } else {
-        format!("[Image #{index}] ")
+        format!("[Image #{index}]")
     }
 }
 

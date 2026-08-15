@@ -634,6 +634,8 @@ fn a_fresh_image_is_not_marked_until_the_cursor_reaches_it() {
         "the image was just added, the cursor is past it"
     );
 
+    // Past the gap beside it, then onto the marker itself.
+    editor.move_left();
     editor.move_left();
     assert!(
         editor.attachment_span_at_cursor().is_some(),
@@ -645,5 +647,35 @@ fn a_fresh_image_is_not_marked_until_the_cursor_reaches_it() {
         editor.attachment_span_at_cursor(),
         None,
         "stepping off it again clears the mark"
+    );
+}
+
+/// The gap beside an image is a place for the cursor, not text for the prompt:
+/// standing there is possible, and costs the prompt nothing.
+#[test]
+fn the_gap_beside_an_image_is_a_place_but_not_text() {
+    let mut editor = Editor::default();
+    editor.insert_paste("look");
+    editor.insert_attachment(Attachment {
+        id: "image-1".into(),
+        display: "Image #4".into(),
+        native_path: None,
+    });
+    editor.insert_paste("here");
+
+    assert_eq!(editor.display_text(), "look[Image #4] here");
+    assert_eq!(
+        editor.submission_text(),
+        "lookhere",
+        "the gap is drawn, not sent"
+    );
+
+    // From the end: over "here", onto the gap, then onto the image.
+    editor.move_word_left();
+    assert_eq!(editor.attachment_span_at_cursor(), None, "on the gap");
+    editor.move_left();
+    assert!(
+        editor.attachment_span_at_cursor().is_some(),
+        "one step further stands on the image"
     );
 }
