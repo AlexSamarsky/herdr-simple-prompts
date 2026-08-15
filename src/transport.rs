@@ -270,16 +270,20 @@ pub fn remove_native_attachment(
 
     press(&["ctrl+e"], None)?;
     for _ in 0..=(2 * trailing + 2) {
-        // The probe is recognised by the composer changing, not by the mere
-        // presence of the character: a probe left behind by an earlier attempt
-        // would otherwise make "the probe is gone" impossible to ever satisfy,
-        // and the walk would refuse a composer it had already reached.
+        // The probe is counted, not looked for. Asking whether the character is
+        // present at all breaks on one left behind by an earlier attempt;
+        // comparing the whole line breaks on the padding a pane adds and takes
+        // away. Counting is true through both.
         let baseline = native_composer_content(kind, &sanitize_ansi(&read()?)).unwrap_or_default();
+        let baseline_probes = baseline.matches(CURSOR_PROBE).count();
         press(&[], Some(CURSOR_PROBE))?;
         // Nothing is pressed until the probe is seen. A backspace sent while
         // the probe is not there deletes whatever is there instead, and what is
         // there is somebody's picture.
-        let Some(probed) = settle(kind, &mut read, |content| content != baseline)? else {
+        let Some(probed) = settle(kind, &mut read, |content| {
+            content.matches(CURSOR_PROBE).count() > baseline_probes
+        })?
+        else {
             return Err(walk_failure(
                 &format!(
                     "the composer never showed the probe within {}ms",
@@ -291,7 +295,10 @@ pub fn remove_native_attachment(
         };
         let placed = probed.contains(&needle);
         press(&["backspace"], None)?;
-        let Some(cleaned) = settle(kind, &mut read, |content| content == baseline)? else {
+        let Some(cleaned) = settle(kind, &mut read, |content| {
+            content.matches(CURSOR_PROBE).count() == baseline_probes
+        })?
+        else {
             return Err(walk_failure(
                 "the probe would not come back out of the composer",
                 kind,
