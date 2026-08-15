@@ -278,6 +278,24 @@ impl Editor {
         (start < end).then_some((start, end))
     }
 
+    /// The image the cursor has just passed, gap and all.
+    ///
+    /// Standing at the end of the line, a person pressing backspace means the
+    /// image they can see, not the space beside it — the native composer takes
+    /// the image there too. Without this the key ate the gap and then met the
+    /// wall, and looked broken.
+    pub fn attachment_behind_cursor(&self) -> Option<&Attachment> {
+        let previous = self.cursor.checked_sub(1)?;
+        match self.atoms.get(previous) {
+            Some(EditorAtom::Attachment(attachment)) => Some(attachment),
+            Some(EditorAtom::Gap) => match self.atoms.get(previous.checked_sub(1)?) {
+                Some(EditorAtom::Attachment(attachment)) => Some(attachment),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Drops an image once the pane has confirmed it is gone there too.
     pub fn remove_attachment(&mut self, id: &str) {
         let Some(index) = self.atoms.iter().position(

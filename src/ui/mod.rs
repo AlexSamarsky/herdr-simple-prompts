@@ -505,9 +505,13 @@ fn handle_key(
         (KeyCode::Backspace, _) => {
             // An image is not ours to drop: the picture lives in the native
             // composer, so the pane has to lose it first and say so.
-            if let Some(marker) = editor.attachment_at_cursor().and_then(|attachment| {
-                marker_number(attachment).map(|number| (attachment.id.clone(), number))
-            }) {
+            if let Some(marker) = editor
+                .attachment_at_cursor()
+                .or_else(|| editor.attachment_behind_cursor())
+                .and_then(|attachment| {
+                    marker_number(attachment).map(|number| (attachment.id.clone(), number))
+                })
+            {
                 match runtime.remove_attachment(marker.0, marker.1) {
                     Ok(()) => app.pending_action = Some(PendingAction::new("Removing image")),
                     Err(error) => app.background_error = Some(error.to_string()),
@@ -1678,11 +1682,11 @@ mod tests {
         assert_eq!(app.draft_attachments[0].display, "Image #7");
     }
 
-    /// What is marked is what backspace means. With the cursor merely past an
-    /// image the key does ordinary work — and stops at the marker rather than
-    /// taking a picture nobody pointed at.
+    /// Standing just past an image — at the end of the line, say — a person
+    /// pressing backspace means the image they can see, not the space beside
+    /// it. Eating the gap and then meeting the wall made the key look broken.
     #[test]
-    fn backspace_past_an_image_does_not_ask_for_it() {
+    fn backspace_just_past_an_image_asks_for_it() {
         let (runtime, actions) = runtime::interaction_test_runtime(1);
         let mut app = AppState {
             native_composer: NativeComposerState::OwnedAttachments(1),
@@ -1709,12 +1713,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(change, super::DraftChange::Debounced, "the gap goes");
-        assert_eq!(editor.attachments().len(), 1, "the image stays");
-        assert!(
-            actions.try_recv().is_err(),
-            "and the pane is not asked for anything"
-        );
+        assert_eq!(change, super::DraftChange::None, "the pane is asked first");
+        assert_eq!(editor.attachments().len(), 1, "nothing is dropped yet");
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::RemoveAttachment { marker: 5, .. }
+        ));
     }
 
     #[test]
