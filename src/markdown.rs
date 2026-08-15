@@ -8,6 +8,9 @@ const LINK_LABEL_PRIORITY: u8 = 5;
 const INLINE_CODE_PRIORITY: u8 = 6;
 const FENCED_CODE_PRIORITY: u8 = 7;
 
+/// The inline-code colour the native panes use.
+const INLINE_CODE_COLOR: AnsiColor = AnsiColor::Rgb(177, 185, 249);
+
 #[derive(Clone, Copy, Debug, Default)]
 struct StyleSlot {
     priority: u8,
@@ -666,17 +669,20 @@ fn link_style() -> StyleState {
     }
 }
 
+/// Fenced code, as the agents render it: ordinary text, no plate behind it.
+///
+/// A background was the loudest thing on the screen and appeared only when
+/// native capture had failed — so the same answer looked different depending on
+/// whether it happened to fit the captured window. Measured from a live pane:
+/// fenced lines carry no colour and no background at all.
 fn code_style() -> StyleState {
-    StyleState {
-        foreground: Some(AnsiColor::White),
-        background: Some(AnsiColor::BrightBlack),
-        modifiers: StyleModifiers::default(),
-    }
+    StyleState::default()
 }
 
+/// Inline code, measured from a live pane: RGB(177, 185, 249), no background.
 fn inline_code_style() -> StyleState {
     StyleState {
-        foreground: Some(AnsiColor::Cyan),
+        foreground: Some(INLINE_CODE_COLOR),
         modifiers: StyleModifiers::default(),
         ..Default::default()
     }
