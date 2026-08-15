@@ -148,6 +148,21 @@ pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<Str
 /// the overlay has no access to. The text beside it can be lifted out, but only
 /// when every marker precedes it — an image pasted into the middle of a phrase
 /// leaves no way to tell which characters belong to which side.
+/// How many images the native composer is holding, when that can be told.
+///
+/// `None` means the pane could not be read well enough to say, and nothing
+/// should be concluded from it.
+pub fn native_attachment_count(kind: AgentKind, surface: &StyledText) -> Option<usize> {
+    match classify_native_composer(kind, surface) {
+        NativeComposerState::Clear => Some(0),
+        NativeComposerState::OwnedAttachments(count) => Some(count),
+        NativeComposerState::Occupied => {
+            native_composer_parts(kind, surface).map(|parts| parts.attachments)
+        }
+        NativeComposerState::Unknown => None,
+    }
+}
+
 pub fn native_composer_parts(kind: AgentKind, surface: &StyledText) -> Option<ComposerParts> {
     // An image on its own counts too: it has no text to lift, but the overlay
     // still has to learn about it, or it treats the pane as holding something

@@ -480,3 +480,33 @@ fn an_attachment_counts_as_one_word_and_survives_a_snapshot() {
     assert_eq!(restored.display_text(), "[Image #1] describe it");
     assert_eq!(restored.submission_text(), "describe it");
 }
+
+/// A marker is a claim about the native composer, and the composer can move on
+/// without us. A draft that outlived its image used to insist the pane still
+/// held one, which guarded the overlay's own input for as long as it survived.
+#[test]
+fn markers_can_be_brought_back_in_line_with_the_pane() {
+    let mut editor = Editor::default();
+    for id in ["first", "second"] {
+        editor.insert_attachment(Attachment {
+            id: id.into(),
+            display: id.into(),
+            native_path: None,
+        });
+    }
+    editor.insert_paste("describe it");
+
+    editor.retain_attachments(1);
+    assert_eq!(editor.display_text(), "[Image #1] describe it");
+    assert_eq!(editor.attachments().len(), 1);
+    assert_eq!(editor.attachments()[0].id, "first");
+    assert_eq!(editor.submission_text(), "describe it");
+
+    editor.retain_attachments(0);
+    assert_eq!(editor.display_text(), "describe it");
+    assert!(editor.attachments().is_empty());
+    assert_eq!(editor.submission_text(), "describe it");
+
+    editor.retain_attachments(5);
+    assert_eq!(editor.display_text(), "describe it", "nothing is invented");
+}
