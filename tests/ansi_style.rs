@@ -280,9 +280,14 @@ fn markdown_projection_removes_supported_delimiters_and_rebases_styles() {
             true,
         ),
     ];
+    assert_eq!(
+        style_at(&styled, styled.text.find("let x").unwrap()).map(|style| style.foreground),
+        Some(Some(AnsiColor::Indexed(4))),
+        "a fenced keyword carries the highlighter's colour",
+    );
     assert!(
-        style_at(&styled, styled.text.find("let x").unwrap()).is_none(),
-        "fenced code must render as ordinary text",
+        style_at(&styled, styled.text.find("plain inside fence").unwrap()).is_none(),
+        "code the highlighter does not recognise stays ordinary text",
     );
     for (name, needle, foreground, background, bold, italic, underline) in cases {
         let byte = styled.text.find(needle).unwrap();
@@ -942,6 +947,54 @@ fn markdown_projection_never_paints_a_background() {
             None,
             "run over {:?} paints a background",
             &styled.text[run.start_byte..run.end_byte],
+        );
+    }
+}
+
+/// Fenced blocks are coloured by token, and only when the fence names a
+/// language the highlighter knows.
+#[test]
+fn markdown_fenced_blocks_are_syntax_coloured() {
+    let text = concat!(
+        "```python\n",
+        "def call(value: str) -> None:\n",
+        "    return {\"id\": 1}\n",
+        "```\n",
+    );
+
+    let styled = style_markdown(text);
+
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    for (needle, color) in [
+        ("def", AnsiColor::Indexed(4)),
+        ("call", AnsiColor::Indexed(3)),
+        ("str", AnsiColor::Indexed(6)),
+        ("None", AnsiColor::Indexed(4)),
+        ("\"id\"", AnsiColor::Indexed(1)),
+        ("1", AnsiColor::Indexed(2)),
+    ] {
+        let byte = styled.text.find(needle).unwrap();
+        let style = style_at(&styled, byte).unwrap_or_else(|| panic!("{needle} carries no style"));
+        assert_eq!(style.foreground, Some(color), "{needle}");
+        assert_eq!(style.background, None, "{needle}");
+    }
+    assert!(
+        style_at(&styled, styled.text.find("value").unwrap()).is_none(),
+        "a plain identifier stays ordinary text",
+    );
+}
+
+#[test]
+fn markdown_unknown_fence_languages_stay_plain() {
+    for info in ["", "brainfuck", "text"] {
+        let text = format!("```{info}\nfn main() {{ let x = 1; }}\n```\n");
+
+        let styled = style_markdown(&text);
+
+        assert!(
+            styled.runs.is_empty(),
+            "fence {info:?} must not be coloured: {:?}",
+            styled.runs,
         );
     }
 }

@@ -1,3 +1,4 @@
+use crate::highlight::{self, TokenKind};
 use crate::style::{AnsiColor, StyleModifiers, StyleRunBuilder, StyleState, StyledText};
 
 const BLOCK_PRIORITY: u8 = 1;
@@ -113,6 +114,7 @@ pub fn style_markdown_with_links(text: &str) -> MarkdownProjection {
         let line_range = lines[line_index];
         let line = &text[line_range.start..line_range.end];
         if is_opening_fence(line) {
+            let language = fence_body(line).and_then(|info| highlight::language(info.trim()));
             let Some(closing_index) =
                 lines
                     .iter()
@@ -126,14 +128,19 @@ pub fn style_markdown_with_links(text: &str) -> MarkdownProjection {
             };
 
             discard(&mut visible, line_range.start, line_range.after_end);
-            for code_line in &lines[line_index + 1..closing_index] {
-                apply_style(
-                    &mut slots,
-                    code_line.start,
-                    code_line.end,
-                    FENCED_CODE_PRIORITY,
-                    code_style(),
-                );
+            if let Some(language) = language {
+                for code_line in &lines[line_index + 1..closing_index] {
+                    for token in highlight::tokens(language, &text[code_line.start..code_line.end])
+                    {
+                        apply_style(
+                            &mut slots,
+                            code_line.start + token.start,
+                            code_line.start + token.end,
+                            FENCED_CODE_PRIORITY,
+                            token_style(token.kind),
+                        );
+                    }
+                }
             }
             let closing_range = lines[closing_index];
             discard(&mut visible, closing_range.start, closing_range.after_end);
@@ -669,14 +676,17 @@ fn link_style() -> StyleState {
     }
 }
 
-/// Fenced code, as the agents render it: ordinary text, no plate behind it.
+/// Fenced code, as the agents render it: coloured by token, never on a plate.
 ///
 /// A background was the loudest thing on the screen and appeared only when
-/// native capture had failed — so the same answer looked different depending on
-/// whether it happened to fit the captured window. Measured from a live pane:
-/// fenced lines carry no colour and no background at all.
-fn code_style() -> StyleState {
-    StyleState::default()
+/// native capture had failed, so the same answer looked different depending on
+/// whether it happened to fit the captured window. Anything the highlighter
+/// does not recognise stays ordinary text, exactly as the panes render it.
+fn token_style(kind: TokenKind) -> StyleState {
+    StyleState {
+        foreground: Some(kind.color()),
+        ..Default::default()
+    }
 }
 
 /// Inline code, measured from a live pane: RGB(177, 185, 249), no background.
