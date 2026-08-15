@@ -998,3 +998,70 @@ fn markdown_unknown_fence_languages_stay_plain() {
         );
     }
 }
+
+/// `_` inside a word is part of the word.
+///
+/// Eating it rewrote `user_id_map` as `useridmap`, and because the answer text
+/// is also matched against the live pane, every answer containing snake_case
+/// silently lost its native colours and clickable links.
+#[test]
+fn markdown_projection_keeps_intraword_underscores() {
+    for text in [
+        "call user_id_map here",
+        "see src/my_module/other_file.rs",
+        "MAX_RETRY_COUNT and __init__",
+        "a_b_c_d_e",
+        "trailing underscore_",
+        "_leading underscore",
+    ] {
+        let styled = style_markdown(text);
+
+        assert_eq!(styled.text, text, "projection rewrote: {text:?}");
+        assert!(styled.runs.is_empty(), "unexpected emphasis in {text:?}");
+    }
+}
+
+#[test]
+fn markdown_projection_still_emphasises_at_word_boundaries() {
+    let styled = style_markdown("plain _emphasised_ and _snake_case_ tail");
+
+    assert_eq!(styled.text, "plain emphasised and snake_case tail");
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    let first = styled.text.find("emphasised").unwrap();
+    assert!(style_at(&styled, first).unwrap().modifiers.italic);
+    let second = styled.text.find("snake_case").unwrap();
+    assert!(style_at(&styled, second).unwrap().modifiers.italic);
+}
+
+/// Projection may only remove markup. Any word character in the source has to
+/// survive, or the overlay is showing the user something the agent never said.
+///
+/// The corpus deliberately carries no emphasis delimiters, links or fences —
+/// those are markup and are supposed to disappear.
+#[test]
+fn markdown_projection_never_drops_word_characters() {
+    for text in [
+        "call user_id_map here",
+        "see src/my_module/other_file.rs",
+        "run `cargo test --all` first",
+        "**strong** mixed with snake_case_ident",
+        "# Heading with under_score",
+        "1. item_one and item_two",
+        "- bullet_with_underscores and **bold_inside**",
+        "Привет мир_с_подчёркиваниями",
+    ] {
+        let styled = style_markdown(text);
+
+        let projected = styled
+            .text
+            .chars()
+            .filter(|character| character.is_alphanumeric() || *character == '_')
+            .collect::<String>();
+        let source = text
+            .chars()
+            .filter(|character| character.is_alphanumeric() || *character == '_')
+            .collect::<String>();
+        assert_eq!(projected, source, "word characters lost in {text:?}");
+        assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    }
+}
