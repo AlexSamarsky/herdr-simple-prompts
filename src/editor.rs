@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::model::Attachment;
 use crate::paste::{LARGE_PASTE_CHARS, PasteRange, large_paste_marker};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +38,13 @@ pub enum EditorChunk {
         source_text: String,
         character_count: usize,
     },
+    /// An image the agent is holding. It contributes nothing to the prompt
+    /// text — the image itself lives in the native composer — but it occupies a
+    /// place in the line so it can be moved through like any other content.
+    Attachment {
+        id: String,
+        display: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -45,6 +53,20 @@ pub struct EditorSnapshot {
 }
 
 impl EditorSnapshot {
+    pub fn attachments(&self) -> Vec<Attachment> {
+        self.chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                EditorChunk::Attachment { id, display } => Some(Attachment {
+                    id: id.clone(),
+                    display: display.clone(),
+                    native_path: None,
+                }),
+                EditorChunk::Text(_) | EditorChunk::LargePaste { .. } => None,
+            })
+            .collect()
+    }
+
     pub fn plain(text: impl Into<String>) -> Self {
         let text = text.into();
         if text.is_empty() {
@@ -63,6 +85,7 @@ impl EditorSnapshot {
             .map(|chunk| match chunk {
                 EditorChunk::Text(text) => text.len(),
                 EditorChunk::LargePaste { source_text, .. } => source_text.len(),
+                EditorChunk::Attachment { .. } => 0,
             })
             .sum();
         let mut submission = String::with_capacity(capacity);
@@ -70,6 +93,7 @@ impl EditorSnapshot {
             match chunk {
                 EditorChunk::Text(text) => submission.push_str(text),
                 EditorChunk::LargePaste { source_text, .. } => submission.push_str(source_text),
+                EditorChunk::Attachment { .. } => {}
             }
         }
         submission
@@ -91,6 +115,7 @@ enum EditorAtom {
         source_text: String,
         character_count: usize,
     },
+    Attachment(Attachment),
 }
 
 #[derive(Clone)]
@@ -149,6 +174,28 @@ impl Editor {
         self.cursor += 1;
         self.preferred_column = None;
         self.rebuild_projections();
+    }
+
+    /// Places an image marker at the cursor.
+    ///
+    /// The marker sits in the line the way the native composer shows it, rather
+    /// than on a shelf above the input, and moves with the text around it.
+    pub fn insert_attachment(&mut self, attachment: Attachment) {
+        self.atoms
+            .insert(self.cursor, EditorAtom::Attachment(attachment));
+        self.cursor += 1;
+        self.preferred_column = None;
+        self.rebuild_projections();
+    }
+
+    pub fn attachments(&self) -> Vec<Attachment> {
+        self.atoms
+            .iter()
+            .filter_map(|atom| match atom {
+                EditorAtom::Attachment(attachment) => Some(attachment.clone()),
+                EditorAtom::Character(_) | EditorAtom::LargePaste { .. } => None,
+            })
+            .collect()
     }
 
     pub fn insert_paste(&mut self, text: &str) {
@@ -315,6 +362,15 @@ impl Editor {
         for atom in &self.atoms {
             match atom {
                 EditorAtom::Character(character) => plain_text.push(*character),
+                EditorAtom::Attachment(attachment) => {
+                    if !plain_text.is_empty() {
+                        chunks.push(EditorChunk::Text(std::mem::take(&mut plain_text)));
+                    }
+                    chunks.push(EditorChunk::Attachment {
+                        id: attachment.id.clone(),
+                        display: attachment.display.clone(),
+                    });
+                }
                 EditorAtom::LargePaste {
                     source_text,
                     character_count,
@@ -350,6 +406,13 @@ impl Editor {
                     source_text,
                     character_count,
                 }),
+                EditorChunk::Attachment { id, display } => {
+                    self.atoms.push(EditorAtom::Attachment(Attachment {
+                        id,
+                        display,
+                        native_path: None,
+                    }));
+                }
             }
         }
         self.cursor = self.atoms.len();
@@ -402,10 +465,10 @@ impl Editor {
         while index > 0 && self.is_whitespace(index - 1) {
             index -= 1;
         }
-        if index > 0 && self.is_paste(index - 1) {
+        if index > 0 && self.is_opaque(index - 1) {
             return index - 1;
         }
-        while index > 0 && !self.is_whitespace(index - 1) && !self.is_paste(index - 1) {
+        while index > 0 && !self.is_whitespace(index - 1) && !self.is_opaque(index - 1) {
             index -= 1;
         }
         index
@@ -416,10 +479,10 @@ impl Editor {
         while index < self.atoms.len() && self.is_whitespace(index) {
             index += 1;
         }
-        if index < self.atoms.len() && self.is_paste(index) {
+        if index < self.atoms.len() && self.is_opaque(index) {
             return index + 1;
         }
-        while index < self.atoms.len() && !self.is_whitespace(index) && !self.is_paste(index) {
+        while index < self.atoms.len() && !self.is_whitespace(index) && !self.is_opaque(index) {
             index += 1;
         }
         index
@@ -432,8 +495,13 @@ impl Editor {
         )
     }
 
-    fn is_paste(&self, index: usize) -> bool {
-        matches!(self.atoms.get(index), Some(EditorAtom::LargePaste { .. }))
+    /// Whether an atom stands for something the composer is not spelling out —
+    /// a collapsed paste or an image. Either is one indivisible word.
+    fn is_opaque(&self, index: usize) -> bool {
+        matches!(
+            self.atoms.get(index),
+            Some(EditorAtom::LargePaste { .. } | EditorAtom::Attachment(_))
+        )
     }
 
     fn rebuild_projections(&mut self) {
@@ -444,6 +512,7 @@ impl Editor {
         self.source_boundaries.push(0);
         self.display_boundaries.push(0);
 
+        let mut attachment_index = 0;
         for atom in &self.atoms {
             match atom {
                 EditorAtom::Character(character) => {
@@ -457,6 +526,11 @@ impl Editor {
                     self.source_text.push_str(source_text);
                     self.display_text
                         .push_str(&large_paste_marker(*character_count));
+                }
+                EditorAtom::Attachment(_) => {
+                    attachment_index += 1;
+                    self.display_text
+                        .push_str(&attachment_marker(attachment_index));
                 }
             }
             self.source_boundaries.push(self.source_text.len());
@@ -478,7 +552,7 @@ impl Editor {
                     end_byte: range[1],
                     character_count: *character_count,
                 }),
-                EditorAtom::Character(_) => None,
+                EditorAtom::Character(_) | EditorAtom::Attachment(_) => None,
             })
             .collect()
     }
@@ -559,6 +633,10 @@ pub fn staged_image_path(text: &str) -> Option<PathBuf> {
             .starts_with("herdr-clipboard-images-")
     });
     (image_extension && staged && path.is_file()).then_some(path)
+}
+
+fn attachment_marker(index: usize) -> String {
+    format!("[Image #{index}] ")
 }
 
 fn byte_at_display_column(text: &str, start: usize, end: usize, column: usize) -> usize {

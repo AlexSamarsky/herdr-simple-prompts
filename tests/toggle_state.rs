@@ -90,7 +90,6 @@ fn create_scoped_state(
             Some(session_id),
             &EditorSnapshot::plain("private draft"),
             &[],
-            &[],
         )
         .unwrap();
     let journal = store.history_journal(pane_id, session_id).unwrap();
@@ -110,7 +109,7 @@ fn chunked_draft_reopens_with_full_source_behind_compact_token() {
     editor.insert_paste(&pasted);
 
     store
-        .save_editor_draft("w1:p1", None, &editor.snapshot(), &[], &[])
+        .save_editor_draft("w1:p1", None, &editor.snapshot(), &[])
         .unwrap();
 
     let state = store.load_draft("w1:p1").unwrap();
@@ -143,7 +142,6 @@ fn compact_history_metadata_does_not_persist_pasted_body() {
             "w1:p1",
             Some("session-1"),
             &EditorSnapshot::default(),
-            &[],
             &[summary],
         )
         .unwrap();
@@ -773,8 +771,8 @@ fn stale_overlay_is_replaced_without_disturbing_other_sources() {
 }
 
 #[test]
-fn draft_v3_persists_session_binding_and_v2_loads_unbound() {
-    let directory = test_state_directory("draft-v3-session");
+fn draft_v4_persists_session_binding_and_v2_loads_unbound() {
+    let directory = test_state_directory("draft-v4-session");
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
 
@@ -784,12 +782,11 @@ fn draft_v3_persists_session_binding_and_v2_loads_unbound() {
             Some("session-1"),
             &EditorSnapshot::plain("bound"),
             &[],
-            &[],
         )
         .unwrap();
     let serialized = std::fs::read_to_string(directory.join("draft-w1_p1.json")).unwrap();
     let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(value["version"], 3);
+    assert_eq!(value["version"], 4);
     assert_eq!(value["session_id"], "session-1");
     assert_eq!(
         store.load_draft("w1:p1").unwrap().session_id.as_deref(),
@@ -859,7 +856,6 @@ fn namespace_validation_removes_old_session_but_keeps_new_session_draft() {
             "w1:p1",
             Some("session-new"),
             &EditorSnapshot::plain("new session draft"),
-            &[],
             &[],
         )
         .unwrap();
@@ -1015,7 +1011,7 @@ fn failed_replacement_cleanup_keeps_namespace_for_a_later_retry() {
 }
 
 #[test]
-fn binding_a_verified_namespace_rewrites_a_v2_draft_as_bound_v3() {
+fn binding_a_verified_namespace_rewrites_a_v2_draft_as_bound_v4() {
     let directory = test_state_directory("bind-v2-draft");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
@@ -1033,7 +1029,7 @@ fn binding_a_verified_namespace_rewrites_a_v2_draft_as_bound_v3() {
     let draft: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.join("draft-w1_p1.json")).unwrap())
             .unwrap();
-    assert_eq!(draft["version"], 3);
+    assert_eq!(draft["version"], 4);
     assert_eq!(draft["session_id"], "session-1");
     assert_eq!(store.load_draft("w1:p1").unwrap().text, "legacy");
     std::fs::remove_dir_all(directory).unwrap();
@@ -1179,4 +1175,37 @@ fn cleanup_and_draft_reads_reject_a_symlinked_state_root() {
     );
     std::fs::remove_file(directory).unwrap();
     std::fs::remove_dir_all(external).unwrap();
+}
+
+/// Attachments used to live in a list beside the draft and were drawn above the
+/// input. Moving them into the line has to bring the saved ones with it, in the
+/// place they were shown.
+#[test]
+fn a_v3_draft_moves_its_attachments_into_the_line() {
+    let directory = test_state_directory("draft-v3-attachments");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("draft-w1_p1.json"),
+        r#"{"version":3,"session_id":"session-1","editor":{"chunks":[{"kind":"text","value":"describe it"}]},"attachments":[{"id":"image-1","display":"screen.png"}],"prompt_displays":[]}"#,
+    )
+    .unwrap();
+    let store = StateStore::at(&directory);
+
+    let draft = store.load_draft("w1:p1").unwrap();
+
+    assert_eq!(
+        draft.text, "describe it",
+        "the image contributes no prompt text"
+    );
+    assert_eq!(draft.attachments.len(), 1);
+    assert_eq!(draft.attachments[0].id, "image-1");
+    let mut editor = Editor::default();
+    editor.replace_snapshot(draft.editor);
+    assert_eq!(
+        editor.display_text(),
+        "[Image #1] describe it",
+        "the marker takes the place it was drawn in"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
 }
