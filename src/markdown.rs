@@ -539,8 +539,13 @@ fn style_emphasis(
     let mut cursor = start;
     while let Some(open) = find_byte(bytes, cursor, end, b'_') {
         let content_start = open + 1;
-        let Some(close) = find_byte(bytes, content_start, end, b'_') else {
-            break;
+        if !can_open_emphasis(text, open, start, end) {
+            cursor = content_start;
+            continue;
+        }
+        let Some(close) = closing_emphasis(text, content_start, start, end) else {
+            cursor = content_start;
+            continue;
         };
         if link_owned.overlaps(open, content_start) || link_owned.overlaps(close, close + 1) {
             cursor = close + 1;
@@ -563,6 +568,58 @@ fn style_emphasis(
         );
         cursor = close + 1;
     }
+}
+
+/// `_` inside a word is part of the word, not an emphasis marker.
+///
+/// Without this, `user_id_map` rendered as `useridmap`: every snake_case
+/// identifier and path in an answer silently lost characters. It also made the
+/// rendered text differ from the pane, which disabled native colours and
+/// clickable links on exactly those answers.
+fn can_open_emphasis(text: &str, open: usize, start: usize, end: usize) -> bool {
+    let before = char_before(text, open, start);
+    let after = char_after(text, open + 1, end);
+    !doubled_underscore(before, after)
+        && after.is_some_and(|character| !character.is_whitespace())
+        && before.is_none_or(|character| !character.is_alphanumeric())
+}
+
+fn can_close_emphasis(text: &str, close: usize, start: usize, end: usize) -> bool {
+    let before = char_before(text, close, start);
+    let after = char_after(text, close + 1, end);
+    !doubled_underscore(before, after)
+        && before.is_some_and(|character| !character.is_whitespace())
+        && after.is_none_or(|character| !character.is_alphanumeric())
+}
+
+/// A run of underscores delimits nothing here: `__init__` is an identifier, and
+/// `__strong__` is not a construct this renderer supports.
+fn doubled_underscore(before: Option<char>, after: Option<char>) -> bool {
+    before == Some('_') || after == Some('_')
+}
+
+fn closing_emphasis(text: &str, from: usize, start: usize, end: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut cursor = from;
+    while let Some(candidate) = find_byte(bytes, cursor, end, b'_') {
+        if can_close_emphasis(text, candidate, start, end) {
+            return Some(candidate);
+        }
+        cursor = candidate + 1;
+    }
+    None
+}
+
+fn char_before(text: &str, index: usize, floor: usize) -> Option<char> {
+    (index > floor)
+        .then(|| text[floor..index].chars().next_back())
+        .flatten()
+}
+
+fn char_after(text: &str, index: usize, ceiling: usize) -> Option<char> {
+    (index < ceiling)
+        .then(|| text[index..ceiling].chars().next())
+        .flatten()
 }
 
 fn discard_if_allowed(
