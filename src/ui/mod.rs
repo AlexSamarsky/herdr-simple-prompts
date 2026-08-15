@@ -62,16 +62,22 @@ pub fn run_from_env() -> AppResult<()> {
         state_store.bind_verified_namespace(&source_pane, &identity.session_id, now_ms())?;
         Ok(identity)
     })?;
-    let transcript = resolve_transcript(
-        identity.kind,
-        &identity.session_id,
-        &AgentPaths::from_env()?,
-    )?;
-    let adapter: Box<dyn TranscriptAdapter> = match identity.kind {
-        AgentKind::Codex => Box::new(crate::agent::codex::CodexAdapter),
-        AgentKind::Claude => Box::new(crate::agent::claude::ClaudeAdapter::default()),
+    // An agent that has not been prompted yet has no transcript on disk. That
+    // is a "not yet", not a failure: the overlay opens on an empty history and
+    // the follower picks the file up when the first prompt creates it. Refusing
+    // to start meant a freshly opened agent could not be viewed at all.
+    let paths = AgentPaths::from_env()?;
+    let kind = identity.kind;
+    let session_id = identity.session_id.clone();
+    let open_transcript = move || {
+        let path = resolve_transcript(kind, &session_id, &paths)?;
+        let adapter: Box<dyn TranscriptAdapter> = match kind {
+            AgentKind::Codex => Box::new(crate::agent::codex::CodexAdapter),
+            AgentKind::Claude => Box::new(crate::agent::claude::ClaudeAdapter::default()),
+        };
+        TranscriptFollower::new(path, adapter)
     };
-    let mut follower = TranscriptFollower::new(transcript, adapter)?;
+    let mut follower = open_transcript().ok();
     let history_journal = state_store.history_journal(&source_pane, &identity.session_id)?;
     let saved_history = history_journal.load()?;
     let mut history_writer = Some(HistoryWriter::spawn(history_journal));
@@ -142,8 +148,16 @@ pub fn run_from_env() -> AppResult<()> {
     app.hydrate_visible_history(saved_history);
     app.background_error = adopt_notice;
     let mut history_cache = render::HistoryRenderCache::default();
-    let initial_events = follower.poll_initial(identity.status)?;
-    let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
+    let initial_events = match follower.as_mut() {
+        Some(follower) => follower.poll_initial(identity.status)?,
+        None => Vec::new(),
+    };
+    let runtime = UiRuntime::spawn(
+        Path::new(&socket),
+        identity.clone(),
+        follower,
+        Box::new(open_transcript),
+    )?;
     apply_follower_events_with_policy(
         &mut app,
         initial_events,

@@ -29,6 +29,7 @@ const LIFECYCLE_WAIT: Duration = Duration::from_secs(1);
 const LIFECYCLE_RETRY_INITIAL: Duration = Duration::from_millis(200);
 const LIFECYCLE_RETRY_MAX: Duration = Duration::from_secs(1);
 const LIFECYCLE_STOP_POLL: Duration = Duration::from_millis(50);
+const TRANSCRIPT_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub(super) enum ActionCommand {
@@ -108,7 +109,8 @@ impl UiRuntime {
     pub fn spawn(
         socket: &Path,
         identity: AgentIdentity,
-        follower: TranscriptFollower,
+        follower: Option<TranscriptFollower>,
+        open_transcript: OpenTranscript,
     ) -> AppResult<Self> {
         let (event_tx, events) = sync_channel(EVENT_QUEUE_CAPACITY);
         let (action_tx, action_rx) = sync_channel(ACTION_QUEUE_CAPACITY);
@@ -144,6 +146,7 @@ impl UiRuntime {
                 follower_active,
                 event_tx.clone(),
                 follower,
+                open_transcript,
             ),
             spawn_actions(
                 Arc::clone(&stop),
@@ -392,14 +395,33 @@ fn complete_observation(
     })
 }
 
+/// Opens the transcript, once there is one to open.
+pub(super) type OpenTranscript = Box<dyn FnMut() -> AppResult<TranscriptFollower> + Send>;
+
 fn spawn_follower(
     stop: Arc<AtomicBool>,
     follower_active: Arc<AtomicBool>,
     events: SyncSender<RuntimeEvent>,
-    mut follower: TranscriptFollower,
+    follower: Option<TranscriptFollower>,
+    mut open_transcript: OpenTranscript,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        let mut follower = follower;
         while !stop.load(Ordering::Acquire) {
+            // A transcript that does not exist yet is waited for rather than
+            // reported: the file appears the moment the agent is first prompted.
+            if follower.is_none() {
+                match open_transcript() {
+                    Ok(opened) => follower = Some(opened),
+                    Err(_) => {
+                        thread::sleep(TRANSCRIPT_RETRY_DELAY);
+                        continue;
+                    }
+                }
+            }
+            let Some(follower) = follower.as_mut() else {
+                continue;
+            };
             let status = if follower_active.load(Ordering::Acquire) {
                 AgentStatus::Working
             } else {
@@ -669,6 +691,51 @@ mod tests {
             }
         });
         (directory, socket, request_rx, worker)
+    }
+
+    /// An agent that has not been prompted yet has no transcript on disk. The
+    /// overlay waits for the file instead of refusing to open, or a freshly
+    /// created agent could not be viewed at all.
+    #[test]
+    fn a_transcript_that_does_not_exist_yet_is_waited_for() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-simple-prompts-late-transcript-{}-{}.jsonl",
+            std::process::id(),
+            NEXT_LIFECYCLE_SERVER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let opened = Arc::new(AtomicU64::new(0));
+        let attempts = Arc::clone(&opened);
+        let transcript = path.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (events_tx, events_rx) = sync_channel(8);
+        let worker = spawn_follower(
+            Arc::clone(&stop),
+            Arc::new(AtomicBool::new(false)),
+            events_tx,
+            None,
+            Box::new(move || {
+                if attempts.fetch_add(1, Ordering::Relaxed) < 2 {
+                    return Err(AppError::new("transcript", "not written yet"));
+                }
+                TranscriptFollower::new(&transcript, Box::new(ClaudeAdapter::default()))
+            }),
+        );
+
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+        )
+        .unwrap();
+        let event = events_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the follower picks the transcript up once it appears");
+        assert!(matches!(event, RuntimeEvent::Transcript(_)));
+        assert!(opened.load(Ordering::Relaxed) >= 3, "it kept trying");
+
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1059,7 +1126,13 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let working = Arc::new(AtomicBool::new(true));
         let (events_tx, events_rx) = sync_channel(8);
-        let worker = spawn_follower(Arc::clone(&stop), Arc::clone(&working), events_tx, follower);
+        let worker = spawn_follower(
+            Arc::clone(&stop),
+            Arc::clone(&working),
+            events_tx,
+            Some(follower),
+            Box::new(|| Err(AppError::new("test", "no second transcript"))),
+        );
 
         assert!(matches!(
             events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -1142,7 +1215,13 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicBool::new(follower_is_active(AgentStatus::Blocked)));
         let (events_tx, events_rx) = sync_channel(8);
-        let worker = spawn_follower(Arc::clone(&stop), Arc::clone(&active), events_tx, follower);
+        let worker = spawn_follower(
+            Arc::clone(&stop),
+            Arc::clone(&active),
+            events_tx,
+            Some(follower),
+            Box::new(|| Err(AppError::new("test", "no second transcript"))),
+        );
 
         assert!(matches!(
             events_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
