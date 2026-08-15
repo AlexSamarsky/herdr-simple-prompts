@@ -11,7 +11,8 @@ use crate::agent::{
 use crate::ansi::sanitize_ansi;
 use crate::app::{AppEvent, AppState};
 use crate::composer::{
-    ComposerAccess, NativeComposerState, classify_native_composer, native_composer_parts,
+    ComposerAccess, NativeComposerState, classify_native_composer, native_attachment_count,
+    native_composer_parts,
 };
 use crate::editor::{Editor, staged_image_path};
 use crate::herdr::HerdrClient;
@@ -126,6 +127,17 @@ pub fn run_from_env() -> AppResult<()> {
         Ok(_) => None,
         Err(error) => Some(error.to_string()),
     };
+
+    // A saved draft can outlive the images its markers point at, so they are
+    // measured against the pane before anything is drawn — otherwise the
+    // overlay guards its own input against an image that is no longer there.
+    if let Some(held) = client
+        .pane_read_visible_ansi(&source_pane, 200)
+        .ok()
+        .and_then(|ansi| native_attachment_count(identity.kind, &sanitize_ansi(&ansi)))
+    {
+        editor.retain_attachments(held);
+    }
 
     let mut app = AppState {
         session_id: identity.session_id.clone(),

@@ -188,6 +188,27 @@ impl Editor {
         self.rebuild_projections();
     }
 
+    /// Brings the marker count in line with what the pane is actually holding.
+    ///
+    /// A marker is a claim about the native composer, and the composer can move
+    /// on without us: an image that was submitted or cleared leaves a marker
+    /// behind that stands for nothing. Left alone, the overlay keeps insisting
+    /// the pane holds an image it does not, and guards its own input for as
+    /// long as the draft survives.
+    pub fn retain_attachments(&mut self, keep: usize) {
+        let mut seen = 0;
+        self.atoms.retain(|atom| match atom {
+            EditorAtom::Attachment(_) => {
+                seen += 1;
+                seen <= keep
+            }
+            EditorAtom::Character(_) | EditorAtom::LargePaste { .. } => true,
+        });
+        self.cursor = self.cursor.min(self.atoms.len());
+        self.preferred_column = None;
+        self.rebuild_projections();
+    }
+
     pub fn attachments(&self) -> Vec<Attachment> {
         self.atoms
             .iter()
