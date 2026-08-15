@@ -510,6 +510,7 @@ fn merge_styles(base: CellStyle, overlay: CellStyle) -> CellStyle {
             dim: base.modifiers.dim || overlay.modifiers.dim,
             italic: base.modifiers.italic || overlay.modifiers.italic,
             underline: base.modifiers.underline || overlay.modifiers.underline,
+            reverse: base.modifiers.reverse || overlay.modifiers.reverse,
         },
     }
 }
@@ -533,6 +534,9 @@ fn ratatui_style(style: CellStyle) -> Style {
     }
     if style.modifiers.underline {
         rendered = rendered.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.modifiers.reverse {
+        rendered = rendered.add_modifier(Modifier::REVERSED);
     }
     rendered
 }

@@ -1,6 +1,9 @@
 use crate::agent::AgentKind;
 use crate::composer::composer_content_start;
 use crate::style::{AnsiColor, StyleRun, StyleRunBuilder, StyleState, StyledText};
+use unicode_width::UnicodeWidthChar;
+
+const TAB_WIDTH: usize = 8;
 
 struct NativeChrome {
     role_prefixes: &'static [&'static str],
@@ -41,20 +44,32 @@ const CLAUDE_CHROME: NativeChrome = NativeChrome {
 
 pub fn sanitize_ansi(input: &str) -> StyledText {
     let bytes = input.as_bytes();
-    let mut text = String::with_capacity(input.len());
-    let mut runs = StyleRunBuilder::new();
+    let mut cells: Vec<(char, StyleState)> = Vec::with_capacity(input.len());
+    let mut column = 0;
     let mut style = StyleState::default();
     let mut index = 0;
 
     while index < bytes.len() {
         match bytes[index] {
-            b'\x1b' => index = consume_escape(bytes, index, &mut style, &mut runs, text.len()),
+            b'\x1b' => index = consume_escape(bytes, index, &mut style),
             b'\r' => {
-                text.push('\n');
+                // The source is a rendered pane grid, so a carriage return
+                // terminates a line here rather than overwriting one.
+                cells.push(('\n', style));
+                column = 0;
                 index += usize::from(bytes.get(index + 1) == Some(&b'\n')) + 1;
             }
             b'\n' => {
-                text.push('\n');
+                cells.push(('\n', style));
+                column = 0;
+                index += 1;
+            }
+            b'\t' => {
+                // Dropping tabs collapsed the indentation of captured code and
+                // merged the columns either side of them into one word.
+                let advance = TAB_WIDTH - (column % TAB_WIDTH);
+                cells.extend(std::iter::repeat_n((' ', style), advance));
+                column += advance;
                 index += 1;
             }
             0x00..=0x1f | 0x7f => index += 1,
@@ -64,13 +79,20 @@ pub fn sanitize_ansi(input: &str) -> StyledText {
                     .next()
                     .expect("index is always on a UTF-8 boundary");
                 if !character.is_control() {
-                    text.push(character);
+                    cells.push((character, style));
+                    column += UnicodeWidthChar::width(character).unwrap_or(0);
                 }
                 index += character.len_utf8();
             }
         }
     }
 
+    let mut text = String::with_capacity(cells.len());
+    let mut runs = StyleRunBuilder::new();
+    for (character, style) in cells {
+        runs.set_style(style, text.len());
+        text.push(character);
+    }
     StyledText {
         runs: runs.finish(text.len()),
         text,
@@ -452,18 +474,12 @@ fn slice_mapped_runs(runs: &[StyleRun], mappings: &[(usize, usize, usize)]) -> V
     sliced
 }
 
-fn consume_escape(
-    bytes: &[u8],
-    start: usize,
-    style: &mut StyleState,
-    runs: &mut StyleRunBuilder,
-    output_position: usize,
-) -> usize {
+fn consume_escape(bytes: &[u8], start: usize, style: &mut StyleState) -> usize {
     let Some(&kind) = bytes.get(start + 1) else {
         return bytes.len();
     };
     match kind {
-        b'[' => consume_csi(bytes, start, style, runs, output_position),
+        b'[' => consume_csi(bytes, start, style),
         b']' => consume_osc(bytes, start),
         b'P' | b'_' | b'^' => consume_st_string(bytes, start + 2),
         0x20..=0x2f => consume_escape_with_intermediate(bytes, start + 2),
@@ -472,18 +488,12 @@ fn consume_escape(
     }
 }
 
-fn consume_csi(
-    bytes: &[u8],
-    start: usize,
-    style: &mut StyleState,
-    runs: &mut StyleRunBuilder,
-    output_position: usize,
-) -> usize {
+fn consume_csi(bytes: &[u8], start: usize, style: &mut StyleState) -> usize {
     let mut index = start + 2;
     while let Some(&byte) = bytes.get(index) {
         if (0x40..=0x7e).contains(&byte) {
             if byte == b'm' {
-                apply_sgr(&bytes[start + 2..index], style, runs, output_position);
+                apply_sgr(&bytes[start + 2..index], style);
             }
             return index + 1;
         }
@@ -527,12 +537,7 @@ fn consume_escape_with_intermediate(bytes: &[u8], mut index: usize) -> usize {
     }
 }
 
-fn apply_sgr(
-    parameters: &[u8],
-    style: &mut StyleState,
-    runs: &mut StyleRunBuilder,
-    output_position: usize,
-) {
+fn apply_sgr(parameters: &[u8], style: &mut StyleState) {
     let Some(parameters) = parse_parameters(parameters) else {
         return;
     };
@@ -545,12 +550,14 @@ fn apply_sgr(
             2 => next.modifiers.dim = true,
             3 => next.modifiers.italic = true,
             4 => next.modifiers.underline = true,
+            7 => next.modifiers.reverse = true,
             22 => {
                 next.modifiers.bold = false;
                 next.modifiers.dim = false;
             }
             23 => next.modifiers.italic = false,
             24 => next.modifiers.underline = false,
+            27 => next.modifiers.reverse = false,
             30..=37 | 90..=97 => next.foreground = named_color(parameters[index]),
             39 => next.foreground = None,
             40..=47 | 100..=107 => next.background = named_color(parameters[index]),
@@ -566,11 +573,14 @@ fn apply_sgr(
                 }
                 index += consumed.saturating_sub(1);
             }
+            // Underline colour carries the same sub-parameters as 38/48.
+            // Without skipping them the colour components were re-read as
+            // ordinary SGR codes and could reset the run's styling.
+            58 => index += color_parameter_len(&parameters[index..]).saturating_sub(1),
             _ => {}
         }
         index += 1;
     }
-    runs.set_style(next, output_position);
     *style = next;
 }
 
