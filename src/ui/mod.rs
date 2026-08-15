@@ -581,6 +581,15 @@ fn adopt_native_draft(
     if parts.attachments > 0 && parts.text.contains('\n') {
         return Ok(None);
     }
+    if parts.text.is_empty() {
+        // Nothing to lift: the images stay where they are and the overlay only
+        // has to know they are there.
+        return Ok(Some(AdoptedDraft {
+            text: String::new(),
+            attachments: parts.attachments,
+            cleared: true,
+        }));
+    }
     let removal = removal_keys(&parts.text);
     for attempt in 0..attempts {
         press(&removal_prefix(parts.attachments))?;
@@ -1410,6 +1419,25 @@ mod tests {
             "describe it".chars().count(),
             "exactly the characters of the text, never one more"
         );
+    }
+
+    /// A bare image is adopted without touching the composer: there is nothing
+    /// to lift out, and the overlay only has to learn the image is there.
+    #[test]
+    fn a_bare_image_is_adopted_without_pressing_anything() {
+        let adopted = super::adopt_native_draft(
+            AgentKind::Codex,
+            || Ok(IMAGE_ONLY.to_owned()),
+            |_| panic!("a composer with nothing to lift must not be touched"),
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap()
+        .expect("a bare image must be adopted");
+
+        assert_eq!(adopted.text, "");
+        assert_eq!(adopted.attachments, 1);
+        assert!(adopted.cleared);
     }
 
     /// A wrapped draft carries newlines the buffer does not have, so counting
