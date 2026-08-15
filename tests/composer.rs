@@ -1,6 +1,6 @@
 use herdr_simple_prompts::agent::AgentKind;
 use herdr_simple_prompts::composer::{
-    ComposerAccess, NativeComposerState, classify_native_composer,
+    ComposerAccess, NativeComposerState, classify_native_composer, native_composer_text,
 };
 use herdr_simple_prompts::style::{AnsiColor, StyleModifiers, StyleRun, StyledText};
 
@@ -342,5 +342,29 @@ fn shipping_claude_chrome_classifies_the_composer() {
     assert_eq!(
         classify_native_composer(AgentKind::Claude, &surface("❯ [Image #1]")),
         NativeComposerState::OwnedAttachments(1),
+    );
+}
+
+/// Text sitting beside an image cannot be taken over: the overlay cannot carry
+/// the image, and clearing the composer to take the text would destroy it.
+#[test]
+fn a_composer_mixing_text_and_images_is_not_offered_for_adoption() {
+    let mixed = plain(concat!(
+        "• answer\n",
+        "────────\n",
+        "› [Image #1] describe it\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    ));
+    assert_eq!(native_composer_text(AgentKind::Codex, &mixed), None);
+
+    let text_only = plain(concat!(
+        "• answer\n",
+        "────────\n",
+        "› describe it\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    ));
+    assert_eq!(
+        native_composer_text(AgentKind::Codex, &text_only).as_deref(),
+        Some("describe it"),
     );
 }

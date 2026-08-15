@@ -145,6 +145,12 @@ pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<Str
         AgentKind::Claude => claude_content(&surface.text, &lines),
     }?;
     let content = chunk_text(surface, &chunks);
+    // A composer holding an image cannot be moved. The marker is a reference to
+    // something the overlay has no way to carry, and taking the text would mean
+    // clearing the composer — destroying the image with it.
+    if content.contains(ATTACHMENT_MARKER) {
+        return None;
+    }
     (!content.trim().is_empty()).then_some(content)
 }
 
@@ -196,6 +202,8 @@ fn placeholder_style_at(runs: &[StyleRun], start: usize, end: usize) -> bool {
     })
 }
 
+const ATTACHMENT_MARKER: &str = "[Image #";
+
 fn exact_attachment_count(content: &str) -> Option<usize> {
     let bytes = content.as_bytes();
     let mut index = 0;
@@ -207,7 +215,7 @@ fn exact_attachment_count(content: &str) -> Option<usize> {
         if index == bytes.len() {
             break;
         }
-        let prefix = b"[Image #";
+        let prefix = ATTACHMENT_MARKER.as_bytes();
         if !bytes[index..].starts_with(prefix) {
             return None;
         }
