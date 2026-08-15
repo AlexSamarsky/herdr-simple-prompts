@@ -374,3 +374,38 @@ fn word_motions_stop_at_a_collapsed_paste_edge() {
     editor.move_word_left();
     assert_eq!(editor.cursor_byte(), 0);
 }
+
+#[test]
+fn line_kills_cut_only_the_current_line() {
+    let mut editor = Editor::default();
+    editor.insert_paste("first line\nsecond line\nthird line");
+    editor.move_up();
+    editor.move_end();
+
+    editor.delete_to_line_start();
+    assert_eq!(editor.submission_text(), "first line\n\nthird line");
+
+    editor.move_home();
+    editor.delete_to_line_end();
+    assert_eq!(editor.submission_text(), "first line\n\nthird line");
+
+    editor.move_document_start();
+    editor.delete_to_line_end();
+    assert_eq!(editor.submission_text(), "\n\nthird line");
+    editor.delete_to_line_start();
+    assert_eq!(editor.submission_text(), "\n\nthird line");
+}
+
+/// A collapsed paste is one atom, so a line kill removes it whole or not at
+/// all — it can never leave half of a body the composer is not showing.
+#[test]
+fn line_kills_keep_a_collapsed_paste_whole() {
+    let body = "x".repeat(LARGE_PASTE_CHARS);
+    let mut editor = Editor::default();
+    editor.insert_paste("head ");
+    editor.insert_paste(&body);
+    editor.insert_paste(" tail");
+
+    editor.delete_to_line_start();
+    assert_eq!(editor.submission_text(), "");
+}
