@@ -784,7 +784,14 @@ fn apply_runtime_event(
             app.pending_attachments
                 .retain(|candidate| candidate.id != attachment.id);
             match result {
-                Ok(()) => {
+                Ok(marker) => {
+                    // The pane names the picture; the overlay repeats that name
+                    // rather than inventing one, or it would later ask for the
+                    // wrong image to be removed.
+                    let attachment = Attachment {
+                        display: format!("Image #{marker}"),
+                        ..attachment
+                    };
                     editor.insert_attachment(attachment);
                     app.draft_attachments = editor.attachments();
                     DraftChange::Immediate
@@ -1605,6 +1612,44 @@ mod tests {
             actions.try_recv().unwrap(),
             runtime::ActionCommand::RemoveAttachment { marker: 5, .. }
         ));
+    }
+
+    /// The pane numbers an image when it takes it, and that number is what the
+    /// overlay must later name when asking for it back — a number invented here
+    /// would point at a different picture.
+    #[test]
+    fn a_pasted_image_takes_the_number_the_pane_gave_it() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let original = AgentIdentity {
+            pane_id: "w1:p1".into(),
+            kind: AgentKind::Codex,
+            session_id: "session-1".into(),
+            cwd: PathBuf::from("/repo"),
+            status: AgentStatus::Idle,
+        };
+        let mut app = AppState::default();
+        let mut editor = Editor::default();
+        let mut cache = render::HistoryRenderCache::default();
+
+        apply_runtime_event(
+            runtime::RuntimeEvent::ImageForwarded {
+                attachment: Attachment {
+                    id: "local-image-1".into(),
+                    display: "Image #1".into(),
+                    native_path: None,
+                },
+                result: Ok(7),
+            },
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+
+        assert_eq!(editor.display_text(), "[Image #7] ");
+        assert_eq!(app.draft_attachments.len(), 1);
+        assert_eq!(app.draft_attachments[0].display, "Image #7");
     }
 
     #[test]

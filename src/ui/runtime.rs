@@ -79,7 +79,9 @@ pub enum RuntimeEvent {
     InteractionForwarded(Result<(), String>),
     ImageForwarded {
         attachment: Attachment,
-        result: Result<(), String>,
+        /// The number the pane gave the image, so the overlay can call it what
+        /// the pane calls it.
+        result: Result<usize, String>,
     },
     AttachmentRemoved {
         id: String,
