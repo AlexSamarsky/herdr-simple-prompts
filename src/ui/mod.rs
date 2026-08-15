@@ -371,6 +371,41 @@ fn handle_key(
             }
             DraftChange::None
         }
+        // Word editing. Terminals disagree about what the option key sends:
+        // some emit a modified arrow, others the readline escapes (`alt+b`,
+        // `alt+f`, `alt+d`), so both spellings are accepted.
+        (KeyCode::Backspace, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.delete_word_left();
+            DraftChange::Debounced
+        }
+        (KeyCode::Char('w'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            editor.delete_word_left();
+            DraftChange::Debounced
+        }
+        (KeyCode::Delete, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.delete_word_right();
+            DraftChange::Debounced
+        }
+        (KeyCode::Char('d'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.delete_word_right();
+            DraftChange::Debounced
+        }
+        (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.move_word_left();
+            DraftChange::None
+        }
+        (KeyCode::Char('b'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.move_word_left();
+            DraftChange::None
+        }
+        (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.move_word_right();
+            DraftChange::None
+        }
+        (KeyCode::Char('f'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            editor.move_word_right();
+            DraftChange::None
+        }
         (KeyCode::Backspace, _) => {
             editor.backspace();
             DraftChange::Debounced
@@ -893,6 +928,87 @@ mod tests {
         ));
         assert!(app.pending_attachments.is_empty());
         assert!(app.draft_attachments.is_empty());
+    }
+
+    /// Word editing has to answer both spellings of the option key: a modified
+    /// arrow, and the readline escapes that other terminals send instead.
+    #[test]
+    fn word_hotkeys_edit_the_composer_in_both_spellings() {
+        for (delete_left, delete_right, left, right) in [
+            (
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT),
+            ),
+        ] {
+            let (runtime, _actions) = runtime::interaction_test_runtime(1);
+            let mut app = AppState {
+                native_composer: NativeComposerState::Clear,
+                ..AppState::default()
+            };
+            let mut editor = Editor::default();
+            editor.insert_paste("alpha beta gamma");
+            let mut sequence = 1;
+            let mut cache = render::HistoryRenderCache::default();
+            let mut press = |key, app: &mut AppState, editor: &mut Editor, cache: &mut _| {
+                handle_key(key, app, editor, &runtime, &mut sequence, cache).unwrap()
+            };
+
+            assert_eq!(
+                press(delete_left, &mut app, &mut editor, &mut cache),
+                super::DraftChange::Debounced
+            );
+            assert_eq!(editor.submission_text(), "alpha beta ");
+
+            assert_eq!(
+                press(left, &mut app, &mut editor, &mut cache),
+                super::DraftChange::None
+            );
+            assert_eq!(editor.cursor_byte(), "alpha ".len());
+
+            assert_eq!(
+                press(right, &mut app, &mut editor, &mut cache),
+                super::DraftChange::None
+            );
+            assert_eq!(editor.cursor_byte(), "alpha beta".len());
+
+            press(left, &mut app, &mut editor, &mut cache);
+            press(delete_right, &mut app, &mut editor, &mut cache);
+            assert_eq!(editor.submission_text(), "alpha  ");
+        }
+    }
+
+    #[test]
+    fn word_hotkeys_stay_blocked_while_the_composer_is_guarded() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::Occupied,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("alpha beta");
+        let before = editor.snapshot();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(editor.snapshot(), before);
     }
 
     #[test]

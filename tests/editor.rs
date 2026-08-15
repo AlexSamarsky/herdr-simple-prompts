@@ -297,3 +297,80 @@ fn only_existing_herdr_staged_image_paths_are_recognized() {
 
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn word_motions_step_over_whole_words() {
+    let mut editor = Editor::default();
+    editor.insert_paste("hello world  foo");
+
+    for expected in ["hello world  ".len(), "hello ".len(), 0, 0] {
+        editor.move_word_left();
+        assert_eq!(editor.cursor_byte(), expected);
+    }
+    for expected in [
+        "hello".len(),
+        "hello world".len(),
+        "hello world  foo".len(),
+        "hello world  foo".len(),
+    ] {
+        editor.move_word_right();
+        assert_eq!(editor.cursor_byte(), expected);
+    }
+}
+
+#[test]
+fn word_deletion_removes_one_word_at_a_time() {
+    let mut editor = Editor::default();
+    editor.insert_paste("alpha beta gamma");
+
+    editor.delete_word_left();
+    assert_eq!(editor.submission_text(), "alpha beta ");
+    editor.delete_word_left();
+    assert_eq!(editor.submission_text(), "alpha ");
+
+    editor.move_home();
+    editor.delete_word_right();
+    assert_eq!(editor.submission_text(), " ");
+    editor.delete_word_right();
+    assert_eq!(editor.submission_text(), "");
+    editor.delete_word_left();
+    editor.delete_word_right();
+    assert_eq!(editor.submission_text(), "");
+}
+
+/// A collapsed paste stands for a block of text the composer is not showing, so
+/// a word operation has to treat it as one unit instead of stepping inside it.
+#[test]
+fn a_collapsed_paste_counts_as_a_single_word() {
+    let body = "x".repeat(LARGE_PASTE_CHARS);
+    let mut editor = Editor::default();
+    editor.insert_paste("before ");
+    editor.insert_paste(&body);
+    editor.insert_paste(" after");
+
+    editor.delete_word_left();
+    assert_eq!(editor.submission_text(), format!("before {body} "));
+
+    editor.delete_word_left();
+    assert_eq!(
+        editor.submission_text(),
+        "before ",
+        "the paste must be removed whole, never split"
+    );
+}
+
+#[test]
+fn word_motions_stop_at_a_collapsed_paste_edge() {
+    let body = "x".repeat(LARGE_PASTE_CHARS);
+    let mut editor = Editor::default();
+    editor.insert_paste("before ");
+    editor.insert_paste(&body);
+    editor.insert_paste(" after");
+
+    editor.move_word_left();
+    assert_eq!(editor.cursor_byte(), format!("before {body} ").len());
+    editor.move_word_left();
+    assert_eq!(editor.cursor_byte(), "before ".len());
+    editor.move_word_left();
+    assert_eq!(editor.cursor_byte(), 0);
+}
