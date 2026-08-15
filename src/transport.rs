@@ -258,8 +258,13 @@ pub fn remove_native_attachment(
     kind: AgentKind,
     marker: usize,
     mut read: impl FnMut() -> AppResult<String>,
-    mut press: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+    mut send: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
 ) -> AppResult<bool> {
+    let mut press = move |keys: &[&str], text: Option<&str>| -> AppResult<()> {
+        send(keys, text)?;
+        thread::sleep(KEY_SPACING);
+        Ok(())
+    };
     let markers = composer_markers(kind, &read()?);
     let Some(position) = markers.iter().position(|held| *held == marker) else {
         // The pane holds no such image. Only when it holds none at all is that
