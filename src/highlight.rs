@@ -22,6 +22,10 @@ pub(crate) enum Language {
     Shell,
     Json,
     Python,
+    Script,
+    Yaml,
+    Toml,
+    Diff,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +36,9 @@ pub(crate) enum TokenKind {
     Keyword,
     Type,
     Function,
+    Added,
+    Removed,
+    Meta,
 }
 
 impl TokenKind {
@@ -39,10 +46,10 @@ impl TokenKind {
     /// yellow, `str`/`dict` cyan, string literals red, numerals green.
     pub(crate) fn color(self) -> AnsiColor {
         match self {
-            Self::Comment | Self::Number => AnsiColor::Indexed(2),
-            Self::String => AnsiColor::Indexed(1),
+            Self::Comment | Self::Number | Self::Added => AnsiColor::Indexed(2),
+            Self::String | Self::Removed => AnsiColor::Indexed(1),
             Self::Keyword => AnsiColor::Indexed(4),
-            Self::Type => AnsiColor::Indexed(6),
+            Self::Type | Self::Meta => AnsiColor::Indexed(6),
             Self::Function => AnsiColor::Indexed(3),
         }
     }
@@ -67,11 +74,41 @@ pub(crate) fn language(info: &str) -> Option<Language> {
         "bash" | "sh" | "shell" | "zsh" => Some(Language::Shell),
         "json" | "jsonc" => Some(Language::Json),
         "python" | "py" => Some(Language::Python),
+        "javascript" | "js" | "jsx" | "typescript" | "ts" | "tsx" => Some(Language::Script),
+        "yaml" | "yml" => Some(Language::Yaml),
+        "toml" => Some(Language::Toml),
+        "diff" | "patch" => Some(Language::Diff),
+        _ => None,
+    }
+}
+
+/// A diff is coloured by line, not by token: the leading marker decides the
+/// whole line, which is how every diff viewer renders one.
+fn diff_line(line: &str) -> Option<TokenKind> {
+    const META: [&str; 6] = ["+++", "---", "@@", "diff ", "index ", "=== "];
+    if META.iter().any(|prefix| line.starts_with(prefix)) {
+        return Some(TokenKind::Meta);
+    }
+    match line.as_bytes().first() {
+        Some(b'+') => Some(TokenKind::Added),
+        Some(b'-') => Some(TokenKind::Removed),
         _ => None,
     }
 }
 
 pub(crate) fn tokens(language: Language, line: &str) -> Vec<Token> {
+    if language == Language::Diff {
+        return diff_line(line)
+            .map(|kind| {
+                vec![Token {
+                    start: 0,
+                    end: line.len(),
+                    kind,
+                }]
+            })
+            .unwrap_or_default();
+    }
+
     let bytes = line.as_bytes();
     let mut tokens = Vec::new();
     let mut index = 0;
@@ -96,7 +133,7 @@ pub(crate) fn tokens(language: Language, line: &str) -> Vec<Token> {
         }
         if starts_word(byte) {
             let end = word_end(bytes, index);
-            if let Some((end, kind)) = classify(language, &line[index..end], bytes, end) {
+            if let Some((end, kind)) = classify(language, &line[index..end], bytes, index, end) {
                 push(&mut tokens, index, end, kind);
             }
             index = end;
@@ -116,17 +153,22 @@ fn push(tokens: &mut Vec<Token>, start: usize, end: usize, kind: TokenKind) {
 
 fn comment_starts_at(language: Language, bytes: &[u8], index: usize) -> bool {
     match language {
-        Language::Rust => bytes[index..].starts_with(b"//"),
-        Language::Shell | Language::Python => bytes[index] == b'#',
-        Language::Json => false,
+        Language::Rust | Language::Script => bytes[index..].starts_with(b"//"),
+        Language::Shell | Language::Python | Language::Yaml | Language::Toml => {
+            bytes[index] == b'#'
+        }
+        Language::Json | Language::Diff => false,
     }
 }
 
 fn quote_opens(language: Language, byte: u8) -> bool {
     match language {
         Language::Json => byte == b'"',
-        Language::Rust => matches!(byte, b'"' | b'\''),
-        Language::Shell | Language::Python => matches!(byte, b'"' | b'\''),
+        Language::Script => matches!(byte, b'"' | b'\'' | b'`'),
+        Language::Diff => false,
+        Language::Rust | Language::Shell | Language::Python | Language::Yaml | Language::Toml => {
+            matches!(byte, b'"' | b'\'')
+        }
     }
 }
 
@@ -177,6 +219,7 @@ fn classify(
     language: Language,
     word: &str,
     bytes: &[u8],
+    start: usize,
     end: usize,
 ) -> Option<(usize, TokenKind)> {
     if keywords(language).contains(&word) {
@@ -188,10 +231,35 @@ fn classify(
     if let Some(call_end) = call_end(language, bytes, end) {
         return Some((call_end, TokenKind::Function));
     }
+    if structural_key(language, bytes, start, end) {
+        return Some((end, TokenKind::Type));
+    }
     if builtins(language).contains(&word) {
         return Some((end, TokenKind::Function));
     }
     None
+}
+
+/// Whether a bare word is the key of a configuration entry.
+///
+/// Only a word that opens its line can be one, so a `:` inside a value — the
+/// scheme of a URL, say — is not mistaken for a key.
+fn structural_key(language: Language, bytes: &[u8], start: usize, end: usize) -> bool {
+    let (openers, terminators): (&[u8], &[u8]) = match language {
+        Language::Yaml => (b" -", b":"),
+        Language::Toml => (b" [.", b"=].".as_slice()),
+        _ => return false,
+    };
+    if !bytes[..start].iter().all(|byte| openers.contains(byte)) {
+        return false;
+    }
+    let mut index = end;
+    while bytes.get(index) == Some(&b' ') {
+        index += 1;
+    }
+    bytes
+        .get(index)
+        .is_some_and(|byte| terminators.contains(byte))
 }
 
 fn call_end(language: Language, bytes: &[u8], end: usize) -> Option<usize> {
@@ -209,15 +277,26 @@ fn call_end(language: Language, bytes: &[u8], end: usize) -> Option<usize> {
 
 fn is_type(language: Language, word: &str) -> bool {
     match language {
-        Language::Rust => {
-            RUST_TYPES.contains(&word)
+        Language::Rust | Language::Script => {
+            types(language).contains(&word)
                 || word
                     .chars()
                     .next()
                     .is_some_and(|character| character.is_ascii_uppercase())
         }
         Language::Python => PYTHON_TYPES.contains(&word),
-        Language::Shell | Language::Json => false,
+        Language::Shell | Language::Json | Language::Yaml | Language::Toml | Language::Diff => {
+            false
+        }
+    }
+}
+
+fn types(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::Rust => RUST_TYPES,
+        Language::Python => PYTHON_TYPES,
+        Language::Script => SCRIPT_TYPES,
+        _ => &[],
     }
 }
 
@@ -234,6 +313,58 @@ fn keywords(language: Language) -> &'static [&'static str] {
             "function", "if", "in", "local", "readonly", "return", "then", "until", "while",
         ],
         Language::Json => &["false", "null", "true"],
+        Language::Script => &[
+            "as",
+            "async",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "enum",
+            "export",
+            "extends",
+            "false",
+            "finally",
+            "for",
+            "from",
+            "function",
+            "if",
+            "implements",
+            "import",
+            "in",
+            "instanceof",
+            "interface",
+            "let",
+            "new",
+            "null",
+            "of",
+            "private",
+            "public",
+            "readonly",
+            "return",
+            "static",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "true",
+            "try",
+            "type",
+            "typeof",
+            "undefined",
+            "var",
+            "while",
+            "yield",
+        ],
+        Language::Yaml | Language::Toml => &["false", "no", "null", "off", "on", "true", "yes"],
+        Language::Diff => &[],
         Language::Python => &[
             "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
             "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import",
@@ -249,13 +380,23 @@ fn builtins(language: Language) -> &'static [&'static str] {
             "cd", "echo", "eval", "exec", "exit", "printf", "pwd", "read", "set", "shift",
             "source", "test", "unset",
         ],
-        Language::Rust | Language::Json | Language::Python => &[],
+        Language::Rust
+        | Language::Json
+        | Language::Python
+        | Language::Script
+        | Language::Yaml
+        | Language::Toml
+        | Language::Diff => &[],
     }
 }
 
 const RUST_TYPES: &[&str] = &[
     "bool", "char", "f32", "f64", "i128", "i16", "i32", "i64", "i8", "isize", "str", "u128", "u16",
     "u32", "u64", "u8", "usize",
+];
+
+const SCRIPT_TYPES: &[&str] = &[
+    "any", "bigint", "boolean", "never", "number", "object", "string", "symbol", "unknown", "void",
 ];
 
 const PYTHON_TYPES: &[&str] = &[
@@ -435,6 +576,83 @@ mod tests {
         );
     }
 
+    /// A diff is coloured by line. The palette here follows the universal diff
+    /// convention — added green, removed red, hunk headers cyan — rather than a
+    /// pane measurement, which is the one place in this module that is
+    /// convention rather than observation.
+    #[test]
+    fn diffs_are_coloured_by_their_leading_marker() {
+        for (line, kind) in [
+            ("+++ b/src/main.rs", Some(TokenKind::Meta)),
+            ("--- a/src/main.rs", Some(TokenKind::Meta)),
+            ("@@ -1,4 +1,6 @@", Some(TokenKind::Meta)),
+            ("diff --git a/x b/x", Some(TokenKind::Meta)),
+            ("+    let added = 1;", Some(TokenKind::Added)),
+            ("-    let removed = 1;", Some(TokenKind::Removed)),
+            ("     let untouched = 1;", None),
+            ("", None),
+        ] {
+            let expected = kind.map(|kind| vec![(line, kind)]).unwrap_or_default();
+            assert_eq!(classified(Language::Diff, line), expected, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn script_sources_colour_keywords_types_and_templates() {
+        assert_eq!(
+            classified(Language::Script, "export const total: number = call(1);"),
+            vec![
+                ("export", TokenKind::Keyword),
+                ("const", TokenKind::Keyword),
+                ("number", TokenKind::Type),
+                ("call", TokenKind::Function),
+                ("1", TokenKind::Number),
+            ],
+        );
+        assert_eq!(
+            classified(Language::Script, "// a comment"),
+            vec![("// a comment", TokenKind::Comment)],
+        );
+        assert_eq!(
+            classified(Language::Script, "const label = `template ${value}`;"),
+            vec![
+                ("const", TokenKind::Keyword),
+                ("`template ${value}`", TokenKind::String),
+            ],
+        );
+    }
+
+    #[test]
+    fn configuration_keys_are_coloured_only_when_they_open_a_line() {
+        assert_eq!(
+            classified(Language::Yaml, "  - name: value # trailing"),
+            vec![
+                ("name", TokenKind::Type),
+                ("# trailing", TokenKind::Comment),
+            ],
+        );
+        assert_eq!(
+            classified(Language::Yaml, "url: https://example.test"),
+            vec![("url", TokenKind::Type)],
+            "a scheme inside a value is not a key",
+        );
+        assert_eq!(
+            classified(Language::Yaml, "enabled: true"),
+            vec![("enabled", TokenKind::Type), ("true", TokenKind::Keyword)],
+        );
+        assert_eq!(
+            classified(Language::Toml, "[package]"),
+            vec![("package", TokenKind::Type)],
+        );
+        assert_eq!(
+            classified(Language::Toml, "version = \"0.1.0\""),
+            vec![
+                ("version", TokenKind::Type),
+                ("\"0.1.0\"", TokenKind::String)
+            ],
+        );
+    }
+
     #[test]
     fn info_strings_resolve_aliases_and_ignore_attributes() {
         assert_eq!(language("rust"), Some(Language::Rust));
@@ -443,6 +661,12 @@ mod tests {
         assert_eq!(language("BASH"), Some(Language::Shell));
         assert_eq!(language("py"), Some(Language::Python));
         assert_eq!(language("jsonc"), Some(Language::Json));
+        assert_eq!(language("ts"), Some(Language::Script));
+        assert_eq!(language("tsx"), Some(Language::Script));
+        assert_eq!(language("javascript"), Some(Language::Script));
+        assert_eq!(language("yml"), Some(Language::Yaml));
+        assert_eq!(language("toml"), Some(Language::Toml));
+        assert_eq!(language("patch"), Some(Language::Diff));
         assert_eq!(language(""), None);
         assert_eq!(language("brainfuck"), None);
     }
