@@ -194,6 +194,37 @@ impl Editor {
         self.preferred_column = None;
     }
 
+    pub fn move_word_left(&mut self) {
+        self.cursor = self.word_start_before(self.cursor);
+        self.preferred_column = None;
+    }
+
+    pub fn move_word_right(&mut self) {
+        self.cursor = self.word_end_after(self.cursor);
+        self.preferred_column = None;
+    }
+
+    pub fn delete_word_left(&mut self) {
+        let start = self.word_start_before(self.cursor);
+        if start == self.cursor {
+            return;
+        }
+        self.atoms.drain(start..self.cursor);
+        self.cursor = start;
+        self.preferred_column = None;
+        self.rebuild_projections();
+    }
+
+    pub fn delete_word_right(&mut self) {
+        let end = self.word_end_after(self.cursor);
+        if end == self.cursor {
+            return;
+        }
+        self.atoms.drain(self.cursor..end);
+        self.preferred_column = None;
+        self.rebuild_projections();
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
@@ -320,6 +351,50 @@ impl Editor {
         };
         self.clear();
         submission
+    }
+
+    /// Word boundaries are counted in atoms, not bytes.
+    ///
+    /// A collapsed paste is a single atom and stands for a whole block of text,
+    /// so it counts as one word: a word motion stops at its edge instead of
+    /// stepping into a body the composer is not showing.
+    fn word_start_before(&self, cursor: usize) -> usize {
+        let mut index = cursor;
+        while index > 0 && self.is_whitespace(index - 1) {
+            index -= 1;
+        }
+        if index > 0 && self.is_paste(index - 1) {
+            return index - 1;
+        }
+        while index > 0 && !self.is_whitespace(index - 1) && !self.is_paste(index - 1) {
+            index -= 1;
+        }
+        index
+    }
+
+    fn word_end_after(&self, cursor: usize) -> usize {
+        let mut index = cursor;
+        while index < self.atoms.len() && self.is_whitespace(index) {
+            index += 1;
+        }
+        if index < self.atoms.len() && self.is_paste(index) {
+            return index + 1;
+        }
+        while index < self.atoms.len() && !self.is_whitespace(index) && !self.is_paste(index) {
+            index += 1;
+        }
+        index
+    }
+
+    fn is_whitespace(&self, index: usize) -> bool {
+        matches!(
+            self.atoms.get(index),
+            Some(EditorAtom::Character(character)) if character.is_whitespace()
+        )
+    }
+
+    fn is_paste(&self, index: usize) -> bool {
+        matches!(self.atoms.get(index), Some(EditorAtom::LargePaste { .. }))
     }
 
     fn rebuild_projections(&mut self) {
