@@ -217,6 +217,12 @@ impl AgentTransport {
 /// deleted again immediately.
 const CURSOR_PROBE: &str = "~";
 
+/// A pane redraws after it is typed into, not while. Reading it in the same
+/// breath as pressing a key sees the state before the key — which made every
+/// probe look misplaced and every walk give up.
+const PANE_SETTLE: Duration = Duration::from_millis(60);
+const PANE_SETTLE_ATTEMPTS: usize = 8;
+
 /// Removes one image from the native composer, without ever guessing.
 ///
 /// Measured on a live pane: one backspace removes a whole marker, and the
@@ -250,17 +256,39 @@ pub fn remove_native_attachment(
     press(&["ctrl+e"], None)?;
     for _ in 0..=(2 * trailing + 2) {
         press(&[], Some(CURSOR_PROBE))?;
-        let placed = native_composer_content(kind, &sanitize_ansi(&read()?))
-            .is_some_and(|content| content.contains(&needle));
+        let probed = settle(kind, &mut read, |content| content.contains(CURSOR_PROBE))?;
+        let placed = probed.is_some_and(|content| content.contains(&needle));
         press(&["backspace"], None)?;
         if placed {
             press(&["backspace"], None)?;
+            let gone = format!("[Image #{marker}]");
+            settle(kind, &mut read, |content| !content.contains(&gone))?;
             let left = composer_markers(kind, &read()?);
             return Ok(!left.contains(&marker) && left.len() + 1 == markers.len());
         }
+        settle(kind, &mut read, |content| !content.contains(CURSOR_PROBE))?;
         press(&["left"], None)?;
     }
     Ok(false)
+}
+
+/// Reads the pane until it shows what was just typed into it.
+///
+/// Returns the settled content, or `None` if the pane never came to show it —
+/// which the caller treats as "not where I wanted", never as "go ahead".
+fn settle(
+    kind: AgentKind,
+    read: &mut impl FnMut() -> AppResult<String>,
+    is_settled: impl Fn(&str) -> bool,
+) -> AppResult<Option<String>> {
+    for _ in 0..PANE_SETTLE_ATTEMPTS {
+        thread::sleep(PANE_SETTLE);
+        let content = native_composer_content(kind, &sanitize_ansi(&read()?));
+        if content.as_deref().is_some_and(&is_settled) {
+            return Ok(content);
+        }
+    }
+    Ok(None)
 }
 
 fn composer_markers(kind: AgentKind, ansi: &str) -> Vec<usize> {
