@@ -4,7 +4,9 @@ use crate::composer::ComposerAccess;
 use crate::editor::Editor;
 use crate::markdown::is_safe_hyperlink_url;
 use crate::style::AnsiColor;
-use crate::ui::visual_rows::{CellStyle, HistoryDocument, TurnRenderCache, VisualRow, wrap_styled};
+use crate::ui::visual_rows::{
+    CellStyle, HistoryDocument, TurnRenderCache, VisualRow, wrap_plain, wrap_styled,
+};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
@@ -12,7 +14,7 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use std::io;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
@@ -170,9 +172,11 @@ fn render(
     } else {
         attachment_visual_height(app, area.width)
     };
-    let editor_rows = composer_guard
-        .map(|warning| wrapped_text_height(warning, area.width))
-        .unwrap_or_else(|| wrapped_text_height(display_text, area.width));
+    let cells = usize::from(area.width.max(1));
+    let wrapped_draft = wrap_plain(display_text, cells);
+    let wrapped_guard = composer_guard.map(|warning| wrap_plain(warning, cells));
+    let editor_rows = u16::try_from(wrapped_guard.as_ref().unwrap_or(&wrapped_draft).height())
+        .unwrap_or(u16::MAX);
     let composer_rows = attachment_rows.saturating_add(editor_rows);
     let composer_height = (composer_rows + 1).clamp(3, (area.height * 2 / 5).max(3));
     let error_height = u16::from(app.visible_error().is_some());
@@ -252,29 +256,31 @@ fn render(
             "Input disabled · reopen Simple Prompts",
             Style::default().fg(Color::Red),
         )));
-    } else if let Some(warning) = composer_guard {
-        composer_lines.push(Line::from(Span::styled(
-            warning,
-            Style::default().fg(Color::Yellow),
-        )));
+    } else if let Some(wrapped) = wrapped_guard.as_ref() {
+        composer_lines.extend(wrapped.rows.iter().map(|row| {
+            Line::from(Span::styled(
+                row.clone(),
+                Style::default().fg(Color::Yellow),
+            ))
+        }));
     } else if display_text.is_empty() {
         composer_lines.push(Line::from(Span::styled(
             "Write a prompt",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        composer_lines.extend(display_text.lines().map(|line| Line::from(line.to_owned())));
+        composer_lines.extend(wrapped_draft.rows.iter().map(|row| Line::from(row.clone())));
     }
     let composer = Text::from(composer_lines);
-    let (editor_row, editor_column) =
-        editor_visual_cursor(display_text, editor.display_cursor_byte(), areas[3].width);
+    let (editor_row, editor_column) = wrapped_draft.cell_of(editor.display_cursor_byte());
+    let editor_row = u16::try_from(editor_row).unwrap_or(u16::MAX);
+    let editor_column = u16::try_from(editor_column).unwrap_or(u16::MAX);
     let cursor_content_row = attachment_rows.saturating_add(editor_row);
     let visible_composer_rows = areas[3].height.saturating_sub(1).max(1);
     let composer_scroll = cursor_content_row.saturating_sub(visible_composer_rows - 1);
     frame.render_widget(
         Paragraph::new(composer)
             .block(Block::default().borders(Borders::TOP))
-            .wrap(Wrap { trim: false })
             .scroll((composer_scroll, 0)),
         areas[3],
     );
@@ -565,34 +571,6 @@ fn ratatui_color(color: AnsiColor) -> Color {
     }
 }
 
-fn wrapped_text_height(text: &str, width: u16) -> u16 {
-    let width = usize::from(width.max(1));
-    text.split('\n').fold(0_u16, |height, line| {
-        let line_width = unicode_width::UnicodeWidthStr::width(line);
-        let wrapped = line_width.max(1).div_ceil(width);
-        height.saturating_add(u16::try_from(wrapped).unwrap_or(u16::MAX))
-    })
-}
-
-fn editor_visual_cursor(text: &str, cursor: usize, width: u16) -> (u16, u16) {
-    let width = usize::from(width.max(1));
-    let before = &text[..cursor];
-    let mut rows = 0_u16;
-    let mut lines = before.split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let line_width = unicode_width::UnicodeWidthStr::width(line);
-        if lines.peek().is_some() {
-            rows = rows.saturating_add(
-                u16::try_from(line_width.max(1).div_ceil(width)).unwrap_or(u16::MAX),
-            );
-        } else {
-            rows = rows.saturating_add(u16::try_from(line_width / width).unwrap_or(u16::MAX));
-            return (rows, u16::try_from(line_width % width).unwrap_or(u16::MAX));
-        }
-    }
-    (rows, 0)
-}
-
 fn attachment_visual_height(app: &AppState, width: u16) -> u16 {
     let confirmed = app
         .draft_attachments
@@ -611,7 +589,8 @@ fn attachment_visual_height(app: &AppState, width: u16) -> u16 {
             )
         });
     confirmed.chain(pending).fold(0_u16, |height, line| {
-        height.saturating_add(wrapped_text_height(&line, width))
+        let rows = wrap_plain(&line, usize::from(width.max(1))).height();
+        height.saturating_add(u16::try_from(rows).unwrap_or(u16::MAX))
     })
 }
 
@@ -680,10 +659,7 @@ pub fn render_to_string(app: &AppState, editor: &Editor, width: u16, height: u16
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HistoryRenderCache, HyperlinkArea, editor_visual_cursor, hyperlink_patches, plain_cells,
-        wrapped_text_height,
-    };
+    use super::{HistoryRenderCache, HyperlinkArea, hyperlink_patches, plain_cells};
     use crate::app::{AppEvent, AppState};
     use crate::model::Message;
     use crate::style::{AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyledText};
@@ -715,11 +691,26 @@ mod tests {
         }
     }
 
+    /// The composer draws, measures and places its cursor from one wrapping.
+    ///
+    /// They used to disagree: the text was drawn with word wrapping while the
+    /// cursor divided by the width, so as soon as a word wrapped the cursor sat
+    /// in empty space and the box came out a row short.
     #[test]
-    fn wrapped_cursor_uses_display_rows_and_columns() {
-        assert_eq!(wrapped_text_height("abcdefghij", 4), 3);
-        assert_eq!(editor_visual_cursor("abcdefghij", 10, 4), (2, 2));
-        assert_eq!(editor_visual_cursor("abcd\n界界a", 12, 4), (2, 1));
+    fn the_composer_cursor_follows_the_drawn_wrapping() {
+        let text = "aaaa bbbb cccccccccc dddd";
+        let mut editor = crate::editor::Editor::default();
+        editor.insert_paste(text);
+        let app = AppState::default();
+
+        let (buffer, (x, y)) = super::render_terminal_to_buffer(&app, &editor, 24, 12);
+
+        let row: String = (0..24).map(|column| buffer[(column, y)].symbol()).collect();
+        let before_cursor = row[..usize::from(x)].trim_end().to_owned();
+        assert!(
+            before_cursor.ends_with("dddd"),
+            "the cursor must sit after the last character, row was {row:?}"
+        );
     }
 
     #[test]

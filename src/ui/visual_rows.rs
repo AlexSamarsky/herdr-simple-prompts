@@ -347,6 +347,99 @@ pub fn sticky_overlay(sections: &[PromptSection], top: usize, height: usize) -> 
     })
 }
 
+/// Plain text wrapped the way it is drawn, with the source offsets to match.
+///
+/// The composer used to wrap one way and place its cursor another: the text was
+/// drawn with word wrapping and the cursor was computed by dividing by the
+/// width. They agreed only while nothing wrapped, and diverged by the length of
+/// the wrapped word as soon as anything did — taking the height of the box with
+/// it. Both now come from here.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WrappedText {
+    pub rows: Vec<String>,
+    row_starts: Vec<usize>,
+}
+
+impl WrappedText {
+    /// Row and display column of a byte offset in the source.
+    pub fn cell_of(&self, byte: usize) -> (usize, usize) {
+        let row = match self.row_starts.binary_search(&byte) {
+            Ok(row) => row,
+            Err(next) => next.saturating_sub(1),
+        };
+        let start = self.row_starts.get(row).copied().unwrap_or(0);
+        let column = self
+            .rows
+            .get(row)
+            .map(|text| {
+                text.char_indices()
+                    .take_while(|(offset, _)| start + offset < byte)
+                    .map(|(_, character)| UnicodeWidthChar::width(character).unwrap_or(0))
+                    .sum()
+            })
+            .unwrap_or(0);
+        (row, column)
+    }
+
+    pub fn height(&self) -> usize {
+        self.rows.len().max(1)
+    }
+}
+
+pub fn wrap_plain(text: &str, width: usize) -> WrappedText {
+    let width = width.max(1);
+    let mut wrapped = WrappedText {
+        rows: Vec::new(),
+        row_starts: vec![0],
+    };
+    let mut row = String::new();
+    let mut row_width = 0;
+    let mut token_start = 0;
+
+    let close_row = |wrapped: &mut WrappedText, row: &mut String, start: usize| {
+        wrapped.rows.push(std::mem::take(row));
+        wrapped.row_starts.push(start);
+    };
+
+    while token_start < text.len() {
+        let rest = &text[token_start..];
+        let token_end = rest
+            .char_indices()
+            .find_map(|(index, character)| (character == '\n').then_some(token_start + index))
+            .unwrap_or(text.len());
+        for (offset, word) in WordBoundaries::new(&text[token_start..token_end]) {
+            let word_width = cell_width(word);
+            if word_width <= width && row_width > 0 && row_width + word_width > width {
+                close_row(&mut wrapped, &mut row, token_start + offset);
+                row_width = 0;
+            }
+            for (word_offset, character) in word.char_indices() {
+                let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+                if character_width > 0 && row_width > 0 && row_width + character_width > width {
+                    close_row(&mut wrapped, &mut row, token_start + offset + word_offset);
+                    row_width = 0;
+                }
+                row.push(character);
+                row_width += character_width;
+            }
+        }
+        if token_end == text.len() {
+            break;
+        }
+        close_row(&mut wrapped, &mut row, token_end + 1);
+        row_width = 0;
+        token_start = token_end + 1;
+    }
+    wrapped.rows.push(row);
+    wrapped
+}
+
+fn cell_width(text: &str) -> usize {
+    text.chars()
+        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+        .sum()
+}
+
 pub fn wrap_styled(source: &StyledText, width: usize) -> Vec<VisualRow> {
     wrap_styled_with_hyperlinks(source, &[], width)
 }
@@ -826,6 +919,63 @@ mod tests {
                         row.plain_text(),
                     );
                 }
+            }
+        }
+    }
+
+    const WRAP_CORPUS: [&str; 7] = [
+        "short",
+        "aaaa bbbb cccccccccc dddd",
+        "line one\nline two\n\nline four",
+        "supercalifragilisticexpialidocious_and_then_some_more",
+        "界面 with 宽 glyphs mixed into ascii",
+        "trailing spaces   \n   leading spaces",
+        "",
+    ];
+
+    /// The composer wrapping and the history wrapping have to agree, or the
+    /// cursor starts drifting again somewhere no test is watching.
+    #[test]
+    fn plain_wrapping_agrees_with_styled_wrapping() {
+        for text in WRAP_CORPUS {
+            for width in 2..=40_usize {
+                let plain = super::wrap_plain(text, width);
+                let styled = super::wrap_styled(
+                    &StyledText {
+                        text: text.to_owned(),
+                        runs: Vec::new(),
+                    },
+                    width,
+                );
+                assert_eq!(
+                    plain.rows,
+                    styled.iter().map(VisualRow::plain_text).collect::<Vec<_>>(),
+                    "width {width} for {text:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_cursor_position_lands_inside_the_wrapped_rows() {
+        for text in WRAP_CORPUS {
+            for width in 2..=40_usize {
+                let wrapped = super::wrap_plain(text, width);
+                for (byte, _) in text
+                    .char_indices()
+                    .chain(std::iter::once((text.len(), ' ')))
+                {
+                    let (row, column) = wrapped.cell_of(byte);
+                    assert!(row < wrapped.rows.len(), "row {row} escapes {text:?}");
+                    assert!(
+                        column <= super::cell_width(&wrapped.rows[row]),
+                        "column {column} escapes row {:?}",
+                        wrapped.rows[row],
+                    );
+                }
+                let (row, column) = wrapped.cell_of(text.len());
+                assert_eq!(row, wrapped.rows.len() - 1);
+                assert_eq!(column, super::cell_width(wrapped.rows.last().unwrap()));
             }
         }
     }
