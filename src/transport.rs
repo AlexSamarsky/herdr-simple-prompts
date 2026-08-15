@@ -217,11 +217,16 @@ impl AgentTransport {
 /// deleted again immediately.
 const CURSOR_PROBE: &str = "~";
 
-/// A pane redraws after it is typed into, not while. Reading it in the same
-/// breath as pressing a key sees the state before the key — which made every
-/// probe look misplaced and every walk give up.
-const PANE_SETTLE: Duration = Duration::from_millis(60);
-const PANE_SETTLE_ATTEMPTS: usize = 8;
+/// A pane redraws after it is typed into, not while, and how long that takes is
+/// not ours to know: the multiplexer has its own queue, and the agent redraws
+/// when it gets round to it. Measured directly it takes tens of milliseconds;
+/// through a busy overlay it has been seen to take longer than half a second,
+/// which is what made the walk give up on a probe that did arrive.
+///
+/// So it waits, and it can afford to: removal is something a person asked for,
+/// nothing is pressed until the probe is seen, and waiting costs only time.
+const PANE_SETTLE: Duration = Duration::from_millis(100);
+const PANE_SETTLE_ATTEMPTS: usize = 30;
 
 /// Removes one image from the native composer, without ever guessing.
 ///
@@ -262,7 +267,10 @@ pub fn remove_native_attachment(
         let Some(probed) = settle(kind, &mut read, |content| content.contains(CURSOR_PROBE))?
         else {
             return Err(walk_failure(
-                "the composer never showed the probe",
+                &format!(
+                    "the composer never showed the probe within {}ms",
+                    (PANE_SETTLE * PANE_SETTLE_ATTEMPTS as u32).as_millis()
+                ),
                 kind,
                 &mut read,
             ));
@@ -323,11 +331,11 @@ fn settle(
     is_settled: impl Fn(&str) -> bool,
 ) -> AppResult<Option<String>> {
     for _ in 0..PANE_SETTLE_ATTEMPTS {
-        thread::sleep(PANE_SETTLE);
         let content = native_composer_content(kind, &sanitize_ansi(&read()?));
         if content.as_deref().is_some_and(&is_settled) {
             return Ok(content);
         }
+        thread::sleep(PANE_SETTLE);
     }
     Ok(None)
 }
