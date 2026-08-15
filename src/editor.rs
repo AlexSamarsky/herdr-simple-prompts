@@ -160,6 +160,11 @@ impl Editor {
         self.source_text.is_empty()
     }
 
+    /// Whether the draft holds nothing at all — not even an image marker.
+    pub fn is_blank(&self) -> bool {
+        self.atoms.is_empty()
+    }
+
     pub fn cursor_byte(&self) -> usize {
         self.source_boundaries[self.cursor]
     }

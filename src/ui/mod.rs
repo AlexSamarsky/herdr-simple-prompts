@@ -86,58 +86,49 @@ pub fn run_from_env() -> AppResult<()> {
         Some(identity.session_id.clone()),
     ));
     editor.replace_snapshot(draft.editor);
-    let adopted = editor
-        .is_empty()
-        .then(|| {
-            adopt_native_draft(
-                identity.kind,
-                || {
-                    client
-                        .pane_read_visible_ansi(&source_pane, 200)
-                        .map_err(|error| AppError::new("native draft", error.to_string()))
-                },
-                |keys| {
-                    client
-                        .pane_send_input(&source_pane, None, keys)
-                        .map(|_| ())
-                        .map_err(|error| AppError::new("native draft", error.to_string()))
-                },
-                ADOPT_ATTEMPTS,
-                ADOPT_RETRY_DELAY,
-            )
-        })
-        .transpose();
-    let adopt_notice = match adopted {
-        Ok(Some(Some(adopted))) => {
-            editor.replace(adopted.text);
-            // The markers precede the text in the pane, so they take the same
-            // place here.
-            editor.move_document_start();
-            for index in 1..=adopted.attachments {
-                editor.insert_attachment(Attachment {
-                    id: format!("native-image-{index}"),
-                    display: format!("Image #{index}"),
-                    native_path: None,
-                });
+    let native = inspect_native_composer(
+        identity.kind,
+        editor.is_blank(),
+        || {
+            client
+                .pane_read_visible_ansi(&source_pane, 200)
+                .map_err(|error| AppError::new("native draft", error.to_string()))
+        },
+        |keys| {
+            client
+                .pane_send_input(&source_pane, None, keys)
+                .map(|_| ())
+                .map_err(|error| AppError::new("native draft", error.to_string()))
+        },
+        ADOPT_ATTEMPTS,
+        ADOPT_RETRY_DELAY,
+    );
+    let adopt_notice = match native {
+        Ok(view) => {
+            // A saved draft can outlive the images its markers point at, so the
+            // markers are measured against the pane before anything is drawn.
+            if let Some(held) = view.attachments {
+                editor.retain_attachments(held);
             }
-            editor.move_document_end();
-            (!adopted.cleared)
-                .then(|| "native composer still holds a copy of the adopted draft".to_owned())
+            view.adopted.and_then(|adopted| {
+                editor.replace(adopted.text);
+                // The markers precede the text in the pane, so they take the
+                // same place here.
+                editor.move_document_start();
+                for index in 1..=adopted.attachments {
+                    editor.insert_attachment(Attachment {
+                        id: format!("native-image-{index}"),
+                        display: format!("Image #{index}"),
+                        native_path: None,
+                    });
+                }
+                editor.move_document_end();
+                (!adopted.cleared)
+                    .then(|| "native composer still holds a copy of the adopted draft".to_owned())
+            })
         }
-        Ok(_) => None,
         Err(error) => Some(error.to_string()),
     };
-
-    // A saved draft can outlive the images its markers point at, so they are
-    // measured against the pane before anything is drawn — otherwise the
-    // overlay guards its own input against an image that is no longer there.
-    if let Some(held) = client
-        .pane_read_visible_ansi(&source_pane, 200)
-        .ok()
-        .and_then(|ansi| native_attachment_count(identity.kind, &sanitize_ansi(&ansi)))
-    {
-        editor.retain_attachments(held);
-    }
 
     let mut app = AppState {
         session_id: identity.session_id.clone(),
@@ -567,16 +558,62 @@ struct AdoptedDraft {
 ///
 /// The text is returned even when clearing fails, so a draft is never lost to a
 /// half-finished takeover; the caller says so and the guard stays on.
+/// What the pane is holding, read once.
+///
+/// The count and the adoption have to come from the same reading. Taken from
+/// two, a redraw between them can retire the very marker just adopted, leaving
+/// the overlay disagreeing with the pane about how many images exist — which it
+/// answers by guarding its own input.
+#[derive(Debug)]
+struct NativeComposerView {
+    attachments: Option<usize>,
+    adopted: Option<AdoptedDraft>,
+}
+
+fn inspect_native_composer(
+    kind: crate::agent::AgentKind,
+    may_adopt: bool,
+    mut read: impl FnMut() -> AppResult<String>,
+    press: impl FnMut(&[&str]) -> AppResult<()>,
+    attempts: usize,
+    retry_delay: Duration,
+) -> AppResult<NativeComposerView> {
+    let surface = sanitize_ansi(&read()?);
+    let attachments = native_attachment_count(kind, &surface);
+    let parts = may_adopt
+        .then(|| native_composer_parts(kind, &surface))
+        .flatten();
+    let adopted = match parts {
+        Some(parts) => lift_native_draft(kind, parts, read, press, attempts, retry_delay)?,
+        None => None,
+    };
+    Ok(NativeComposerView {
+        attachments,
+        adopted,
+    })
+}
+
+/// The adoption half of [`inspect_native_composer`], for tests that care only
+/// about what is taken from the pane.
+#[cfg(test)]
 fn adopt_native_draft(
     kind: crate::agent::AgentKind,
+    read: impl FnMut() -> AppResult<String>,
+    press: impl FnMut(&[&str]) -> AppResult<()>,
+    attempts: usize,
+    retry_delay: Duration,
+) -> AppResult<Option<AdoptedDraft>> {
+    inspect_native_composer(kind, true, read, press, attempts, retry_delay).map(|view| view.adopted)
+}
+
+fn lift_native_draft(
+    kind: crate::agent::AgentKind,
+    parts: crate::composer::ComposerParts,
     mut read: impl FnMut() -> AppResult<String>,
     mut press: impl FnMut(&[&str]) -> AppResult<()>,
     attempts: usize,
     retry_delay: Duration,
 ) -> AppResult<Option<AdoptedDraft>> {
-    let Some(parts) = native_composer_parts(kind, &sanitize_ansi(&read()?)) else {
-        return Ok(None);
-    };
     // Beside an image, only a single rendered line is taken. A wrapped or
     // multi-line draft carries newlines the buffer does not have, so counting
     // deletions from it would overshoot — and an overshoot eats the marker,
@@ -1438,6 +1475,51 @@ mod tests {
         assert_eq!(adopted.text, "");
         assert_eq!(adopted.attachments, 1);
         assert!(adopted.cleared);
+    }
+
+    /// The count and the adoption have to come from the same reading: a redraw
+    /// between two of them can retire the marker just adopted, and the overlay
+    /// answers a count it disagrees with by guarding its own input.
+    #[test]
+    fn the_count_and_the_adoption_come_from_one_reading() {
+        let reads = std::cell::Cell::new(0);
+        let view = super::inspect_native_composer(
+            AgentKind::Codex,
+            true,
+            || {
+                reads.set(reads.get() + 1);
+                Ok(IMAGE_ONLY.to_owned())
+            },
+            |_| Ok(()),
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(view.attachments, Some(1));
+        assert_eq!(
+            view.adopted.expect("a bare image is adopted").attachments,
+            1
+        );
+        assert_eq!(reads.get(), 1);
+    }
+
+    /// A draft of its own is measured against the pane but never overwritten by
+    /// it, or a saved marker would be counted twice.
+    #[test]
+    fn a_draft_of_its_own_is_measured_but_not_adopted() {
+        let view = super::inspect_native_composer(
+            AgentKind::Codex,
+            false,
+            || Ok(IMAGE_ONLY.to_owned()),
+            |_| panic!("a draft of its own must not be lifted from the pane"),
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(view.attachments, Some(1));
+        assert!(view.adopted.is_none());
     }
 
     /// A wrapped draft carries newlines the buffer does not have, so counting
