@@ -83,9 +83,12 @@ pub(crate) fn language(info: &str) -> Option<Language> {
 }
 
 /// A diff is coloured by line, not by token: the leading marker decides the
-/// whole line, which is how every diff viewer renders one.
+/// whole line.
+///
+/// The file headers follow the same rule as the body — `---` red, `+++` green —
+/// rather than being set apart as metadata, which is how the panes render them.
 fn diff_line(line: &str) -> Option<TokenKind> {
-    const META: [&str; 6] = ["+++", "---", "@@", "diff ", "index ", "=== "];
+    const META: [&str; 4] = ["@@", "diff ", "index ", "=== "];
     if META.iter().any(|prefix| line.starts_with(prefix)) {
         return Some(TokenKind::Meta);
     }
@@ -576,15 +579,14 @@ mod tests {
         );
     }
 
-    /// A diff is coloured by line. The palette here follows the universal diff
-    /// convention — added green, removed red, hunk headers cyan — rather than a
-    /// pane measurement, which is the one place in this module that is
-    /// convention rather than observation.
+    /// A diff is coloured by line: added green, removed red, hunk headers cyan.
+    /// The file headers are not set apart — they carry the same marker as the
+    /// body and take the same colour, as the panes render them.
     #[test]
     fn diffs_are_coloured_by_their_leading_marker() {
         for (line, kind) in [
-            ("+++ b/src/main.rs", Some(TokenKind::Meta)),
-            ("--- a/src/main.rs", Some(TokenKind::Meta)),
+            ("+++ b/src/main.rs", Some(TokenKind::Added)),
+            ("--- a/src/main.rs", Some(TokenKind::Removed)),
             ("@@ -1,4 +1,6 @@", Some(TokenKind::Meta)),
             ("diff --git a/x b/x", Some(TokenKind::Meta)),
             ("+    let added = 1;", Some(TokenKind::Added)),
