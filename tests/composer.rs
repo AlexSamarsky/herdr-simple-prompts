@@ -1,6 +1,7 @@
 use herdr_simple_prompts::agent::AgentKind;
 use herdr_simple_prompts::composer::{
-    ComposerAccess, NativeComposerState, classify_native_composer, native_composer_text,
+    ComposerAccess, NativeComposerState, classify_native_composer, native_composer_parts,
+    native_composer_text,
 };
 use herdr_simple_prompts::style::{AnsiColor, StyleModifiers, StyleRun, StyledText};
 
@@ -367,4 +368,33 @@ fn a_composer_mixing_text_and_images_is_not_offered_for_adoption() {
         native_composer_text(AgentKind::Codex, &text_only).as_deref(),
         Some("describe it"),
     );
+}
+
+/// An image pasted with no prompt beside it still has to reach the overlay, or
+/// the overlay sees a pane holding something it does not know about and refuses
+/// every keystroke — which is exactly what a freshly pasted image looked like.
+#[test]
+fn a_composer_holding_only_images_is_offered_for_adoption() {
+    let surface = |content: &str| {
+        plain(&format!(
+            "• answer\n────────\n› {content}\ngpt-5.6-sol xhigh · /repo · weekly 75% left"
+        ))
+    };
+
+    let parts = native_composer_parts(AgentKind::Codex, &surface("[Image #1]"))
+        .expect("a bare image must be adopted");
+    assert_eq!(parts.attachments, 1);
+    assert_eq!(parts.text, "");
+
+    let two = native_composer_parts(AgentKind::Codex, &surface("[Image #1] [Image #2]"))
+        .expect("several bare images must be adopted");
+    assert_eq!(two.attachments, 2);
+    assert_eq!(two.text, "");
+
+    let mixed = native_composer_parts(AgentKind::Codex, &surface("[Image #1] describe it"))
+        .expect("an image beside text must be adopted");
+    assert_eq!(mixed.attachments, 1);
+    assert_eq!(mixed.text, "describe it");
+
+    assert_eq!(native_composer_parts(AgentKind::Codex, &surface(" ")), None);
 }

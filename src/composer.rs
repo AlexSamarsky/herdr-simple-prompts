@@ -149,9 +149,14 @@ pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<Str
 /// when every marker precedes it — an image pasted into the middle of a phrase
 /// leaves no way to tell which characters belong to which side.
 pub fn native_composer_parts(kind: AgentKind, surface: &StyledText) -> Option<ComposerParts> {
-    if classify_native_composer(kind, surface) != NativeComposerState::Occupied {
-        return None;
-    }
+    // An image on its own counts too: it has no text to lift, but the overlay
+    // still has to learn about it, or it treats the pane as holding something
+    // unknown and refuses every keystroke.
+    let held = match classify_native_composer(kind, surface) {
+        NativeComposerState::Occupied => 0,
+        NativeComposerState::OwnedAttachments(count) => count,
+        NativeComposerState::Clear | NativeComposerState::Unknown => return None,
+    };
     let lines = line_ranges(&surface.text);
     let chunks = match kind {
         AgentKind::Codex => codex_content(&surface.text, &lines),
@@ -159,9 +164,13 @@ pub fn native_composer_parts(kind: AgentKind, surface: &StyledText) -> Option<Co
     }?;
     let content = chunk_text(surface, &chunks);
     let (attachments, text) = split_attachments(&content)?;
-    (!text.trim().is_empty()).then_some(ComposerParts {
+    if attachments == 0 && text.trim().is_empty() {
+        return None;
+    }
+    debug_assert!(held == 0 || held == attachments);
+    Some(ComposerParts {
         attachments,
-        text: text.to_owned(),
+        text: text.trim().to_owned(),
     })
 }
 
