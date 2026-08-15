@@ -91,7 +91,6 @@ fn hand_back_overlay_draft(
             draft.session_id.as_deref(),
             &EditorSnapshot::default(),
             &[],
-            &[],
         )?;
     }
     Ok(())

@@ -1,6 +1,7 @@
 use herdr_simple_prompts::editor::{
     Editor, EditorChunk, EditorCommand, EditorSnapshot, Key, map_key, staged_image_path,
 };
+use herdr_simple_prompts::model::Attachment;
 use herdr_simple_prompts::paste::{LARGE_PASTE_CHARS, PasteRange, large_paste_marker};
 
 #[test]
@@ -408,4 +409,74 @@ fn line_kills_keep_a_collapsed_paste_whole() {
 
     editor.delete_to_line_start();
     assert_eq!(editor.submission_text(), "");
+}
+
+/// An image holds a place in the line rather than a shelf above it: it shows
+/// where it was put, moves with the text around it, and contributes nothing to
+/// the prompt — the image itself lives in the native composer.
+#[test]
+fn an_attachment_holds_its_place_in_the_line() {
+    let mut editor = Editor::default();
+    editor.insert_paste("describe ");
+    editor.insert_attachment(Attachment {
+        id: "image-1".into(),
+        display: "screen.png".into(),
+        native_path: None,
+    });
+    editor.insert_paste("please");
+
+    assert_eq!(editor.display_text(), "describe [Image #1] please");
+    assert_eq!(editor.submission_text(), "describe please");
+    assert_eq!(editor.attachments().len(), 1);
+    assert_eq!(editor.attachments()[0].id, "image-1");
+}
+
+#[test]
+fn attachments_are_numbered_by_the_order_they_sit_in() {
+    let mut editor = Editor::default();
+    for id in ["second", "third"] {
+        editor.insert_attachment(Attachment {
+            id: id.into(),
+            display: id.into(),
+            native_path: None,
+        });
+    }
+    editor.move_document_start();
+    editor.insert_attachment(Attachment {
+        id: "first".into(),
+        display: "first".into(),
+        native_path: None,
+    });
+
+    assert_eq!(editor.display_text(), "[Image #1] [Image #2] [Image #3] ");
+    assert_eq!(
+        editor
+            .attachments()
+            .iter()
+            .map(|attachment| attachment.id.clone())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"],
+    );
+}
+
+#[test]
+fn an_attachment_counts_as_one_word_and_survives_a_snapshot() {
+    let mut editor = Editor::default();
+    editor.insert_attachment(Attachment {
+        id: "image-1".into(),
+        display: "screen.png".into(),
+        native_path: None,
+    });
+    editor.insert_paste("describe it");
+
+    editor.move_word_left();
+    assert_eq!(editor.cursor_byte(), "describe ".len());
+    editor.move_word_left();
+    assert_eq!(editor.cursor_byte(), 0, "the marker is a single word");
+
+    let snapshot = editor.snapshot();
+    let mut restored = Editor::default();
+    restored.replace_snapshot(snapshot);
+    assert_eq!(restored.display_text(), "[Image #1] describe it");
+    assert_eq!(restored.submission_text(), "describe it");
 }

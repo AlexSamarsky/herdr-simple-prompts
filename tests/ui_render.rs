@@ -426,16 +426,22 @@ fn working_prompt_is_above_composer_and_footer() {
 #[test]
 fn composer_shows_attached_images_before_submission() {
     let mut app = AppState::default();
-    app.draft_attachments.push(Attachment {
+    let mut editor = Editor::default();
+    editor.insert_attachment(Attachment {
         id: "image-1".into(),
         display: "screen.png".into(),
         native_path: None,
     });
+    editor.insert_paste("describe it");
+    app.draft_attachments = editor.attachments();
     app.native_composer = NativeComposerState::OwnedAttachments(1);
 
-    let rendered = render_to_string(&app, &Editor::default(), 80, 24);
+    let rendered = render_to_string(&app, &editor, 80, 24);
 
-    assert!(rendered.contains("[Image #1] screen.png"));
+    assert!(
+        rendered.contains("[Image #1] describe it"),
+        "the marker holds its place in the line, as the native composer shows it"
+    );
 }
 
 #[test]

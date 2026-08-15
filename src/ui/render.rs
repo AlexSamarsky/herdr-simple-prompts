@@ -230,14 +230,8 @@ fn render(
     }
     let mut composer_lines = Vec::new();
     if composer_guard.is_none() {
-        composer_lines.extend(app.draft_attachments.iter().enumerate().map(
-            |(index, attachment)| {
-                Line::styled(
-                    format!("[Image #{}] {}", index + 1, attachment.display),
-                    Style::default().fg(Color::Magenta),
-                )
-            },
-        ));
+        // Confirmed attachments hold their own place in the line; only the ones
+        // still being verified are announced above it.
         composer_lines.extend(app.pending_attachments.iter().enumerate().map(
             |(index, attachment)| {
                 Line::styled(
@@ -572,11 +566,6 @@ fn ratatui_color(color: AnsiColor) -> Color {
 }
 
 fn attachment_visual_height(app: &AppState, width: u16) -> u16 {
-    let confirmed = app
-        .draft_attachments
-        .iter()
-        .enumerate()
-        .map(|(index, attachment)| format!("[Image #{}] {}", index + 1, attachment.display));
     let pending = app
         .pending_attachments
         .iter()
@@ -588,7 +577,7 @@ fn attachment_visual_height(app: &AppState, width: u16) -> u16 {
                 attachment.display
             )
         });
-    confirmed.chain(pending).fold(0_u16, |height, line| {
+    pending.fold(0_u16, |height, line| {
         let rows = wrap_plain(&line, usize::from(width.max(1))).height();
         height.saturating_add(u16::try_from(rows).unwrap_or(u16::MAX))
     })

@@ -1,4 +1,4 @@
-use crate::editor::EditorSnapshot;
+use crate::editor::{EditorChunk, EditorSnapshot};
 use crate::herdr::HerdrClient;
 use crate::history::HistoryJournal;
 use crate::model::Attachment;
@@ -17,7 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PANE_NAMESPACE_VERSION: u8 = 1;
-const DRAFT_VERSION: u8 = 3;
+const DRAFT_VERSION: u8 = 4;
 const ORPHAN_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const LIFECYCLE_LOCK_WAIT_LIMIT: Duration = Duration::from_secs(2);
 const LIFECYCLE_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -151,7 +151,6 @@ fn state_flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::
 
 struct DraftSnapshot {
     editor: EditorSnapshot,
-    attachments: Vec<Attachment>,
     prompt_displays: Vec<CompactPromptOverride>,
 }
 
@@ -193,7 +192,6 @@ impl DraftWriter {
                     &pane_id,
                     session_id.as_deref(),
                     &snapshot.editor,
-                    &snapshot.attachments,
                     &snapshot.prompt_displays,
                 ) {
                     *worker_error
@@ -213,21 +211,29 @@ impl DraftWriter {
     pub fn queue_editor(
         &self,
         editor: EditorSnapshot,
-        attachments: Vec<Attachment>,
         prompt_displays: Vec<CompactPromptOverride>,
     ) {
         let (lock, ready) = &*self.slot;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.pending = Some(DraftSnapshot {
             editor,
-            attachments,
             prompt_displays,
         });
         ready.notify_one();
     }
 
     pub fn queue(&self, text: String, attachments: Vec<Attachment>) {
-        self.queue_editor(EditorSnapshot::plain(text), attachments, Vec::new());
+        let mut editor = EditorSnapshot {
+            chunks: attachments
+                .into_iter()
+                .map(|attachment| EditorChunk::Attachment {
+                    id: attachment.id,
+                    display: attachment.display,
+                })
+                .collect(),
+        };
+        editor.chunks.extend(EditorSnapshot::plain(text).chunks);
+        self.queue_editor(editor, Vec::new());
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -416,21 +422,26 @@ impl StateStore {
         text: &str,
         attachments: &[Attachment],
     ) -> AppResult<()> {
-        self.save_editor_draft(
-            pane_id,
-            None,
-            &EditorSnapshot::plain(text),
-            attachments,
-            &[],
-        )
+        let mut snapshot = EditorSnapshot {
+            chunks: attachments
+                .iter()
+                .map(|attachment| EditorChunk::Attachment {
+                    id: attachment.id.clone(),
+                    display: attachment.display.clone(),
+                })
+                .collect(),
+        };
+        snapshot.chunks.extend(EditorSnapshot::plain(text).chunks);
+        self.save_editor_draft(pane_id, None, &snapshot, &[])
     }
 
+    /// Attachments are part of the editor snapshot: they hold a place in the
+    /// line, so they are saved where they sit rather than in a list beside it.
     pub fn save_editor_draft(
         &self,
         pane_id: &str,
         session_id: Option<&str>,
         editor: &EditorSnapshot,
-        attachments: &[Attachment],
         prompt_displays: &[CompactPromptOverride],
     ) -> AppResult<()> {
         let file = self
@@ -443,13 +454,7 @@ impl StateStore {
                 version: DRAFT_VERSION,
                 session_id: session_id.map(str::to_owned),
                 editor: editor.clone(),
-                attachments: attachments
-                    .iter()
-                    .map(|attachment| PersistedAttachment {
-                        id: attachment.id.clone(),
-                        display: attachment.display.clone(),
-                    })
-                    .collect(),
+                attachments: Vec::new(),
                 prompt_displays: prompt_displays.to_vec(),
             })?,
         )
@@ -486,11 +491,9 @@ impl StateStore {
             Ok(draft) => draft,
             Err(error) => return quarantine_draft(&file, error),
         };
-        let (session_id, editor, attachments, prompt_displays) = match draft {
-            ReadDraft::Current(draft) if matches!(draft.version, 2 | DRAFT_VERSION) => {
-                let session_id = (draft.version == DRAFT_VERSION)
-                    .then_some(draft.session_id)
-                    .flatten();
+        let (session_id, editor, legacy_attachments, prompt_displays) = match draft {
+            ReadDraft::Current(draft) if matches!(draft.version, 2 | 3 | DRAFT_VERSION) => {
+                let session_id = (draft.version >= 3).then_some(draft.session_id).flatten();
                 (
                     session_id,
                     draft.editor,
@@ -511,19 +514,27 @@ impl StateStore {
                 Vec::new(),
             ),
         };
-        let text = editor.submission_text();
-        Ok(DraftState {
-            session_id,
-            text,
-            editor,
-            attachments: attachments
+        // Drafts written before attachments held a place in the line kept them
+        // in a list beside it, drawn above the input. That is where they belong
+        // when they move into the line.
+        let editor = if legacy_attachments.is_empty() {
+            editor
+        } else {
+            let mut chunks = legacy_attachments
                 .into_iter()
-                .map(|attachment| Attachment {
+                .map(|attachment| EditorChunk::Attachment {
                     id: attachment.id,
                     display: attachment.display,
-                    native_path: None,
                 })
-                .collect(),
+                .collect::<Vec<_>>();
+            chunks.extend(editor.chunks);
+            EditorSnapshot { chunks }
+        };
+        Ok(DraftState {
+            session_id,
+            text: editor.submission_text(),
+            attachments: editor.attachments(),
+            editor,
             prompt_displays,
         })
     }
@@ -546,7 +557,6 @@ impl StateStore {
                 source_pane,
                 Some(session_id),
                 &draft.editor,
-                &draft.attachments,
                 &draft.prompt_displays,
             ),
         }

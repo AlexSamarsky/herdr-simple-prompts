@@ -106,17 +106,20 @@ pub fn run_from_env() -> AppResult<()> {
             )
         })
         .transpose();
-    let mut adopted_attachments = Vec::new();
     let adopt_notice = match adopted {
         Ok(Some(Some(adopted))) => {
             editor.replace(adopted.text);
-            adopted_attachments = (1..=adopted.attachments)
-                .map(|index| Attachment {
+            // The markers precede the text in the pane, so they take the same
+            // place here.
+            editor.move_document_start();
+            for index in 1..=adopted.attachments {
+                editor.insert_attachment(Attachment {
                     id: format!("native-image-{index}"),
                     display: format!("Image #{index}"),
                     native_path: None,
-                })
-                .collect();
+                });
+            }
+            editor.move_document_end();
             (!adopted.cleared)
                 .then(|| "native composer still holds a copy of the adopted draft".to_owned())
         }
@@ -129,11 +132,7 @@ pub fn run_from_env() -> AppResult<()> {
         agent_status: identity.status,
         native_composer: NativeComposerState::Unknown,
         working_since: identity.status.is_working().then(Instant::now),
-        draft_attachments: if adopted_attachments.is_empty() {
-            draft.attachments
-        } else {
-            adopted_attachments
-        },
+        draft_attachments: editor.attachments(),
         prompt_displays: draft.prompt_displays,
         ..AppState::default()
     };
@@ -153,11 +152,7 @@ pub fn run_from_env() -> AppResult<()> {
     draft_writer
         .as_ref()
         .expect("draft writer exists")
-        .queue_editor(
-            editor.snapshot(),
-            app.draft_attachments.clone(),
-            app.prompt_displays.clone(),
-        );
+        .queue_editor(editor.snapshot(), app.prompt_displays.clone());
     let mut stdout = io::stdout();
     let _guard = TerminalGuard::enter(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
@@ -205,11 +200,7 @@ pub fn run_from_env() -> AppResult<()> {
         }
         if draft_dirty && Instant::now() >= draft_save_at {
             if let Some(writer) = draft_writer.as_ref() {
-                writer.queue_editor(
-                    editor.snapshot(),
-                    app.draft_attachments.clone(),
-                    app.prompt_displays.clone(),
-                );
+                writer.queue_editor(editor.snapshot(), app.prompt_displays.clone());
             }
             draft_dirty = false;
         }
@@ -730,7 +721,8 @@ fn apply_runtime_event(
                 .retain(|candidate| candidate.id != attachment.id);
             match result {
                 Ok(()) => {
-                    app.draft_attachments.push(attachment);
+                    editor.insert_attachment(attachment);
+                    app.draft_attachments = editor.attachments();
                     DraftChange::Immediate
                 }
                 Err(error) => {
@@ -778,11 +770,7 @@ fn apply_draft_change(
             *save_at = Instant::now() + DRAFT_DEBOUNCE;
         }
         DraftChange::Immediate => {
-            writer.queue_editor(
-                editor.snapshot(),
-                app.draft_attachments.clone(),
-                app.prompt_displays.clone(),
-            );
+            writer.queue_editor(editor.snapshot(), app.prompt_displays.clone());
             *dirty = false;
         }
     }
