@@ -48,6 +48,23 @@ fn write_namespace(
     .unwrap();
 }
 
+const NATIVE_EMPTY: &str = concat!(
+    "• answer\n",
+    "────────\n",
+    "› \n",
+    "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+);
+const NATIVE_OCCUPIED: &str = concat!(
+    "• answer\n",
+    "────────\n",
+    "› keep me\n",
+    "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+);
+
+fn read_response(text: &str) -> serde_json::Value {
+    json!({"read": {"text": text}})
+}
+
 fn agent_info(pane_id: &str, session_id: &str) -> serde_json::Value {
     json!({
         "type": "agent_info",
@@ -379,8 +396,10 @@ fn draft_writer_keeps_disk_io_off_the_caller_and_coalesces_latest_state() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+/// Closing the overlay moves the draft into the native composer, so a prompt
+/// started on one side can be finished on the other without retyping it.
 #[test]
-fn toggle_from_overlay_closes_and_refocuses_source() {
+fn toggle_from_overlay_hands_the_draft_back_and_refocuses_source() {
     let directory = std::env::temp_dir().join(format!(
         "herdr-simple-prompts-toggle-{}",
         std::process::id()
@@ -394,6 +413,10 @@ fn toggle_from_overlay_closes_and_refocuses_source() {
     std::fs::write(journal.path(), b"keep me too\n").unwrap();
     let fake = support::ScriptedHerdr::start(vec![
         json!({"type":"pane_info","pane":{"pane_id":"w1:p9"}}),
+        agent_info("w1:p1", "session-1"),
+        read_response(NATIVE_EMPTY),
+        json!({"type":"input_sent"}),
+        read_response(NATIVE_OCCUPIED),
         json!({"type":"plugin_pane_closed"}),
         json!({"type":"pane_focused"}),
     ]);
@@ -406,9 +429,24 @@ fn toggle_from_overlay_closes_and_refocuses_source() {
         .into_iter()
         .map(|request| request["method"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(methods, ["pane.get", "plugin.pane.close", "pane.focus"]);
+    assert_eq!(
+        methods,
+        [
+            "pane.get",
+            "agent.get",
+            "pane.read",
+            "pane.send_input",
+            "pane.read",
+            "plugin.pane.close",
+            "pane.focus",
+        ]
+    );
     assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
-    assert_eq!(store.load_draft("w1:p1").unwrap().text, "keep me");
+    assert_eq!(
+        store.load_draft("w1:p1").unwrap().text,
+        "",
+        "the draft moved into the native composer"
+    );
     assert!(journal.path().exists());
     std::fs::remove_dir_all(directory).unwrap();
 }
