@@ -371,6 +371,22 @@ fn handle_key(
             }
             DraftChange::None
         }
+        (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            editor.move_home();
+            DraftChange::None
+        }
+        (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            editor.move_end();
+            DraftChange::None
+        }
+        (KeyCode::Up, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            editor.move_document_start();
+            DraftChange::None
+        }
+        (KeyCode::Down, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            editor.move_document_end();
+            DraftChange::None
+        }
         // Word editing. Terminals disagree about what the option key sends:
         // some emit a modified arrow, others the readline escapes (`alt+b`,
         // `alt+f`, `alt+d`), so both spellings are accepted.
@@ -428,6 +444,19 @@ fn handle_key(
         }
         (KeyCode::Down, _) => {
             editor.move_down();
+            DraftChange::None
+        }
+        // Line and document navigation. macOS never delivers the command key
+        // to a terminal application — the multiplexer has no name for that
+        // modifier at all — so the readline bindings are the ones that reach
+        // us, and the super arms fire only where a terminal is configured to
+        // send the modifier through.
+        (KeyCode::Char('a'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            editor.move_home();
+            DraftChange::None
+        }
+        (KeyCode::Char('e'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            editor.move_end();
             DraftChange::None
         }
         (KeyCode::Home, _) => {
@@ -983,6 +1012,76 @@ mod tests {
             press(delete_right, &mut app, &mut editor, &mut cache);
             assert_eq!(editor.submission_text(), "alpha  ");
         }
+    }
+
+    /// macOS keeps the command key for itself, so the readline bindings are
+    /// what actually reaches the composer; the super arms only fire where a
+    /// terminal is configured to forward that modifier.
+    #[test]
+    fn line_navigation_answers_readline_and_super_bindings() {
+        for (to_start, to_end) in [
+            (
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            ),
+            (
+                KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER),
+                KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER),
+            ),
+            (
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            ),
+        ] {
+            let (runtime, _actions) = runtime::interaction_test_runtime(1);
+            let mut app = AppState {
+                native_composer: NativeComposerState::Clear,
+                ..AppState::default()
+            };
+            let mut editor = Editor::default();
+            editor.insert_paste("first line\nsecond line");
+            let mut sequence = 1;
+            let mut cache = render::HistoryRenderCache::default();
+            let mut press = |key, app: &mut AppState, editor: &mut Editor, cache: &mut _| {
+                handle_key(key, app, editor, &runtime, &mut sequence, cache).unwrap()
+            };
+
+            press(to_start, &mut app, &mut editor, &mut cache);
+            assert_eq!(editor.cursor_byte(), "first line\n".len());
+            press(to_end, &mut app, &mut editor, &mut cache);
+            assert_eq!(editor.cursor_byte(), "first line\nsecond line".len());
+        }
+    }
+
+    #[test]
+    fn super_arrows_reach_the_ends_of_the_draft() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::Clear,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("first line\nsecond line");
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+        let mut press = |key, app: &mut AppState, editor: &mut Editor, cache: &mut _| {
+            handle_key(key, app, editor, &runtime, &mut sequence, cache).unwrap()
+        };
+
+        press(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SUPER),
+            &mut app,
+            &mut editor,
+            &mut cache,
+        );
+        assert_eq!(editor.cursor_byte(), 0);
+        press(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SUPER),
+            &mut app,
+            &mut editor,
+            &mut cache,
+        );
+        assert_eq!(editor.cursor_byte(), "first line\nsecond line".len());
     }
 
     #[test]

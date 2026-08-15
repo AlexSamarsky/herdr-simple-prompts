@@ -264,6 +264,16 @@ impl Editor {
         self.preferred_column = None;
     }
 
+    pub fn move_document_start(&mut self) {
+        self.cursor = 0;
+        self.preferred_column = None;
+    }
+
+    pub fn move_document_end(&mut self) {
+        self.cursor = self.atoms.len();
+        self.preferred_column = None;
+    }
+
     pub fn move_up(&mut self) {
         self.move_vertical(-1);
     }
