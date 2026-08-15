@@ -218,17 +218,11 @@ impl AgentTransport {
     }
 }
 
-/// A character typed into the composer only to see where the cursor is, and
-/// deleted again immediately.
-const CURSOR_PROBE: &str = "~";
-
 /// A pause between keys sent one after another.
 ///
 /// Each request travels on a connection of its own, so two sent back to back
-/// are not promised to arrive in that order — and a probe that lands before the
-/// key that was meant to position it types itself somewhere nobody is looking,
-/// where it then sits and makes every later count wrong. Keys are cheap; this
-/// costs a few milliseconds and buys the order they were written in.
+/// are not promised to arrive in that order. Keys are cheap; this costs a few
+/// milliseconds and buys the order they were written in.
 const KEY_SPACING: Duration = Duration::from_millis(50);
 
 /// A pane redraws after it is typed into, not while, and how long that takes is
@@ -264,13 +258,8 @@ pub fn remove_native_attachment(
     kind: AgentKind,
     marker: usize,
     mut read: impl FnMut() -> AppResult<String>,
-    mut send: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+    mut press: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
 ) -> AppResult<bool> {
-    let mut press = move |keys: &[&str], text: Option<&str>| -> AppResult<()> {
-        send(keys, text)?;
-        thread::sleep(KEY_SPACING);
-        Ok(())
-    };
     let markers = composer_markers(kind, &read()?);
     let Some(position) = markers.iter().position(|held| *held == marker) else {
         // The pane holds no such image. Only when it holds none at all is that
@@ -279,74 +268,34 @@ pub fn remove_native_attachment(
         // drop a chip while the picture stays.
         return Ok(markers.is_empty());
     };
-    let trailing = markers.len() - position - 1;
-    let needle = format!("[Image #{marker}]{CURSOR_PROBE}");
-
-    press(&["ctrl+e"], None)?;
-    for _ in 0..=(2 * trailing + 2) {
-        // The probe is counted, not looked for. Asking whether the character is
-        // present at all breaks on one left behind by an earlier attempt;
-        // comparing the whole line breaks on the padding a pane adds and takes
-        // away. Counting is true through both.
-        let baseline = native_composer_content(kind, &sanitize_ansi(&read()?)).unwrap_or_default();
-        let baseline_probes = baseline.matches(CURSOR_PROBE).count();
-        press(&[], Some(CURSOR_PROBE))?;
-        // Nothing is pressed until the probe is seen. A backspace sent while
-        // the probe is not there deletes whatever is there instead, and what is
-        // there is somebody's picture.
-        let Some(probed) = settle(kind, &mut read, |content| {
-            content.matches(CURSOR_PROBE).count() > baseline_probes
-        })?
-        else {
-            return Err(walk_failure(
-                &format!(
-                    "the composer never showed the probe within {}ms",
-                    (PANE_SETTLE * PANE_SETTLE_ATTEMPTS as u32).as_millis()
-                ),
-                kind,
-                &mut read,
-            ));
-        };
-        let placed = probed.contains(&needle);
-        press(&["backspace"], None)?;
-        if placed {
-            // The place is found, so both keys go at once and the outcome is
-            // checked instead of the step between: the image gone and the probe
-            // with it. Waiting on the probe first was one more thing that could
-            // time out with everything actually going to plan.
-            press(&["backspace"], None)?;
-            let gone = format!("[Image #{marker}]");
-            let finished = settle(kind, &mut read, |content| {
-                !content.contains(&gone) && content.matches(CURSOR_PROBE).count() == baseline_probes
-            })?;
-            if finished.is_none() {
-                return Err(walk_failure("the image did not go", kind, &mut read));
-            }
-            let left = composer_markers(kind, &read()?);
-            return Ok(!left.contains(&marker) && left.len() + 1 == markers.len());
-        }
-        if settle(kind, &mut read, |content| {
-            content.matches(CURSOR_PROBE).count() == baseline_probes
-        })?
-        .is_none()
-        {
-            return Err(walk_failure(
-                &format!("the probe would not come back out (wanted {baseline_probes} of them)"),
-                kind,
-                &mut read,
-            ));
-        }
-        press(&["left"], None)?;
+    if position + 1 != markers.len() {
+        return Err(AppError::new(
+            "remove image",
+            "only the newest image can be removed from here; \
+             remove the others in the agent with prefix+m",
+        ));
     }
-    Err(walk_failure(
-        "the cursor never reached the image",
-        kind,
-        &mut read,
-    ))
+
+    // The end of the composer is the one place whose behaviour is known: a
+    // single backspace there takes the last marker whole, measured on a live
+    // pane. Reaching any earlier marker means placing the cursor, and placing
+    // the cursor cannot be confirmed — a character typed to mark the spot does
+    // not always leave the cursor behind it, and the backspace meant for that
+    // character has been seen to take the neighbouring picture instead. An
+    // image nobody asked to lose is not a price worth paying for a convenience.
+    press(&["ctrl+e"], None)?;
+    press(&["backspace"], None)?;
+    let gone = format!("[Image #{marker}]");
+    if settle(kind, &mut read, |content| !content.contains(&gone))?.is_none() {
+        return Err(walk_failure("the image did not go", kind, &mut read));
+    }
+    let left = composer_markers(kind, &read()?);
+    Ok(!left.contains(&marker) && left.len() + 1 == markers.len())
 }
 
-/// An error that carries what the composer actually looked like when the walk
-/// gave up, so the next report says what happened rather than that it did.
+/// An error that carries what the composer actually looked like when the
+/// removal gave up, so the next report says what happened rather than that it
+/// did.
 fn walk_failure(
     reason: &str,
     kind: AgentKind,
@@ -411,7 +360,7 @@ fn scan_markers(content: &str) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CURSOR_PROBE, remove_native_attachment};
+    use super::remove_native_attachment;
     use crate::agent::AgentKind;
     use crate::{AppError, AppResult};
     use std::cell::RefCell;
@@ -422,7 +371,6 @@ mod tests {
     struct Composer {
         units: Vec<String>,
         cursor: usize,
-        ignores_left: bool,
     }
 
     impl Composer {
@@ -430,7 +378,6 @@ mod tests {
             Self {
                 units: units.iter().map(|unit| (*unit).to_owned()).collect(),
                 cursor: units.len(),
-                ignores_left: false,
             }
         }
 
@@ -453,11 +400,6 @@ mod tests {
             for key in keys {
                 match *key {
                     "ctrl+e" => self.cursor = self.units.len(),
-                    "left" => {
-                        if !self.ignores_left {
-                            self.cursor = self.cursor.saturating_sub(1);
-                        }
-                    }
                     "backspace" => {
                         if self.cursor > 0 {
                             self.cursor -= 1;
@@ -475,7 +417,7 @@ mod tests {
     }
 
     fn three_images() -> Composer {
-        Composer::new(&["[Image #5]", " ", "[Image #6]", " ", "[Image #7]", " "])
+        Composer::new(&["[Image #5]", " ", "[Image #6]", " ", "[Image #7]"])
     }
 
     fn remove(composer: &RefCell<Composer>, marker: usize) -> AppResult<bool> {
@@ -490,73 +432,43 @@ mod tests {
         )
     }
 
-    /// A composer caught mid-edit still has to be counted: an image typed after
-    /// text, or a probe sitting beside one, is a normal thing to look at, and a
-    /// count that returned none for it made a pasted image look like it had
-    /// never arrived.
     #[test]
-    fn images_are_counted_wherever_they_sit() {
-        assert_eq!(super::scan_markers("[Image #5] [Image #6] "), [5, 6]);
-        assert_eq!(super::scan_markers("describe [Image #5] it"), [5]);
-        assert_eq!(super::scan_markers("[Image #5]~ [Image #6]"), [5, 6]);
-        assert_eq!(super::scan_markers("no images here"), Vec::<usize>::new());
-        assert_eq!(super::scan_markers("[Image #] [Image #7]"), [7]);
-    }
-
-    #[test]
-    fn the_last_image_is_removed_and_the_others_are_left_alone() {
+    fn the_newest_image_is_removed_and_the_others_are_left_alone() {
         let composer = RefCell::new(three_images());
 
         assert!(remove(&composer, 7).unwrap());
         assert_eq!(composer.borrow().markers(), ["[Image #5]", "[Image #6]"]);
     }
 
+    /// Reaching an earlier image means placing the cursor, and placing the
+    /// cursor cannot be confirmed: a character typed to mark the spot has been
+    /// seen to leave the cursor elsewhere, and the backspace meant for it took
+    /// the neighbouring picture instead. So earlier images are refused rather
+    /// than reached for.
     #[test]
-    fn an_image_in_the_middle_of_the_line_is_reached_and_removed() {
-        let composer = RefCell::new(three_images());
+    fn an_earlier_image_is_refused_rather_than_reached_for() {
+        for marker in [5, 6] {
+            let composer = RefCell::new(three_images());
 
-        assert!(remove(&composer, 6).unwrap());
-        assert_eq!(composer.borrow().markers(), ["[Image #5]", "[Image #7]"]);
+            let refusal = remove(&composer, marker).unwrap_err().to_string();
+
+            assert!(
+                refusal.contains("only the newest image"),
+                "the refusal says why: {refusal}"
+            );
+            assert_eq!(
+                composer.borrow().markers(),
+                ["[Image #5]", "[Image #6]", "[Image #7]"],
+                "and every picture is still there"
+            );
+        }
     }
 
-    #[test]
-    fn the_first_image_is_reached_and_removed() {
-        let composer = RefCell::new(three_images());
-
-        assert!(remove(&composer, 5).unwrap());
-        assert_eq!(composer.borrow().markers(), ["[Image #6]", "[Image #7]"]);
-    }
-
-    /// Nothing is deleted from a position that could not be confirmed. A
-    /// composer that will not move its cursor must cost the caller a refusal,
-    /// never someone else's picture.
-    #[test]
-    fn a_cursor_that_will_not_move_costs_a_refusal_not_a_picture() {
-        let composer = RefCell::new(three_images());
-        composer.borrow_mut().ignores_left = true;
-
-        let refusal = remove(&composer, 5).unwrap_err().to_string();
-        assert!(
-            refusal.contains("never reached"),
-            "the refusal says what happened: {refusal}"
-        );
-        assert_eq!(
-            composer.borrow().markers(),
-            ["[Image #5]", "[Image #6]", "[Image #7]"],
-            "every image survives a walk that never found its place"
-        );
-    }
-
-    /// A number the pane does not know is not proof the picture is gone — it is
-    /// proof the overlay is naming it wrongly. Reporting success there would
-    /// drop a chip while the picture stays, which is the disagreement the whole
-    /// guard exists to prevent.
     #[test]
     fn a_number_the_pane_does_not_know_is_refused_while_it_holds_images() {
         let composer = RefCell::new(three_images());
 
         assert!(!remove(&composer, 99).unwrap());
-
         assert_eq!(
             composer.borrow().markers(),
             ["[Image #5]", "[Image #6]", "[Image #7]"],
@@ -572,19 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_never_survives_the_walk() {
-        let composer = RefCell::new(three_images());
-
-        remove(&composer, 5).unwrap();
-
-        assert!(
-            !composer.borrow().units.concat().contains(CURSOR_PROBE),
-            "the character used to find the cursor is always erased again"
-        );
-    }
-
-    #[test]
-    fn a_read_failure_stops_the_walk_before_anything_is_pressed() {
+    fn a_read_failure_stops_before_anything_is_pressed() {
         let composer = RefCell::new(three_images());
         let result = remove_native_attachment(
             AgentKind::Codex,
@@ -595,5 +495,14 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(composer.borrow().markers().len(), 3);
+    }
+
+    #[test]
+    fn images_are_counted_wherever_they_sit() {
+        assert_eq!(super::scan_markers("[Image #5] [Image #6] "), [5, 6]);
+        assert_eq!(super::scan_markers("describe [Image #5] it"), [5]);
+        assert_eq!(super::scan_markers("[Image #5]x [Image #6]"), [5, 6]);
+        assert_eq!(super::scan_markers("no images here"), Vec::<usize>::new());
+        assert_eq!(super::scan_markers("[Image #] [Image #7]"), [7]);
     }
 }
