@@ -27,6 +27,9 @@ pub struct StyleModifiers {
     pub dim: bool,
     pub italic: bool,
     pub underline: bool,
+    /// Persisted history predates this field, so it must stay optional on read.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]

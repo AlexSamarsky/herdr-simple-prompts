@@ -152,6 +152,7 @@ fn sanitizer_supports_named_colors_and_individual_resets() {
             dim: true,
             italic: true,
             underline: true,
+            reverse: false,
         }
     );
     assert_eq!(styled.runs[1].foreground, Some(AnsiColor::BrightRed));
@@ -1064,4 +1065,47 @@ fn markdown_projection_never_drops_word_characters() {
         assert_eq!(projected, source, "word characters lost in {text:?}");
         assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
     }
+}
+
+/// Tabs were dropped outright, so captured code lost its indentation and the
+/// columns either side of a tab merged into one word.
+#[test]
+fn sanitizer_expands_tabs_to_the_next_tab_stop() {
+    let styled = sanitize_ansi("fn main() {\n\tlet x = 1;\n}");
+    assert_eq!(styled.text, "fn main() {\n        let x = 1;\n}");
+
+    let columns = sanitize_ansi("ab\tc\td");
+    assert_eq!(columns.text, "ab      c       d");
+
+    let wide = sanitize_ansi("界\tx");
+    assert_eq!(wide.text, "界      x");
+}
+
+#[test]
+fn sanitizer_tracks_reverse_video() {
+    let styled = sanitize_ansi("\u{1b}[7mflip\u{1b}[27mback\u{1b}[0m");
+
+    assert_eq!(styled.text, "flipback");
+    assert_eq!(styled.runs.len(), 1);
+    assert!(styled.runs[0].modifiers.reverse);
+    assert_eq!(
+        &styled.text[styled.runs[0].start_byte..styled.runs[0].end_byte],
+        "flip"
+    );
+}
+
+/// `58` carries the same sub-parameters as `38`/`48`. Without skipping them the
+/// colour components were re-read as SGR codes and reset the run.
+#[test]
+fn sanitizer_skips_underline_colour_sub_parameters() {
+    let styled = sanitize_ansi("\u{1b}[4;58;2;255;128;0munder\u{1b}[0m");
+
+    assert_eq!(styled.text, "under");
+    assert_eq!(styled.runs.len(), 1);
+    assert!(styled.runs[0].modifiers.underline);
+    assert!(!styled.runs[0].modifiers.dim);
+
+    let indexed = sanitize_ansi("\u{1b}[1;58;5;196mbold\u{1b}[0m");
+    assert_eq!(indexed.runs.len(), 1);
+    assert!(indexed.runs[0].modifiers.bold);
 }

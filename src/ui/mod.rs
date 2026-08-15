@@ -164,10 +164,10 @@ pub fn run_from_env() -> AppResult<()> {
             draft_dirty = false;
         }
         if let Some(error) = draft_writer.as_ref().and_then(DraftWriter::take_error) {
-            app.send_error = Some(error);
+            app.background_error = Some(format!("draft: {error}"));
         }
         if let Some(error) = history_writer.as_ref().and_then(HistoryWriter::take_error) {
-            app.send_error = Some(error);
+            app.background_error = Some(format!("history: {error}"));
         }
 
         render::draw_terminal(&mut terminal, &app, &editor, &mut history_cache)?;
