@@ -241,19 +241,37 @@ const PANE_SETTLE_ATTEMPTS: usize = 30;
 /// reported as one that did not happen.
 const IMAGE_PASTE_WINDOW: Duration = Duration::from_secs(10);
 
+const MARKER_OPEN: &str = "[Image #";
+
+/// Characters to mark the composer with, tried in turn: whichever the composer
+/// does not already hold is the one the mark cannot be confused with.
+const PROBES: [char; 4] = ['¤', '¦', '‡', '¬'];
+
+/// How many times the walk may correct itself before giving up. Each round
+/// measures where the caret actually is, so a round that lands wrong makes the
+/// next one exact; more than a few means the composer is not answering.
+const PLACE_ATTEMPTS: usize = 4;
+
 /// Removes one image from the native composer, without ever guessing.
 ///
-/// Measured on a live pane: one backspace removes a whole marker, and the
-/// cursor steps over a marker as a single unit. What is not certain is how many
-/// steps separate the end of the composer from a given marker — the trailing
-/// space makes the arithmetic ambiguous, and a step too far would delete the
-/// wrong picture.
+/// Measured on a live pane: an image marker is a single unit — one arrow key
+/// crosses it and one backspace takes it whole — and the composer gives up any
+/// image the caret stands behind, not only the last one. What cannot be read
+/// back is the caret: the pane reports what it holds and never where the caret
+/// is.
 ///
-/// So no arithmetic is trusted. The cursor walks back one step at a time and
-/// each position is confirmed by typing a character and reading where it landed;
-/// only when it sits directly behind the wanted marker is anything deleted, and
-/// the result is read back before the removal is reported. The only thing ever
-/// written into the composer is that probe, which is erased again at once.
+/// So the caret is established rather than assumed. A character the user could
+/// not have typed is written into the composer and the pane is read back: where
+/// that mark appears is where the typing landed, which is where the caret was.
+/// The mark is taken out again at once. Nothing is deleted until a mark has
+/// been seen sitting directly behind the wanted image.
+///
+/// Two measured quirks are honoured. A terminal pads every row with blanks, so
+/// a space held at the end of the composer cannot be told apart from the empty
+/// rest of the row — a mark typed at the end makes those spaces visible, and
+/// only then does the counting mean anything. And a mark typed directly in
+/// front of an image leaves the caret past that image, so the backspace meant
+/// for the mark needs a step back first; without it, it takes the picture.
 pub fn remove_native_attachment(
     kind: AgentKind,
     marker: usize,
@@ -273,21 +291,21 @@ pub fn remove_native_attachment(
         // drop a chip while the picture stays.
         return Ok(markers.is_empty());
     };
-    if position + 1 != markers.len() {
-        return Err(AppError::new(
-            "remove image",
-            "only the newest image can be removed from here; \
-             remove the others in the agent with prefix+m",
-        ));
+    if position + 1 == markers.len() {
+        return remove_last_attachment(kind, marker, &markers, &mut read, &mut press);
     }
+    remove_earlier_attachment(kind, marker, &markers, &mut read, &mut press)
+}
 
-    // The end of the composer is the one place whose behaviour is known: a
-    // single backspace there takes the last marker whole, measured on a live
-    // pane. Reaching any earlier marker means placing the cursor, and placing
-    // the cursor cannot be confirmed — a character typed to mark the spot does
-    // not always leave the cursor behind it, and the backspace meant for that
-    // character has been seen to take the neighbouring picture instead. An
-    // image nobody asked to lose is not a price worth paying for a convenience.
+/// The last image needs no walking: one keystroke reaches the end of the
+/// composer, and the marker is what sits there.
+fn remove_last_attachment(
+    kind: AgentKind,
+    marker: usize,
+    before: &[usize],
+    read: &mut impl FnMut() -> AppResult<String>,
+    press: &mut impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+) -> AppResult<bool> {
     press(&["ctrl+e"], None)?;
     let gone = format!("[Image #{marker}]");
     // What sits at the end is not always the marker: an image removed before
@@ -295,19 +313,250 @@ pub fn remove_native_attachment(
     // takes that instead. So the presses are counted out one at a time and the
     // composer is asked after each — and there are only ever two of them, which
     // is a space and a marker and nothing further.
-    let mut removed = false;
     for _ in 0..2 {
         press(&["backspace"], None)?;
-        if settle(kind, &mut read, |content| !content.contains(&gone))?.is_some() {
-            removed = true;
-            break;
+        if settle(kind, read, |content| !content.contains(&gone))?.is_some() {
+            return confirm_removal(kind, marker, before, read);
         }
     }
-    if !removed {
-        return Err(walk_failure("the image did not go", kind, &mut read));
+    Err(walk_failure("the image did not go", kind, read))
+}
+
+/// An earlier image: the caret has to be brought to it, and brought there
+/// provably.
+fn remove_earlier_attachment(
+    kind: AgentKind,
+    marker: usize,
+    before: &[usize],
+    read: &mut impl FnMut() -> AppResult<String>,
+    press: &mut impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+) -> AppResult<bool> {
+    let start = composer_content(kind, read)?;
+    let probe = probe_character(&start)?;
+
+    // The end of the composer is the one place reached without counting, and a
+    // mark typed there shows what the padded row was hiding.
+    press(&["ctrl+e"], None)?;
+    let revealed = place_probe(kind, probe, &start, read, press)?;
+    let end = revealed.len() - 1;
+    if probe_position(&revealed, probe) != Some(end) {
+        return Err(walk_failure("the end of the composer moved", kind, read));
     }
+    let mut held = revealed[..end].to_vec();
+    withdraw_probe(kind, probe, &revealed, end, &render(&held), read, press)?;
+    let mut caret = held.len();
+
+    for _ in 0..PLACE_ATTEMPTS {
+        let Some(image) = held.iter().position(|unit| *unit == Unit::Marker(marker)) else {
+            return Err(walk_failure("the image left the composer", kind, read));
+        };
+        let wanted = image + 1;
+        step(caret, wanted, press)?;
+        let probed = place_probe(kind, probe, &render(&held), read, press)?;
+        let Some(at) = probe_position(&probed, probe) else {
+            return Err(walk_failure("the mark could not be found", kind, read));
+        };
+        // Behind the image and nothing else: the mark itself says so, which is
+        // the whole reason it was typed.
+        let behind_the_image = at == wanted && probed.get(image) == Some(&Unit::Marker(marker));
+        withdraw_probe(kind, probe, &probed, at, &render(&held), read, press)?;
+        // Taking the mark out leaves the caret where the mark stood, so its
+        // place is now the caret's place — measured, not assumed.
+        caret = at;
+        held = without(&probed, at);
+        if behind_the_image {
+            press(&["backspace"], None)?;
+            let gone = format!("[Image #{marker}]");
+            if settle(kind, read, |content| !content.contains(&gone))?.is_none() {
+                return Err(walk_failure("the image did not go", kind, read));
+            }
+            return confirm_removal(kind, marker, before, read);
+        }
+    }
+    Err(walk_failure(
+        "the caret could not be brought to the image",
+        kind,
+        read,
+    ))
+}
+
+/// Reports the removal only if exactly the wanted picture left.
+fn confirm_removal(
+    kind: AgentKind,
+    marker: usize,
+    before: &[usize],
+    read: &mut impl FnMut() -> AppResult<String>,
+) -> AppResult<bool> {
     let left = composer_markers(kind, &read()?);
-    Ok(!left.contains(&marker) && left.len() + 1 == markers.len())
+    Ok(!left.contains(&marker) && left.len() + 1 == before.len())
+}
+
+/// Types the mark and reads back where it landed.
+///
+/// The mark must be the only thing that changed: if the composer holds anything
+/// else new, something other than this walk is writing into it, and nothing may
+/// be deleted on the strength of a picture that has already gone stale.
+fn place_probe(
+    kind: AgentKind,
+    probe: char,
+    expected: &str,
+    read: &mut impl FnMut() -> AppResult<String>,
+    press: &mut impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+) -> AppResult<Vec<Unit>> {
+    press(&[], Some(&probe.to_string()))?;
+    let Some(content) = settle(kind, read, |content| content.contains(probe))? else {
+        return Err(walk_failure(
+            "the composer never showed the mark",
+            kind,
+            read,
+        ));
+    };
+    let placed = units(&content);
+    let Some(at) = probe_position(&placed, probe) else {
+        return Err(walk_failure("the mark could not be found", kind, read));
+    };
+    if render(&without(&placed, at)).trim_end() != expected.trim_end() {
+        return Err(walk_failure(
+            "the composer changed while the mark was placed",
+            kind,
+            read,
+        ));
+    }
+    Ok(placed)
+}
+
+/// Takes the mark back out, leaving the caret where the mark stood.
+fn withdraw_probe(
+    kind: AgentKind,
+    probe: char,
+    placed: &[Unit],
+    at: usize,
+    expected: &str,
+    read: &mut impl FnMut() -> AppResult<String>,
+    press: &mut impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+) -> AppResult<()> {
+    // A mark typed directly in front of an image leaves the caret past that
+    // image. Stepping back is what keeps this backspace on the mark instead of
+    // on the picture.
+    if matches!(placed.get(at + 1), Some(Unit::Marker(_))) {
+        press(&["left"], None)?;
+    }
+    press(&["backspace"], None)?;
+    let Some(content) = settle(kind, read, |content| !content.contains(probe))? else {
+        return Err(walk_failure("the mark stayed in the composer", kind, read));
+    };
+    if content.trim_end() != expected.trim_end() {
+        return Err(walk_failure(
+            "taking the mark out changed the composer",
+            kind,
+            read,
+        ));
+    }
+    Ok(())
+}
+
+fn step(
+    from: usize,
+    to: usize,
+    press: &mut impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+) -> AppResult<()> {
+    let (key, count) = if from > to {
+        ("left", from - to)
+    } else {
+        ("right", to - from)
+    };
+    for _ in 0..count {
+        press(&[key], None)?;
+    }
+    Ok(())
+}
+
+fn composer_content(
+    kind: AgentKind,
+    read: &mut impl FnMut() -> AppResult<String>,
+) -> AppResult<String> {
+    native_composer_content(kind, &sanitize_ansi(&read()?))
+        .ok_or_else(|| AppError::new("remove image", "the native composer could not be read"))
+}
+
+/// A character to mark the composer with. It has to be one the user could not
+/// have written there, or the mark could be mistaken for their own text.
+fn probe_character(content: &str) -> AppResult<char> {
+    PROBES
+        .iter()
+        .copied()
+        .find(|probe| !content.contains(*probe))
+        .ok_or_else(|| {
+            AppError::new(
+                "remove image",
+                "the composer already holds every mark this could use",
+            )
+        })
+}
+
+fn probe_position(units: &[Unit], probe: char) -> Option<usize> {
+    units
+        .iter()
+        .position(|unit| *unit == Unit::Character(probe))
+}
+
+fn without(units: &[Unit], at: usize) -> Vec<Unit> {
+    let mut rest = units.to_vec();
+    rest.remove(at);
+    rest
+}
+
+/// One step of the composer: an image marker is a single unit, the same as a
+/// single character.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Unit {
+    Marker(usize),
+    Character(char),
+}
+
+fn units(content: &str) -> Vec<Unit> {
+    let mut units = Vec::new();
+    let mut rest = content;
+    while let Some(character) = rest.chars().next() {
+        match marker_at(rest) {
+            Some((number, length)) => {
+                units.push(Unit::Marker(number));
+                rest = &rest[length..];
+            }
+            None => {
+                units.push(Unit::Character(character));
+                rest = &rest[character.len_utf8()..];
+            }
+        }
+    }
+    units
+}
+
+fn marker_at(content: &str) -> Option<(usize, usize)> {
+    let after = content.strip_prefix(MARKER_OPEN)?;
+    let digits = after.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 || !after[digits..].starts_with(']') {
+        return None;
+    }
+    Some((
+        after[..digits].parse().ok()?,
+        MARKER_OPEN.len() + digits + 1,
+    ))
+}
+
+fn render(units: &[Unit]) -> String {
+    let mut content = String::new();
+    for unit in units {
+        match unit {
+            Unit::Marker(number) => {
+                content.push_str(MARKER_OPEN);
+                content.push_str(&number.to_string());
+                content.push(']');
+            }
+            Unit::Character(character) => content.push(*character),
+        }
+    }
+    content
 }
 
 /// An error that carries what the composer actually looked like when the
@@ -360,19 +609,13 @@ fn composer_markers(kind: AgentKind, ansi: &str) -> Vec<usize> {
 }
 
 fn scan_markers(content: &str) -> Vec<usize> {
-    let mut markers = Vec::new();
-    let mut rest = content;
-    while let Some(start) = rest.find("[Image #") {
-        let after = &rest[start + "[Image #".len()..];
-        let digits = after.chars().take_while(char::is_ascii_digit).count();
-        if digits > 0 && after[digits..].starts_with(']') {
-            if let Ok(number) = after[..digits].parse() {
-                markers.push(number);
-            }
-        }
-        rest = &after[digits..];
-    }
-    markers
+    units(content)
+        .into_iter()
+        .filter_map(|unit| match unit {
+            Unit::Marker(number) => Some(number),
+            Unit::Character(_) => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -398,10 +641,14 @@ mod tests {
             }
         }
 
+        /// What the pane shows — which is not quite what the composer holds. A
+        /// terminal pads every row with blanks, so trailing spaces come back
+        /// indistinguishable from the empty rest of the row, exactly as they do
+        /// from a live pane.
         fn surface(&self) -> String {
             format!(
                 "• answer\n────────\n› {}\ngpt-5.6-sol xhigh · /repo · weekly 75% left",
-                self.units.concat()
+                self.units.concat().trim_end_matches(' ')
             )
         }
 
@@ -417,6 +664,9 @@ mod tests {
             for key in keys {
                 match *key {
                     "ctrl+e" => self.cursor = self.units.len(),
+                    "ctrl+a" => self.cursor = 0,
+                    "left" => self.cursor = self.cursor.saturating_sub(1),
+                    "right" => self.cursor = (self.cursor + 1).min(self.units.len()),
                     "backspace" => {
                         if self.cursor > 0 {
                             self.cursor -= 1;
@@ -426,10 +676,26 @@ mod tests {
                     other => panic!("unmodelled key {other}"),
                 }
             }
-            for character in text.unwrap_or_default().chars() {
+            let Some(text) = text else {
+                return;
+            };
+            for character in text.chars() {
                 self.units.insert(self.cursor, character.to_string());
                 self.cursor += 1;
             }
+            // Measured on a live pane, three times over: typing directly in
+            // front of an image leaves the caret past that image, so a
+            // backspace meant to take the typing back takes the picture
+            // instead.
+            if self.is_image(self.cursor) {
+                self.cursor += 1;
+            }
+        }
+
+        fn is_image(&self, index: usize) -> bool {
+            self.units
+                .get(index)
+                .is_some_and(|unit| unit.starts_with("[Image #"))
         }
     }
 
@@ -463,11 +729,6 @@ mod tests {
         assert_eq!(composer.borrow().markers(), ["[Image #5]", "[Image #6]"]);
     }
 
-    /// Reaching an earlier image means placing the cursor, and placing the
-    /// cursor cannot be confirmed: a character typed to mark the spot has been
-    /// seen to leave the cursor elsewhere, and the backspace meant for it took
-    /// the neighbouring picture instead. So earlier images are refused rather
-    /// than reached for.
     /// A space left at the end by an earlier removal must not be mistaken for
     /// the image: the first press takes the space, and the image needs the
     /// second.
@@ -480,22 +741,90 @@ mod tests {
     }
 
     #[test]
-    fn an_earlier_image_is_refused_rather_than_reached_for() {
-        for marker in [5, 6] {
+    fn an_earlier_image_is_removed_and_the_others_are_left_alone() {
+        for (marker, left) in [
+            (5, vec!["[Image #6]", "[Image #7]"]),
+            (6, vec!["[Image #5]", "[Image #7]"]),
+        ] {
             let composer = RefCell::new(three_images());
 
-            let refusal = remove(&composer, marker).unwrap_err().to_string();
-
-            assert!(
-                refusal.contains("only the newest image"),
-                "the refusal says why: {refusal}"
-            );
-            assert_eq!(
-                composer.borrow().markers(),
-                ["[Image #5]", "[Image #6]", "[Image #7]"],
-                "and every picture is still there"
-            );
+            assert!(remove(&composer, marker).unwrap());
+            assert_eq!(composer.borrow().markers(), left);
         }
+    }
+
+    /// A picture with text on both sides is the one the caret has to be steered
+    /// into, so it is the case that proves the steering.
+    #[test]
+    fn an_image_between_text_is_removed_without_touching_the_text() {
+        let composer = RefCell::new(Composer::new(&[
+            "l",
+            "o",
+            "o",
+            "k",
+            " ",
+            "[Image #5]",
+            " ",
+            "[Image #6]",
+            " ",
+            "h",
+            "e",
+            "r",
+            "e",
+        ]));
+
+        assert!(remove(&composer, 5).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #6]"]);
+        assert_eq!(composer.borrow().units.concat(), "look  [Image #6] here");
+    }
+
+    /// The composer holds a space after the last image that the pane cannot
+    /// show, so counting back from the end without asking would land one step
+    /// short — on the picture instead of behind it.
+    #[test]
+    fn a_space_the_pane_cannot_show_does_not_misplace_the_caret() {
+        let composer = RefCell::new(Composer::new(&[
+            "[Image #5]",
+            " ",
+            "[Image #6]",
+            " ",
+            "[Image #7]",
+            " ",
+        ]));
+
+        assert!(remove(&composer, 5).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #6]", "[Image #7]"]);
+    }
+
+    /// Nothing is deleted on the strength of a picture that has gone stale: if
+    /// the composer changes under the walk, the walk stops.
+    #[test]
+    fn a_composer_that_changes_under_the_walk_stops_it() {
+        let composer = RefCell::new(three_images());
+        let mut reads = 0;
+
+        let outcome = remove_native_attachment(
+            AgentKind::Codex,
+            5,
+            || {
+                reads += 1;
+                if reads > 3 {
+                    composer.borrow_mut().units.push("typed".to_owned());
+                }
+                Ok(composer.borrow().surface())
+            },
+            |keys, text| {
+                composer.borrow_mut().press(keys, text);
+                Ok(())
+            },
+        );
+
+        assert!(outcome.is_err(), "the walk stops rather than deleting");
+        assert_eq!(
+            composer.borrow().markers(),
+            ["[Image #5]", "[Image #6]", "[Image #7]"],
+            "and every picture is still there"
+        );
     }
 
     #[test]
