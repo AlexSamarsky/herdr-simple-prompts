@@ -286,9 +286,13 @@ impl Editor {
             return;
         };
         self.atoms.remove(index);
-        if self.cursor > index {
-            self.cursor -= 1;
+        // The gap belonged to that image and goes with it, which leaves the
+        // cursor standing on whatever came next — the following image, marked,
+        // as the native composer leaves it.
+        if matches!(self.atoms.get(index), Some(EditorAtom::Gap)) {
+            self.atoms.remove(index);
         }
+        self.cursor = self.cursor.min(index).min(self.atoms.len());
         self.preferred_column = None;
         self.rebuild_projections();
     }

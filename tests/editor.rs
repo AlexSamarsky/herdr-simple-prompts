@@ -679,3 +679,35 @@ fn the_gap_beside_an_image_is_a_place_but_not_text() {
         "one step further stands on the image"
     );
 }
+
+/// Removing a marked image leaves the cursor on the next one, marked in its
+/// turn — so a second press takes that one too, as the native composer does.
+#[test]
+fn removing_an_image_marks_the_next_one() {
+    let mut editor = Editor::default();
+    for marker in ["Image #1", "Image #2", "Image #3"] {
+        editor.insert_attachment(Attachment {
+            id: marker.into(),
+            display: marker.into(),
+            native_path: None,
+        });
+    }
+    // Stand on the middle image: back over the trailing gap, the last image,
+    // its gap, and onto the marker itself.
+    for _ in 0..4 {
+        editor.move_left();
+    }
+    assert_eq!(
+        editor.attachment_at_cursor().map(|image| image.id.clone()),
+        Some("Image #2".to_owned())
+    );
+
+    editor.remove_attachment("Image #2");
+
+    assert_eq!(editor.display_text(), "[Image #1] [Image #3] ");
+    assert_eq!(
+        editor.attachment_at_cursor().map(|image| image.id.clone()),
+        Some("Image #3".to_owned()),
+        "the next image is now the one marked"
+    );
+}
