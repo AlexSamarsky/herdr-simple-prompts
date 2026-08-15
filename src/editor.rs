@@ -278,7 +278,9 @@ impl Editor {
     }
 
     pub fn delete_word_left(&mut self) {
-        let start = self.word_start_before(self.cursor);
+        let start = self
+            .word_start_before(self.cursor)
+            .max(self.attachment_floor(self.cursor));
         if start == self.cursor {
             return;
         }
@@ -289,7 +291,9 @@ impl Editor {
     }
 
     pub fn delete_word_right(&mut self) {
-        let end = self.word_end_after(self.cursor);
+        let end = self
+            .word_end_after(self.cursor)
+            .min(self.attachment_ceiling(self.cursor));
         if end == self.cursor {
             return;
         }
@@ -299,7 +303,7 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
+        if self.cursor == 0 || self.is_opaque_attachment(self.cursor - 1) {
             return;
         }
         self.cursor -= 1;
@@ -309,7 +313,7 @@ impl Editor {
     }
 
     pub fn delete(&mut self) {
-        if self.cursor == self.atoms.len() {
+        if self.cursor == self.atoms.len() || self.is_opaque_attachment(self.cursor) {
             return;
         }
         self.atoms.remove(self.cursor);
@@ -328,7 +332,9 @@ impl Editor {
     }
 
     pub fn delete_to_line_start(&mut self) {
-        let start = self.line_start_index();
+        let start = self
+            .line_start_index()
+            .max(self.attachment_floor(self.cursor));
         if start == self.cursor {
             return;
         }
@@ -339,7 +345,9 @@ impl Editor {
     }
 
     pub fn delete_to_line_end(&mut self) {
-        let end = self.line_end_index();
+        let end = self
+            .line_end_index()
+            .min(self.attachment_ceiling(self.cursor));
         if end == self.cursor {
             return;
         }
@@ -521,6 +529,29 @@ impl Editor {
         )
     }
 
+    /// Deletions stop at an image rather than passing through it.
+    ///
+    /// The marker stands for a picture the agent is holding, and removing it
+    /// here has to remove it there — which is not wired up yet. Until it is,
+    /// the marker is a wall: text around it goes, the image stays, and the two
+    /// sides never disagree about how many images exist.
+    fn attachment_floor(&self, cursor: usize) -> usize {
+        (0..cursor)
+            .rev()
+            .find(|index| self.is_opaque_attachment(*index))
+            .map_or(0, |index| index + 1)
+    }
+
+    fn attachment_ceiling(&self, cursor: usize) -> usize {
+        (cursor..self.atoms.len())
+            .find(|index| self.is_opaque_attachment(*index))
+            .unwrap_or(self.atoms.len())
+    }
+
+    fn is_opaque_attachment(&self, index: usize) -> bool {
+        matches!(self.atoms.get(index), Some(EditorAtom::Attachment(_)))
+    }
+
     /// Whether an atom stands for something the composer is not spelling out —
     /// a collapsed paste or an image. Either is one indivisible word.
     fn is_opaque(&self, index: usize) -> bool {
@@ -553,10 +584,10 @@ impl Editor {
                     self.display_text
                         .push_str(&large_paste_marker(*character_count));
                 }
-                EditorAtom::Attachment(_) => {
+                EditorAtom::Attachment(attachment) => {
                     attachment_index += 1;
                     self.display_text
-                        .push_str(&attachment_marker(attachment_index));
+                        .push_str(&attachment_marker(&attachment.display, attachment_index));
                 }
             }
             self.source_boundaries.push(self.source_text.len());
@@ -661,8 +692,15 @@ pub fn staged_image_path(text: &str) -> Option<PathBuf> {
     (image_extension && staged && path.is_file()).then_some(path)
 }
 
-fn attachment_marker(index: usize) -> String {
-    format!("[Image #{index}] ")
+/// Agents number an image when it is pasted and keep that number for the rest
+/// of the session, so the label the pane gave it is shown rather than its place
+/// in the line. Only an image with no label of its own falls back to counting.
+fn attachment_marker(label: &str, index: usize) -> String {
+    if label.starts_with("Image #") {
+        format!("[{label}] ")
+    } else {
+        format!("[Image #{index}] ")
+    }
 }
 
 fn byte_at_display_column(text: &str, start: usize, end: usize, column: usize) -> usize {

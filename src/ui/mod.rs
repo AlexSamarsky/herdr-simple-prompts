@@ -115,10 +115,10 @@ pub fn run_from_env() -> AppResult<()> {
                 // The markers precede the text in the pane, so they take the
                 // same place here.
                 editor.move_document_start();
-                for index in 1..=adopted.attachments {
+                for marker in &adopted.markers {
                     editor.insert_attachment(Attachment {
-                        id: format!("native-image-{index}"),
-                        display: format!("Image #{index}"),
+                        id: format!("native-image-{marker}"),
+                        display: format!("Image #{marker}"),
                         native_path: None,
                     });
                 }
@@ -545,7 +545,7 @@ fn handle_key(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdoptedDraft {
     text: String,
-    attachments: usize,
+    markers: Vec<usize>,
     cleared: bool,
 }
 
@@ -618,7 +618,7 @@ fn lift_native_draft(
     // multi-line draft carries newlines the buffer does not have, so counting
     // deletions from it would overshoot — and an overshoot eats the marker,
     // which is the one thing here that cannot be undone.
-    if parts.attachments > 0 && parts.text.contains('\n') {
+    if !parts.markers.is_empty() && parts.text.contains('\n') {
         return Ok(None);
     }
     if parts.text.is_empty() {
@@ -626,30 +626,30 @@ fn lift_native_draft(
         // has to know they are there.
         return Ok(Some(AdoptedDraft {
             text: String::new(),
-            attachments: parts.attachments,
+            markers: parts.markers,
             cleared: true,
         }));
     }
     let removal = removal_keys(&parts.text);
     for attempt in 0..attempts {
-        press(&removal_prefix(parts.attachments))?;
+        press(&removal_prefix(parts.markers.len()))?;
         for batch in removal.chunks(ADOPT_KEY_BATCH) {
             press(batch)?;
         }
         if attempt + 1 < attempts {
             std::thread::sleep(retry_delay);
         }
-        if composer_holds_only(kind, &read()?, parts.attachments) {
+        if composer_holds_only(kind, &read()?, parts.markers.len()) {
             return Ok(Some(AdoptedDraft {
                 text: parts.text,
-                attachments: parts.attachments,
+                markers: parts.markers,
                 cleared: true,
             }));
         }
     }
     Ok(Some(AdoptedDraft {
         text: parts.text,
-        attachments: parts.attachments,
+        markers: parts.markers,
         cleared: false,
     }))
 }
@@ -1361,7 +1361,7 @@ mod tests {
         .expect("an occupied composer must be adopted");
 
         assert_eq!(adopted.text, "half written prompt");
-        assert_eq!(adopted.attachments, 0);
+        assert!(adopted.markers.is_empty());
         assert!(adopted.cleared);
         assert!(cleared.get() > 0, "the composer must have been cleared");
     }
@@ -1443,7 +1443,7 @@ mod tests {
         .expect("text beside an image must be adopted");
 
         assert_eq!(adopted.text, "describe it");
-        assert_eq!(adopted.attachments, 1);
+        assert_eq!(adopted.markers, [1]);
         assert!(adopted.cleared);
         let pressed = keys.borrow();
         assert_eq!(pressed[0], "ctrl+e");
@@ -1473,7 +1473,7 @@ mod tests {
         .expect("a bare image must be adopted");
 
         assert_eq!(adopted.text, "");
-        assert_eq!(adopted.attachments, 1);
+        assert_eq!(adopted.markers, [1]);
         assert!(adopted.cleared);
     }
 
@@ -1497,10 +1497,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(view.attachments, Some(1));
-        assert_eq!(
-            view.adopted.expect("a bare image is adopted").attachments,
-            1
-        );
+        assert_eq!(view.adopted.expect("a bare image is adopted").markers, [1]);
         assert_eq!(reads.get(), 1);
     }
 

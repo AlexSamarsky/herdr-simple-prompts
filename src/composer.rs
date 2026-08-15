@@ -137,7 +137,7 @@ fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
 /// attachment markers classify as owned attachments, so neither reaches here.
 pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<String> {
     native_composer_parts(kind, surface)
-        .filter(|parts| parts.attachments == 0)
+        .filter(|parts| parts.markers.is_empty())
         .map(|parts| parts.text)
 }
 
@@ -157,7 +157,7 @@ pub fn native_attachment_count(kind: AgentKind, surface: &StyledText) -> Option<
         NativeComposerState::Clear => Some(0),
         NativeComposerState::OwnedAttachments(count) => Some(count),
         NativeComposerState::Occupied => {
-            native_composer_parts(kind, surface).map(|parts| parts.attachments)
+            native_composer_parts(kind, surface).map(|parts| parts.attachments())
         }
         NativeComposerState::Unknown => None,
     }
@@ -178,28 +178,37 @@ pub fn native_composer_parts(kind: AgentKind, surface: &StyledText) -> Option<Co
         AgentKind::Claude => claude_content(&surface.text, &lines),
     }?;
     let content = chunk_text(surface, &chunks);
-    let (attachments, text) = split_attachments(&content)?;
-    if attachments == 0 && text.trim().is_empty() {
+    let (markers, text) = split_attachments(&content)?;
+    if markers.is_empty() && text.trim().is_empty() {
         return None;
     }
-    debug_assert!(held == 0 || held == attachments);
+    debug_assert!(held == 0 || held == markers.len());
     Some(ComposerParts {
-        attachments,
+        markers,
         text: text.trim().to_owned(),
     })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComposerParts {
-    pub attachments: usize,
+    /// The number the pane printed for each image, in the order they appear.
+    /// Agents number an image when it is pasted and keep that number for the
+    /// rest of the session, so it identifies the image rather than its place.
+    pub markers: Vec<usize>,
     pub text: String,
+}
+
+impl ComposerParts {
+    pub fn attachments(&self) -> usize {
+        self.markers.len()
+    }
 }
 
 /// Counts the attachment markers that open the content and returns the rest.
 /// A marker anywhere after the text means the two are interleaved.
-fn split_attachments(content: &str) -> Option<(usize, &str)> {
+fn split_attachments(content: &str) -> Option<(Vec<usize>, &str)> {
     let mut rest = content;
-    let mut attachments = 0;
+    let mut markers = Vec::new();
     loop {
         let trimmed = rest.trim_start();
         let Some(after) = trimmed.strip_prefix(ATTACHMENT_MARKER) else {
@@ -209,14 +218,14 @@ fn split_attachments(content: &str) -> Option<(usize, &str)> {
         let Some(remainder) = after[digits..].strip_prefix(']') else {
             break;
         };
-        if digits == 0 {
+        let Ok(number) = after[..digits].parse() else {
             break;
-        }
-        attachments += 1;
+        };
+        markers.push(number);
         rest = remainder;
     }
     let rest = rest.trim_start();
-    (!rest.contains(ATTACHMENT_MARKER)).then_some((attachments, rest))
+    (!rest.contains(ATTACHMENT_MARKER)).then_some((markers, rest))
 }
 
 fn chunk_text(surface: &StyledText, chunks: &[LineRange]) -> String {

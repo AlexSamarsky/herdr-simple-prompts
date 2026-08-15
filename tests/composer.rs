@@ -383,17 +383,17 @@ fn a_composer_holding_only_images_is_offered_for_adoption() {
 
     let parts = native_composer_parts(AgentKind::Codex, &surface("[Image #1]"))
         .expect("a bare image must be adopted");
-    assert_eq!(parts.attachments, 1);
+    assert_eq!(parts.markers, [1]);
     assert_eq!(parts.text, "");
 
     let two = native_composer_parts(AgentKind::Codex, &surface("[Image #1] [Image #2]"))
         .expect("several bare images must be adopted");
-    assert_eq!(two.attachments, 2);
+    assert_eq!(two.markers, [1, 2]);
     assert_eq!(two.text, "");
 
     let mixed = native_composer_parts(AgentKind::Codex, &surface("[Image #1] describe it"))
         .expect("an image beside text must be adopted");
-    assert_eq!(mixed.attachments, 1);
+    assert_eq!(mixed.markers, [1]);
     assert_eq!(mixed.text, "describe it");
 
     assert_eq!(native_composer_parts(AgentKind::Codex, &surface(" ")), None);

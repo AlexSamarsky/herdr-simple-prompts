@@ -510,3 +510,66 @@ fn markers_can_be_brought_back_in_line_with_the_pane() {
     editor.retain_attachments(5);
     assert_eq!(editor.display_text(), "describe it", "nothing is invented");
 }
+
+/// The marker stands for a picture the agent is holding, and removing it here
+/// has to remove it there — which is not wired up. Until it is, every deletion
+/// stops at the marker, so the two sides never disagree about how many images
+/// exist and a prompt is never refused over a phantom one.
+#[test]
+fn deletions_stop_at_an_image_instead_of_passing_through_it() {
+    let attachment = || Attachment {
+        id: "image-1".into(),
+        display: "Image #7".into(),
+        native_path: None,
+    };
+
+    let mut editor = Editor::default();
+    editor.insert_attachment(attachment());
+    editor.insert_paste("tail");
+    editor.move_home();
+    editor.move_right();
+    for _ in 0..4 {
+        editor.backspace();
+    }
+    assert_eq!(
+        editor.attachments().len(),
+        1,
+        "backspace stops at the image"
+    );
+
+    editor.delete_word_left();
+    editor.delete_to_line_start();
+    assert_eq!(
+        editor.attachments().len(),
+        1,
+        "word and line kills stop too"
+    );
+
+    editor.move_document_start();
+    editor.delete();
+    editor.delete_word_right();
+    editor.delete_to_line_end();
+    assert_eq!(editor.attachments().len(), 1, "and so do forward deletions");
+    assert_eq!(
+        editor.submission_text(),
+        "tail",
+        "the text around it is intact"
+    );
+}
+
+/// Agents number an image when it is pasted and keep that number for the rest of
+/// the session, so the overlay shows the label the pane gave it rather than the
+/// place it happens to sit in.
+#[test]
+fn an_image_keeps_the_number_the_pane_gave_it() {
+    let mut editor = Editor::default();
+    for label in ["Image #3", "Image #4"] {
+        editor.insert_attachment(Attachment {
+            id: label.into(),
+            display: label.into(),
+            native_path: None,
+        });
+    }
+
+    assert_eq!(editor.display_text(), "[Image #3] [Image #4] ");
+}
