@@ -193,23 +193,27 @@ impl AgentTransport {
     }
 
     fn verify_new_image_marker(&self, before: &[usize]) -> AppResult<usize> {
-        // An image takes longer to appear than a keystroke — the agent has to
-        // take it from the clipboard before it can draw it — and how much
-        // longer is not ours to know, so this waits as patiently as the walk.
-        let deadline = Instant::now() + PANE_SETTLE * PANE_SETTLE_ATTEMPTS as u32;
-        while Instant::now() < deadline {
-            if let Some(marker) = self
-                .image_markers()?
-                .into_iter()
-                .find(|marker| !before.contains(marker))
-            {
-                return Ok(marker);
+        // An image takes longer to appear than a keystroke: the agent has to
+        // take it out of the clipboard and put it somewhere before it can draw
+        // it, and a screenshot is not small. How long that is is not ours to
+        // know, so this waits well past what has been seen rather than guessing
+        // a limit and calling a slow paste a failed one.
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        while started.elapsed() < IMAGE_PASTE_WINDOW {
+            seen = self.image_markers()?;
+            if let Some(marker) = seen.iter().find(|marker| !before.contains(marker)) {
+                return Ok(*marker);
             }
             thread::sleep(PANE_SETTLE);
         }
         Err(AppError::new(
             "image paste",
-            "native agent did not confirm the image attachment",
+            format!(
+                "native agent did not confirm the image attachment in {}s; \
+                 composer held {before:?} before and {seen:?} after",
+                IMAGE_PASTE_WINDOW.as_secs()
+            ),
         ))
     }
 }
@@ -228,6 +232,11 @@ const CURSOR_PROBE: &str = "~";
 /// nothing is pressed until the probe is seen, and waiting costs only time.
 const PANE_SETTLE: Duration = Duration::from_millis(100);
 const PANE_SETTLE_ATTEMPTS: usize = 30;
+
+/// How long an agent may take to attach a pasted image before the overlay calls
+/// it a failure. Generous on purpose: a paste that is merely slow must not be
+/// reported as one that did not happen.
+const IMAGE_PASTE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Removes one image from the native composer, without ever guessing.
 ///
