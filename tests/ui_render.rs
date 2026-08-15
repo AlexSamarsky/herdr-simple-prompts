@@ -1492,3 +1492,21 @@ fn the_image_under_the_cursor_is_drawn_highlighted() {
 
     assert_eq!(highlighted, "[Image #12]");
 }
+
+/// A pane asked to attach or drop an image answers in its own time. The wait is
+/// named and counted, so a composer that sits still for a few seconds reads as
+/// waiting rather than as broken.
+#[test]
+fn a_wait_on_the_pane_is_named_and_counted() {
+    let mut app = AppState::default();
+    app.pending_action = Some(herdr_simple_prompts::app::PendingAction::new(
+        "Attaching image",
+    ));
+
+    let rendered = render_to_string(&app, &Editor::default(), 60, 20);
+
+    assert!(
+        rendered.contains("Attaching image (0s)…"),
+        "the overlay says what it is waiting for: {rendered}"
+    );
+}

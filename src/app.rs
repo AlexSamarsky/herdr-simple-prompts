@@ -35,6 +35,28 @@ pub enum AppEvent {
     },
 }
 
+/// Something the overlay has asked the pane to do and is waiting on.
+///
+/// Attaching or removing an image is not instant — the agent has to take the
+/// picture out of the clipboard, or redraw without it — and a composer that
+/// simply sits there for a few seconds looks broken. Saying what is being
+/// waited for, and for how long, is the difference between waiting and
+/// wondering.
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub label: &'static str,
+    pub since: Instant,
+}
+
+impl PendingAction {
+    pub fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            since: Instant::now(),
+        }
+    }
+}
+
 pub struct AppState {
     pub session_id: String,
     pub turns: Vec<Turn>,
@@ -45,6 +67,7 @@ pub struct AppState {
     pub prompt_displays: Vec<CompactPromptOverride>,
     pub agent_status: AgentStatus,
     pub working_since: Option<Instant>,
+    pub pending_action: Option<PendingAction>,
     pub status_line: Option<StatusLine>,
     pub connection_error: Option<String>,
     pub transcript_error: Option<String>,
@@ -79,6 +102,7 @@ impl Default for AppState {
             prompt_displays: Vec::new(),
             agent_status: AgentStatus::Unknown,
             working_since: None,
+            pending_action: None,
             status_line: None,
             connection_error: None,
             transcript_error: None,
