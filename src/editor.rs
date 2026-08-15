@@ -245,23 +245,34 @@ impl Editor {
     }
 
     pub fn move_home(&mut self) {
-        let display_cursor = self.display_cursor_byte();
-        let target = self.display_text[..display_cursor]
-            .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        self.cursor = self.closest_display_boundary(target);
+        self.cursor = self.line_start_index();
         self.preferred_column = None;
     }
 
     pub fn move_end(&mut self) {
-        let display_cursor = self.display_cursor_byte();
-        let target = self.display_text[display_cursor..]
-            .find('\n')
-            .map(|index| display_cursor + index)
-            .unwrap_or(self.display_text.len());
-        self.cursor = self.closest_display_boundary(target);
+        self.cursor = self.line_end_index();
         self.preferred_column = None;
+    }
+
+    pub fn delete_to_line_start(&mut self) {
+        let start = self.line_start_index();
+        if start == self.cursor {
+            return;
+        }
+        self.atoms.drain(start..self.cursor);
+        self.cursor = start;
+        self.preferred_column = None;
+        self.rebuild_projections();
+    }
+
+    pub fn delete_to_line_end(&mut self) {
+        let end = self.line_end_index();
+        if end == self.cursor {
+            return;
+        }
+        self.atoms.drain(self.cursor..end);
+        self.preferred_column = None;
+        self.rebuild_projections();
     }
 
     pub fn move_document_start(&mut self) {
@@ -368,6 +379,24 @@ impl Editor {
     /// A collapsed paste is a single atom and stands for a whole block of text,
     /// so it counts as one word: a word motion stops at its edge instead of
     /// stepping into a body the composer is not showing.
+    fn line_start_index(&self) -> usize {
+        let display_cursor = self.display_cursor_byte();
+        let target = self.display_text[..display_cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.closest_display_boundary(target)
+    }
+
+    fn line_end_index(&self) -> usize {
+        let display_cursor = self.display_cursor_byte();
+        let target = self.display_text[display_cursor..]
+            .find('\n')
+            .map(|index| display_cursor + index)
+            .unwrap_or(self.display_text.len());
+        self.closest_display_boundary(target)
+    }
+
     fn word_start_before(&self, cursor: usize) -> usize {
         let mut index = cursor;
         while index > 0 && self.is_whitespace(index - 1) {

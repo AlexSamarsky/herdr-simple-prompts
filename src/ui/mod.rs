@@ -387,6 +387,25 @@ fn handle_key(
             editor.move_document_end();
             DraftChange::None
         }
+        // Killing to a line end. macOS sends `^U` for command+backspace, which
+        // is what actually arrives; the super arms cover terminals configured
+        // to forward the modifier itself.
+        (KeyCode::Backspace, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            editor.delete_to_line_start();
+            DraftChange::Debounced
+        }
+        (KeyCode::Char('u'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            editor.delete_to_line_start();
+            DraftChange::Debounced
+        }
+        (KeyCode::Delete, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            editor.delete_to_line_end();
+            DraftChange::Debounced
+        }
+        (KeyCode::Char('k'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            editor.delete_to_line_end();
+            DraftChange::Debounced
+        }
         // Word editing. Terminals disagree about what the option key sends:
         // some emit a modified arrow, others the readline escapes (`alt+b`,
         // `alt+f`, `alt+d`), so both spellings are accepted.
@@ -1082,6 +1101,50 @@ mod tests {
             &mut cache,
         );
         assert_eq!(editor.cursor_byte(), "first line\nsecond line".len());
+    }
+
+    /// macOS sends `^U` for command+backspace, so that is the binding that
+    /// actually arrives; the super arms cover terminals that forward the
+    /// modifier itself.
+    #[test]
+    fn line_kills_answer_readline_and_super_bindings() {
+        for (kill_left, kill_right) in [
+            (
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            ),
+            (
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER),
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::SUPER),
+            ),
+        ] {
+            let (runtime, _actions) = runtime::interaction_test_runtime(1);
+            let mut app = AppState {
+                native_composer: NativeComposerState::Clear,
+                ..AppState::default()
+            };
+            let mut editor = Editor::default();
+            editor.insert_paste("keep this\ndrop that");
+            let mut sequence = 1;
+            let mut cache = render::HistoryRenderCache::default();
+            let mut press = |key, app: &mut AppState, editor: &mut Editor, cache: &mut _| {
+                handle_key(key, app, editor, &runtime, &mut sequence, cache).unwrap()
+            };
+
+            assert_eq!(
+                press(kill_left, &mut app, &mut editor, &mut cache),
+                super::DraftChange::Debounced
+            );
+            assert_eq!(editor.submission_text(), "keep this\n");
+
+            editor.insert_paste("tail text");
+            editor.move_home();
+            assert_eq!(
+                press(kill_right, &mut app, &mut editor, &mut cache),
+                super::DraftChange::Debounced
+            );
+            assert_eq!(editor.submission_text(), "keep this\n");
+        }
     }
 
     #[test]
