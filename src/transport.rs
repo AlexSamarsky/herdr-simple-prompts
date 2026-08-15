@@ -222,6 +222,15 @@ impl AgentTransport {
 /// deleted again immediately.
 const CURSOR_PROBE: &str = "~";
 
+/// A pause between keys sent one after another.
+///
+/// Each request travels on a connection of its own, so two sent back to back
+/// are not promised to arrive in that order — and a probe that lands before the
+/// key that was meant to position it types itself somewhere nobody is looking,
+/// where it then sits and makes every later count wrong. Keys are cheap; this
+/// costs a few milliseconds and buys the order they were written in.
+const KEY_SPACING: Duration = Duration::from_millis(50);
+
 /// A pane redraws after it is typed into, not while, and how long that takes is
 /// not ours to know: the multiplexer has its own queue, and the agent redraws
 /// when it gets round to it. Measured directly it takes tens of milliseconds;
@@ -255,8 +264,13 @@ pub fn remove_native_attachment(
     kind: AgentKind,
     marker: usize,
     mut read: impl FnMut() -> AppResult<String>,
-    mut press: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+    mut send: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
 ) -> AppResult<bool> {
+    let mut press = move |keys: &[&str], text: Option<&str>| -> AppResult<()> {
+        send(keys, text)?;
+        thread::sleep(KEY_SPACING);
+        Ok(())
+    };
     let markers = composer_markers(kind, &read()?);
     let Some(position) = markers.iter().position(|held| *held == marker) else {
         // The pane holds no such image. Only when it holds none at all is that
