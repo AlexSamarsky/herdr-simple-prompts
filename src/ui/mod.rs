@@ -9,7 +9,7 @@ use crate::agent::{
     AgentKind, AgentPaths, AgentStatus, TranscriptAdapter, agent_identity, resolve_transcript,
 };
 use crate::ansi::sanitize_ansi;
-use crate::app::{AppEvent, AppState};
+use crate::app::{AppEvent, AppState, PendingAction};
 use crate::composer::{
     ComposerAccess, NativeComposerState, classify_native_composer, native_attachment_markers,
     native_composer_parts,
@@ -312,7 +312,10 @@ fn handle_ordinary_paste(
             native_path: Some(path.clone()),
         };
         match runtime.forward_staged_image(attachment.clone(), path) {
-            Ok(()) => app.pending_attachments.push(attachment),
+            Ok(()) => {
+                app.pending_action = Some(PendingAction::new("Attaching image"));
+                app.pending_attachments.push(attachment);
+            }
             Err(error) => app.send_error = Some(error.to_string()),
         }
         DraftChange::None
@@ -505,8 +508,9 @@ fn handle_key(
             if let Some(marker) = editor.attachment_before_cursor().and_then(|attachment| {
                 marker_number(attachment).map(|number| (attachment.id.clone(), number))
             }) {
-                if let Err(error) = runtime.remove_attachment(marker.0, marker.1) {
-                    app.background_error = Some(error.to_string());
+                match runtime.remove_attachment(marker.0, marker.1) {
+                    Ok(()) => app.pending_action = Some(PendingAction::new("Removing image")),
+                    Err(error) => app.background_error = Some(error.to_string()),
                 }
                 return Ok(DraftChange::None);
             }
@@ -795,6 +799,7 @@ fn apply_runtime_event(
             DraftChange::None
         }
         RuntimeEvent::ImageForwarded { attachment, result } => {
+            app.pending_action = None;
             app.pending_attachments
                 .retain(|candidate| candidate.id != attachment.id);
             match result {
@@ -816,17 +821,20 @@ fn apply_runtime_event(
                 }
             }
         }
-        RuntimeEvent::AttachmentRemoved { id, result } => match result {
-            Ok(()) => {
-                editor.remove_attachment(&id);
-                app.draft_attachments = editor.attachments();
-                DraftChange::Immediate
+        RuntimeEvent::AttachmentRemoved { id, result } => {
+            app.pending_action = None;
+            match result {
+                Ok(()) => {
+                    editor.remove_attachment(&id);
+                    app.draft_attachments = editor.attachments();
+                    DraftChange::Immediate
+                }
+                Err(error) => {
+                    app.background_error = Some(error);
+                    DraftChange::None
+                }
             }
-            Err(error) => {
-                app.background_error = Some(error);
-                DraftChange::None
-            }
-        },
+        }
         RuntimeEvent::FinalPresentation {
             stable_id,
             text_fingerprint,

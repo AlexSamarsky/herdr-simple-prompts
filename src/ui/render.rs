@@ -154,7 +154,8 @@ fn render(
     let frame_area = frame.area();
     let area = horizontal_content_area(frame_area);
     let display_text = editor.display_text();
-    let working_height = u16::from(app.agent_status == AgentStatus::Working);
+    let status_note = status_note(app);
+    let working_height = u16::from(status_note.is_some());
     let composer_guard = app
         .input_enabled
         .then(|| match app.composer_access() {
@@ -214,13 +215,9 @@ fn render(
             areas[1],
         );
     }
-    if app.agent_status == AgentStatus::Working {
-        let elapsed = app
-            .working_since
-            .map(|started| Instant::now().saturating_duration_since(started).as_secs())
-            .unwrap_or(0);
+    if let Some(note) = status_note {
         frame.render_widget(
-            Paragraph::new(format!("Working ({elapsed}s · esc to interrupt)")).style(
+            Paragraph::new(note).style(
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -323,6 +320,26 @@ fn composer_row(row: &str, row_start: usize, highlight: Option<(usize, usize)>) 
         ),
         Span::raw(row[end..].to_owned()),
     ])
+}
+
+/// The one line that says what is being waited for.
+///
+/// A pane asked to attach or drop an image answers in its own time, so the wait
+/// is named and counted rather than left as a composer that does nothing.
+fn status_note(app: &AppState) -> Option<String> {
+    if let Some(pending) = &app.pending_action {
+        let elapsed = Instant::now()
+            .saturating_duration_since(pending.since)
+            .as_secs();
+        return Some(format!("{} ({elapsed}s)…", pending.label));
+    }
+    (app.agent_status == AgentStatus::Working).then(|| {
+        let elapsed = app
+            .working_since
+            .map(|started| Instant::now().saturating_duration_since(started).as_secs())
+            .unwrap_or(0);
+        format!("Working ({elapsed}s · esc to interrupt)")
+    })
 }
 
 fn render_prompt_edge_fills(
