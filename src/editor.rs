@@ -252,10 +252,10 @@ impl Editor {
         self.rebuild_projections();
     }
 
-    /// The image immediately before the cursor, if the next backspace would
-    /// land on one.
-    pub fn attachment_before_cursor(&self) -> Option<&Attachment> {
-        match self.atoms.get(self.cursor.checked_sub(1)?) {
+    /// The image the cursor is standing on — the one shown marked, and so the
+    /// one a person means when they press backspace.
+    pub fn attachment_at_cursor(&self) -> Option<&Attachment> {
+        match self.atoms.get(self.cursor) {
             Some(EditorAtom::Attachment(attachment)) => Some(attachment),
             _ => None,
         }
