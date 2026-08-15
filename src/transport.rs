@@ -256,20 +256,61 @@ pub fn remove_native_attachment(
     press(&["ctrl+e"], None)?;
     for _ in 0..=(2 * trailing + 2) {
         press(&[], Some(CURSOR_PROBE))?;
-        let probed = settle(kind, &mut read, |content| content.contains(CURSOR_PROBE))?;
-        let placed = probed.is_some_and(|content| content.contains(&needle));
+        // Nothing is pressed until the probe is seen. A backspace sent while
+        // the probe is not there deletes whatever is there instead, and what is
+        // there is somebody's picture.
+        let Some(probed) = settle(kind, &mut read, |content| content.contains(CURSOR_PROBE))?
+        else {
+            return Err(walk_failure(
+                "the composer never showed the probe",
+                kind,
+                &mut read,
+            ));
+        };
+        let placed = probed.contains(&needle);
         press(&["backspace"], None)?;
+        let Some(cleaned) = settle(kind, &mut read, |content| !content.contains(CURSOR_PROBE))?
+        else {
+            return Err(walk_failure(
+                "the probe would not come back out of the composer",
+                kind,
+                &mut read,
+            ));
+        };
         if placed {
             press(&["backspace"], None)?;
             let gone = format!("[Image #{marker}]");
-            settle(kind, &mut read, |content| !content.contains(&gone))?;
+            if settle(kind, &mut read, |content| !content.contains(&gone))?.is_none() {
+                return Err(walk_failure("the image did not go", kind, &mut read));
+            }
             let left = composer_markers(kind, &read()?);
             return Ok(!left.contains(&marker) && left.len() + 1 == markers.len());
         }
-        settle(kind, &mut read, |content| !content.contains(CURSOR_PROBE))?;
+        let _ = cleaned;
         press(&["left"], None)?;
     }
-    Ok(false)
+    Err(walk_failure(
+        "the cursor never reached the image",
+        kind,
+        &mut read,
+    ))
+}
+
+/// An error that carries what the composer actually looked like when the walk
+/// gave up, so the next report says what happened rather than that it did.
+fn walk_failure(
+    reason: &str,
+    kind: AgentKind,
+    read: &mut impl FnMut() -> AppResult<String>,
+) -> AppError {
+    let seen = read()
+        .ok()
+        .and_then(|ansi| native_composer_content(kind, &sanitize_ansi(&ansi)))
+        .unwrap_or_else(|| "<unreadable>".to_owned());
+    AppError::new(
+        "remove image",
+        format!("{reason}; composer showed {seen:?}"),
+    )
 }
 
 /// Reads the pane until it shows what was just typed into it.
@@ -410,7 +451,11 @@ mod tests {
         let composer = RefCell::new(three_images());
         composer.borrow_mut().ignores_left = true;
 
-        assert!(!remove(&composer, 5).unwrap());
+        let refusal = remove(&composer, 5).unwrap_err().to_string();
+        assert!(
+            refusal.contains("never reached"),
+            "the refusal says what happened: {refusal}"
+        );
         assert_eq!(
             composer.borrow().markers(),
             ["[Image #5]", "[Image #6]", "[Image #7]"],
@@ -427,6 +472,7 @@ mod tests {
         let composer = RefCell::new(three_images());
 
         assert!(!remove(&composer, 99).unwrap());
+
         assert_eq!(
             composer.borrow().markers(),
             ["[Image #5]", "[Image #6]", "[Image #7]"],
