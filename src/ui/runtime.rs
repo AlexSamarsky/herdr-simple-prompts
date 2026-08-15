@@ -46,6 +46,10 @@ pub(super) enum ActionCommand {
         attachment: Attachment,
         path: PathBuf,
     },
+    RemoveAttachment {
+        id: String,
+        marker: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,6 +79,10 @@ pub enum RuntimeEvent {
     InteractionForwarded(Result<(), String>),
     ImageForwarded {
         attachment: Attachment,
+        result: Result<(), String>,
+    },
+    AttachmentRemoved {
+        id: String,
         result: Result<(), String>,
     },
     FinalPresentation {
@@ -196,6 +204,10 @@ impl UiRuntime {
 
     pub fn forward_staged_image(&self, attachment: Attachment, path: PathBuf) -> AppResult<()> {
         self.send_action(ActionCommand::StagedImage { attachment, path })
+    }
+
+    pub fn remove_attachment(&self, id: String, marker: usize) -> AppResult<()> {
+        self.send_action(ActionCommand::RemoveAttachment { id, marker })
     }
 
     /// Queues a final answer for native style capture.
@@ -449,6 +461,12 @@ fn spawn_actions(
                     attachment,
                     result: transport
                         .forward_staged_image(&path)
+                        .map_err(|error| error.to_string()),
+                },
+                ActionCommand::RemoveAttachment { id, marker } => RuntimeEvent::AttachmentRemoved {
+                    id,
+                    result: transport
+                        .remove_attachment(marker)
                         .map_err(|error| error.to_string()),
                 },
             };

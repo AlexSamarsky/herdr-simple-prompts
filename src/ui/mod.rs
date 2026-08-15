@@ -486,6 +486,16 @@ fn handle_key(
             DraftChange::None
         }
         (KeyCode::Backspace, _) => {
+            // An image is not ours to drop: the picture lives in the native
+            // composer, so the pane has to lose it first and say so.
+            if let Some(marker) = editor.attachment_before_cursor().and_then(|attachment| {
+                marker_number(attachment).map(|number| (attachment.id.clone(), number))
+            }) {
+                if let Err(error) = runtime.remove_attachment(marker.0, marker.1) {
+                    app.background_error = Some(error.to_string());
+                }
+                return Ok(DraftChange::None);
+            }
             editor.backspace();
             DraftChange::Debounced
         }
@@ -677,6 +687,11 @@ fn composer_holds_only(kind: crate::agent::AgentKind, ansi: &str, attachments: u
         == ComposerAccess::Ready
 }
 
+/// The number the pane printed for an image, taken back out of its label.
+fn marker_number(attachment: &Attachment) -> Option<usize> {
+    attachment.display.strip_prefix("Image #")?.parse().ok()
+}
+
 fn ordinary_input_allowed(app: &AppState) -> bool {
     app.input_enabled && app.composer_access() == ComposerAccess::Ready
 }
@@ -780,6 +795,17 @@ fn apply_runtime_event(
                 }
             }
         }
+        RuntimeEvent::AttachmentRemoved { id, result } => match result {
+            Ok(()) => {
+                editor.remove_attachment(&id);
+                app.draft_attachments = editor.attachments();
+                DraftChange::Immediate
+            }
+            Err(error) => {
+                app.background_error = Some(error);
+                DraftChange::None
+            }
+        },
         RuntimeEvent::FinalPresentation {
             stable_id,
             text_fingerprint,
@@ -1541,6 +1567,96 @@ mod tests {
         .unwrap();
 
         assert_eq!(adopted, None);
+    }
+
+    /// The picture lives in the native composer, so backspace on an image asks
+    /// the pane to lose it and waits: dropping it here first would leave the
+    /// two sides disagreeing about what the prompt carries.
+    #[test]
+    fn backspace_on_an_image_asks_the_pane_before_anything_is_dropped() {
+        let (runtime, actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::OwnedAttachments(1),
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_attachment(Attachment {
+            id: "native-image-5".into(),
+            display: "Image #5".into(),
+            native_path: None,
+        });
+        app.draft_attachments = editor.attachments();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        let change = handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(change, super::DraftChange::None);
+        assert_eq!(editor.attachments().len(), 1, "nothing is dropped yet");
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::RemoveAttachment { marker: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn an_image_is_dropped_only_once_the_pane_has_lost_it() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let original = AgentIdentity {
+            pane_id: "w1:p1".into(),
+            kind: AgentKind::Codex,
+            session_id: "session-1".into(),
+            cwd: PathBuf::from("/repo"),
+            status: AgentStatus::Idle,
+        };
+        let mut app = AppState::default();
+        let mut editor = Editor::default();
+        editor.insert_attachment(Attachment {
+            id: "native-image-5".into(),
+            display: "Image #5".into(),
+            native_path: None,
+        });
+        editor.insert_paste("describe it");
+        app.draft_attachments = editor.attachments();
+        let mut cache = render::HistoryRenderCache::default();
+
+        apply_runtime_event(
+            runtime::RuntimeEvent::AttachmentRemoved {
+                id: "native-image-5".into(),
+                result: Err("could not reach the image".into()),
+            },
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+        assert_eq!(editor.attachments().len(), 1, "a refusal changes nothing");
+        assert!(app.background_error.is_some());
+
+        apply_runtime_event(
+            runtime::RuntimeEvent::AttachmentRemoved {
+                id: "native-image-5".into(),
+                result: Ok(()),
+            },
+            &original,
+            &mut app,
+            &mut editor,
+            &mut cache,
+            &runtime,
+        );
+
+        assert!(editor.attachments().is_empty());
+        assert!(app.draft_attachments.is_empty());
+        assert_eq!(editor.submission_text(), "describe it");
     }
 
     #[test]

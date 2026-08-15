@@ -214,6 +214,30 @@ impl Editor {
         self.rebuild_projections();
     }
 
+    /// The image immediately before the cursor, if the next backspace would
+    /// land on one.
+    pub fn attachment_before_cursor(&self) -> Option<&Attachment> {
+        match self.atoms.get(self.cursor.checked_sub(1)?) {
+            Some(EditorAtom::Attachment(attachment)) => Some(attachment),
+            _ => None,
+        }
+    }
+
+    /// Drops an image once the pane has confirmed it is gone there too.
+    pub fn remove_attachment(&mut self, id: &str) {
+        let Some(index) = self.atoms.iter().position(
+            |atom| matches!(atom, EditorAtom::Attachment(attachment) if attachment.id == id),
+        ) else {
+            return;
+        };
+        self.atoms.remove(index);
+        if self.cursor > index {
+            self.cursor -= 1;
+        }
+        self.preferred_column = None;
+        self.rebuild_projections();
+    }
+
     pub fn attachments(&self) -> Vec<Attachment> {
         self.atoms
             .iter()
