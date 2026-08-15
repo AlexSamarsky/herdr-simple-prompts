@@ -8,8 +8,9 @@ use crate::agent::follower::{FollowerEvent, TranscriptFollower};
 use crate::agent::{
     AgentKind, AgentPaths, AgentStatus, TranscriptAdapter, agent_identity, resolve_transcript,
 };
+use crate::ansi::sanitize_ansi;
 use crate::app::{AppEvent, AppState};
-use crate::composer::{ComposerAccess, NativeComposerState};
+use crate::composer::{ComposerAccess, NativeComposerState, native_composer_text};
 use crate::editor::{Editor, staged_image_path};
 use crate::herdr::HerdrClient;
 use crate::history::HistoryWriter;
@@ -28,6 +29,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use terminal::TerminalGuard;
 
 const DRAFT_DEBOUNCE: Duration = Duration::from_millis(250);
+const ADOPT_ATTEMPTS: usize = 8;
+const ADOPT_RETRY_DELAY: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CapturePolicy {
@@ -79,6 +82,37 @@ pub fn run_from_env() -> AppResult<()> {
         Some(identity.session_id.clone()),
     ));
     editor.replace_snapshot(draft.editor);
+    let adopted = editor
+        .is_empty()
+        .then(|| {
+            adopt_native_draft(
+                identity.kind,
+                || {
+                    client
+                        .pane_read_visible_ansi(&source_pane, 200)
+                        .map_err(|error| AppError::new("native draft", error.to_string()))
+                },
+                || {
+                    client
+                        .agent_send_keys(&source_pane, &["ctrl+e", "ctrl+u"])
+                        .map(|_| ())
+                        .map_err(|error| AppError::new("native draft", error.to_string()))
+                },
+                ADOPT_ATTEMPTS,
+                ADOPT_RETRY_DELAY,
+            )
+        })
+        .transpose();
+    let adopt_notice = match adopted {
+        Ok(Some(Some(adopted))) => {
+            editor.replace(adopted.text);
+            (!adopted.cleared)
+                .then(|| "native composer still holds a copy of the adopted draft".to_owned())
+        }
+        Ok(_) => None,
+        Err(error) => Some(error.to_string()),
+    };
+
     let mut app = AppState {
         session_id: identity.session_id.clone(),
         agent_status: identity.status,
@@ -89,6 +123,7 @@ pub fn run_from_env() -> AppResult<()> {
         ..AppState::default()
     };
     app.hydrate_visible_history(saved_history);
+    app.background_error = adopt_notice;
     let mut history_cache = render::HistoryRenderCache::default();
     let initial_events = follower.poll_initial(identity.status)?;
     let runtime = UiRuntime::spawn(Path::new(&socket), identity.clone(), follower)?;
@@ -496,6 +531,49 @@ fn handle_key(
         _ => return Ok(DraftChange::None),
     };
     Ok(change)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdoptedDraft {
+    text: String,
+    cleared: bool,
+}
+
+/// Takes over whatever the native composer is holding.
+///
+/// Opening the overlay over a half-written prompt used to mean switching back
+/// to finish it, because the overlay refuses to send while the native composer
+/// is occupied. Move the text here instead — and clear it there, since leaving
+/// a copy behind would splice it onto the next prompt.
+///
+/// The text is returned even when clearing fails, so a draft is never lost to a
+/// half-finished takeover; the caller says so and the guard stays on.
+fn adopt_native_draft(
+    kind: crate::agent::AgentKind,
+    mut read: impl FnMut() -> AppResult<String>,
+    mut clear: impl FnMut() -> AppResult<()>,
+    attempts: usize,
+    retry_delay: Duration,
+) -> AppResult<Option<AdoptedDraft>> {
+    let Some(text) = native_composer_text(kind, &sanitize_ansi(&read()?)) else {
+        return Ok(None);
+    };
+    for attempt in 0..attempts {
+        clear()?;
+        if attempt + 1 < attempts {
+            std::thread::sleep(retry_delay);
+        }
+        if native_composer_text(kind, &sanitize_ansi(&read()?)).is_none() {
+            return Ok(Some(AdoptedDraft {
+                text,
+                cleared: true,
+            }));
+        }
+    }
+    Ok(Some(AdoptedDraft {
+        text,
+        cleared: false,
+    }))
 }
 
 fn ordinary_input_allowed(app: &AppState) -> bool {
@@ -1145,6 +1223,85 @@ mod tests {
             );
             assert_eq!(editor.submission_text(), "keep this\n");
         }
+    }
+
+    const OCCUPIED_CODEX: &str = concat!(
+        "• answer\n",
+        "────────\n",
+        "› half written prompt\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    );
+    const EMPTY_CODEX: &str = concat!(
+        "• answer\n",
+        "────────\n",
+        "› \n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    );
+
+    /// Opening the overlay over a half-written prompt should not mean switching
+    /// back to finish it.
+    #[test]
+    fn adopting_a_native_draft_moves_the_text_and_clears_the_source() {
+        let cleared = std::cell::Cell::new(0);
+        let adopted = super::adopt_native_draft(
+            AgentKind::Codex,
+            || {
+                Ok(if cleared.get() == 0 {
+                    OCCUPIED_CODEX.to_owned()
+                } else {
+                    EMPTY_CODEX.to_owned()
+                })
+            },
+            || {
+                cleared.set(cleared.get() + 1);
+                Ok(())
+            },
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap()
+        .expect("an occupied composer must be adopted");
+
+        assert_eq!(adopted.text, "half written prompt");
+        assert!(adopted.cleared);
+        assert_eq!(cleared.get(), 1, "clearing must stop once it has worked");
+    }
+
+    #[test]
+    fn an_empty_native_composer_is_left_alone() {
+        let cleared = std::cell::Cell::new(0);
+        let adopted = super::adopt_native_draft(
+            AgentKind::Codex,
+            || Ok(EMPTY_CODEX.to_owned()),
+            || {
+                cleared.set(cleared.get() + 1);
+                Ok(())
+            },
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(adopted, None);
+        assert_eq!(cleared.get(), 0, "nothing may be sent to an empty composer");
+    }
+
+    /// A draft is never lost to a half-finished takeover: the text comes back
+    /// even when the source could not be cleared, and the caller says so.
+    #[test]
+    fn a_draft_that_cannot_be_cleared_is_still_adopted() {
+        let adopted = super::adopt_native_draft(
+            AgentKind::Codex,
+            || Ok(OCCUPIED_CODEX.to_owned()),
+            || Ok(()),
+            3,
+            std::time::Duration::ZERO,
+        )
+        .unwrap()
+        .expect("the text must survive a failed takeover");
+
+        assert_eq!(adopted.text, "half written prompt");
+        assert!(!adopted.cleared);
     }
 
     #[test]

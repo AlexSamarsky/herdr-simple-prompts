@@ -131,7 +131,24 @@ fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     Some(chunks)
 }
 
-fn classify_content(surface: &StyledText, chunks: &[LineRange]) -> NativeComposerState {
+/// The text a native composer is holding, if it is holding any.
+///
+/// Only text the user typed is returned: a placeholder classifies as clear, and
+/// attachment markers classify as owned attachments, so neither reaches here.
+pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<String> {
+    if classify_native_composer(kind, surface) != NativeComposerState::Occupied {
+        return None;
+    }
+    let lines = line_ranges(&surface.text);
+    let chunks = match kind {
+        AgentKind::Codex => codex_content(&surface.text, &lines),
+        AgentKind::Claude => claude_content(&surface.text, &lines),
+    }?;
+    let content = chunk_text(surface, &chunks);
+    (!content.trim().is_empty()).then_some(content)
+}
+
+fn chunk_text(surface: &StyledText, chunks: &[LineRange]) -> String {
     let mut content = String::new();
     for (index, chunk) in chunks.iter().enumerate() {
         if index > 0 {
@@ -139,6 +156,11 @@ fn classify_content(surface: &StyledText, chunks: &[LineRange]) -> NativeCompose
         }
         content.push_str(&surface.text[chunk.start..chunk.end]);
     }
+    content
+}
+
+fn classify_content(surface: &StyledText, chunks: &[LineRange]) -> NativeComposerState {
+    let content = chunk_text(surface, chunks);
     if content.trim().is_empty() {
         return NativeComposerState::Clear;
     }
