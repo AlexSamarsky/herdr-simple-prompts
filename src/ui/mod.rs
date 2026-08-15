@@ -10,7 +10,9 @@ use crate::agent::{
 };
 use crate::ansi::sanitize_ansi;
 use crate::app::{AppEvent, AppState};
-use crate::composer::{ComposerAccess, NativeComposerState, native_composer_text};
+use crate::composer::{
+    ComposerAccess, NativeComposerState, classify_native_composer, native_composer_parts,
+};
 use crate::editor::{Editor, staged_image_path};
 use crate::herdr::HerdrClient;
 use crate::history::HistoryWriter;
@@ -31,6 +33,7 @@ use terminal::TerminalGuard;
 const DRAFT_DEBOUNCE: Duration = Duration::from_millis(250);
 const ADOPT_ATTEMPTS: usize = 8;
 const ADOPT_RETRY_DELAY: Duration = Duration::from_millis(60);
+const ADOPT_KEY_BATCH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CapturePolicy {
@@ -92,9 +95,9 @@ pub fn run_from_env() -> AppResult<()> {
                         .pane_read_visible_ansi(&source_pane, 200)
                         .map_err(|error| AppError::new("native draft", error.to_string()))
                 },
-                || {
+                |keys| {
                     client
-                        .agent_send_keys(&source_pane, &["ctrl+e", "ctrl+u"])
+                        .pane_send_input(&source_pane, None, keys)
                         .map(|_| ())
                         .map_err(|error| AppError::new("native draft", error.to_string()))
                 },
@@ -103,9 +106,17 @@ pub fn run_from_env() -> AppResult<()> {
             )
         })
         .transpose();
+    let mut adopted_attachments = Vec::new();
     let adopt_notice = match adopted {
         Ok(Some(Some(adopted))) => {
             editor.replace(adopted.text);
+            adopted_attachments = (1..=adopted.attachments)
+                .map(|index| Attachment {
+                    id: format!("native-image-{index}"),
+                    display: format!("Image #{index}"),
+                    native_path: None,
+                })
+                .collect();
             (!adopted.cleared)
                 .then(|| "native composer still holds a copy of the adopted draft".to_owned())
         }
@@ -118,7 +129,11 @@ pub fn run_from_env() -> AppResult<()> {
         agent_status: identity.status,
         native_composer: NativeComposerState::Unknown,
         working_since: identity.status.is_working().then(Instant::now),
-        draft_attachments: draft.attachments,
+        draft_attachments: if adopted_attachments.is_empty() {
+            draft.attachments
+        } else {
+            adopted_attachments
+        },
         prompt_displays: draft.prompt_displays,
         ..AppState::default()
     };
@@ -536,6 +551,7 @@ fn handle_key(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdoptedDraft {
     text: String,
+    attachments: usize,
     cleared: bool,
 }
 
@@ -551,29 +567,65 @@ struct AdoptedDraft {
 fn adopt_native_draft(
     kind: crate::agent::AgentKind,
     mut read: impl FnMut() -> AppResult<String>,
-    mut clear: impl FnMut() -> AppResult<()>,
+    mut press: impl FnMut(&[&str]) -> AppResult<()>,
     attempts: usize,
     retry_delay: Duration,
 ) -> AppResult<Option<AdoptedDraft>> {
-    let Some(text) = native_composer_text(kind, &sanitize_ansi(&read()?)) else {
+    let Some(parts) = native_composer_parts(kind, &sanitize_ansi(&read()?)) else {
         return Ok(None);
     };
+    // Beside an image, only a single rendered line is taken. A wrapped or
+    // multi-line draft carries newlines the buffer does not have, so counting
+    // deletions from it would overshoot — and an overshoot eats the marker,
+    // which is the one thing here that cannot be undone.
+    if parts.attachments > 0 && parts.text.contains('\n') {
+        return Ok(None);
+    }
+    let removal = removal_keys(&parts.text);
     for attempt in 0..attempts {
-        clear()?;
+        press(&removal_prefix(parts.attachments))?;
+        for batch in removal.chunks(ADOPT_KEY_BATCH) {
+            press(batch)?;
+        }
         if attempt + 1 < attempts {
             std::thread::sleep(retry_delay);
         }
-        if native_composer_text(kind, &sanitize_ansi(&read()?)).is_none() {
+        if composer_holds_only(kind, &read()?, parts.attachments) {
             return Ok(Some(AdoptedDraft {
-                text,
+                text: parts.text,
+                attachments: parts.attachments,
                 cleared: true,
             }));
         }
     }
     Ok(Some(AdoptedDraft {
-        text,
+        text: parts.text,
+        attachments: parts.attachments,
         cleared: false,
     }))
+}
+
+/// Beside an image the text is removed character by character, so the markers
+/// that stay are never touched. With nothing to preserve, one kill is enough.
+fn removal_prefix(attachments: usize) -> Vec<&'static str> {
+    if attachments == 0 {
+        vec!["ctrl+e", "ctrl+u"]
+    } else {
+        vec!["ctrl+e"]
+    }
+}
+
+fn removal_keys(text: &str) -> Vec<&'static str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec!["backspace"; text.chars().count()]
+    }
+}
+
+fn composer_holds_only(kind: crate::agent::AgentKind, ansi: &str, attachments: usize) -> bool {
+    classify_native_composer(kind, &sanitize_ansi(ansi)).access(attachments)
+        == ComposerAccess::Ready
 }
 
 fn ordinary_input_allowed(app: &AppState) -> bool {
@@ -1252,7 +1304,7 @@ mod tests {
                     EMPTY_CODEX.to_owned()
                 })
             },
-            || {
+            |_| {
                 cleared.set(cleared.get() + 1);
                 Ok(())
             },
@@ -1263,8 +1315,9 @@ mod tests {
         .expect("an occupied composer must be adopted");
 
         assert_eq!(adopted.text, "half written prompt");
+        assert_eq!(adopted.attachments, 0);
         assert!(adopted.cleared);
-        assert_eq!(cleared.get(), 1, "clearing must stop once it has worked");
+        assert!(cleared.get() > 0, "the composer must have been cleared");
     }
 
     #[test]
@@ -1273,7 +1326,7 @@ mod tests {
         let adopted = super::adopt_native_draft(
             AgentKind::Codex,
             || Ok(EMPTY_CODEX.to_owned()),
-            || {
+            |_| {
                 cleared.set(cleared.get() + 1);
                 Ok(())
             },
@@ -1293,7 +1346,7 @@ mod tests {
         let adopted = super::adopt_native_draft(
             AgentKind::Codex,
             || Ok(OCCUPIED_CODEX.to_owned()),
-            || Ok(()),
+            |_| Ok(()),
             3,
             std::time::Duration::ZERO,
         )
@@ -1302,6 +1355,85 @@ mod tests {
 
         assert_eq!(adopted.text, "half written prompt");
         assert!(!adopted.cleared);
+    }
+
+    const IMAGE_AND_TEXT: &str = concat!(
+        "• answer\n",
+        "────────\n",
+        "› [Image #1] describe it\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    );
+    const IMAGE_ONLY: &str = concat!(
+        "• answer\n",
+        "────────\n",
+        "› [Image #1]\n",
+        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+    );
+
+    /// An image cannot be carried, but the text beside it can: the marker stays
+    /// where it is and only the characters of the prompt are removed, one at a
+    /// time, so an overshoot can never eat the marker.
+    #[test]
+    fn text_beside_an_image_is_adopted_without_disturbing_the_image() {
+        let keys: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let adopted = super::adopt_native_draft(
+            AgentKind::Codex,
+            || {
+                Ok(if keys.borrow().is_empty() {
+                    IMAGE_AND_TEXT.to_owned()
+                } else {
+                    IMAGE_ONLY.to_owned()
+                })
+            },
+            |pressed| {
+                keys.borrow_mut()
+                    .extend(pressed.iter().map(|key| (*key).to_owned()));
+                Ok(())
+            },
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap()
+        .expect("text beside an image must be adopted");
+
+        assert_eq!(adopted.text, "describe it");
+        assert_eq!(adopted.attachments, 1);
+        assert!(adopted.cleared);
+        let pressed = keys.borrow();
+        assert_eq!(pressed[0], "ctrl+e");
+        assert!(
+            !pressed.iter().any(|key| key == "ctrl+u"),
+            "a line kill would take the image marker with it"
+        );
+        assert_eq!(
+            pressed.iter().filter(|key| *key == "backspace").count(),
+            "describe it".chars().count(),
+            "exactly the characters of the text, never one more"
+        );
+    }
+
+    /// A wrapped draft carries newlines the buffer does not have, so counting
+    /// deletions from it would overshoot into the marker.
+    #[test]
+    fn a_wrapped_draft_beside_an_image_is_left_alone() {
+        let wrapped = concat!(
+            "• answer\n",
+            "────────\n",
+            "› [Image #1] describe it\n",
+            "  and then some more\n",
+            "gpt-5.6-sol xhigh · /repo · weekly 75% left",
+        );
+
+        let adopted = super::adopt_native_draft(
+            AgentKind::Codex,
+            || Ok(wrapped.to_owned()),
+            |_| panic!("a draft that cannot be measured must not be touched"),
+            8,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(adopted, None);
     }
 
     #[test]

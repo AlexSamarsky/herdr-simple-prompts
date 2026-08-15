@@ -136,6 +136,19 @@ fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
 /// Only text the user typed is returned: a placeholder classifies as clear, and
 /// attachment markers classify as owned attachments, so neither reaches here.
 pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<String> {
+    native_composer_parts(kind, surface)
+        .filter(|parts| parts.attachments == 0)
+        .map(|parts| parts.text)
+}
+
+/// What a native composer is holding, split into the images it carries and the
+/// text beside them.
+///
+/// An image cannot be carried anywhere: the marker is a reference to a buffer
+/// the overlay has no access to. The text beside it can be lifted out, but only
+/// when every marker precedes it — an image pasted into the middle of a phrase
+/// leaves no way to tell which characters belong to which side.
+pub fn native_composer_parts(kind: AgentKind, surface: &StyledText) -> Option<ComposerParts> {
     if classify_native_composer(kind, surface) != NativeComposerState::Occupied {
         return None;
     }
@@ -145,13 +158,41 @@ pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<Str
         AgentKind::Claude => claude_content(&surface.text, &lines),
     }?;
     let content = chunk_text(surface, &chunks);
-    // A composer holding an image cannot be moved. The marker is a reference to
-    // something the overlay has no way to carry, and taking the text would mean
-    // clearing the composer — destroying the image with it.
-    if content.contains(ATTACHMENT_MARKER) {
-        return None;
+    let (attachments, text) = split_attachments(&content)?;
+    (!text.trim().is_empty()).then_some(ComposerParts {
+        attachments,
+        text: text.to_owned(),
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposerParts {
+    pub attachments: usize,
+    pub text: String,
+}
+
+/// Counts the attachment markers that open the content and returns the rest.
+/// A marker anywhere after the text means the two are interleaved.
+fn split_attachments(content: &str) -> Option<(usize, &str)> {
+    let mut rest = content;
+    let mut attachments = 0;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after) = trimmed.strip_prefix(ATTACHMENT_MARKER) else {
+            break;
+        };
+        let digits = after.chars().take_while(char::is_ascii_digit).count();
+        let Some(remainder) = after[digits..].strip_prefix(']') else {
+            break;
+        };
+        if digits == 0 {
+            break;
+        }
+        attachments += 1;
+        rest = remainder;
     }
-    (!content.trim().is_empty()).then_some(content)
+    let rest = rest.trim_start();
+    (!rest.contains(ATTACHMENT_MARKER)).then_some((attachments, rest))
 }
 
 fn chunk_text(surface: &StyledText, chunks: &[LineRange]) -> String {
