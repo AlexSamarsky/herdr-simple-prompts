@@ -707,6 +707,34 @@ mod tests {
         assert_eq!(app.turns.len(), 10);
     }
 
+    /// Style capture is an enhancement layered over an answer that already
+    /// renders, so a saturated queue must not surface as an error line.
+    #[test]
+    fn saturated_capture_queue_is_not_reported_as_an_error() {
+        let (runtime, captures) = runtime::capture_test_runtime(2);
+        let mut app = AppState::default();
+        let mut cache = render::HistoryRenderCache::default();
+        let mut events = Vec::new();
+        for index in 0..5 {
+            events.push(FollowerEvent::Conversation(ConversationEvent::User(
+                Message::text(format!("prompt-{index}"), format!("prompt {index}"), None),
+            )));
+            events.push(final_event(index));
+        }
+
+        apply_follower_events_with_policy(
+            &mut app,
+            events,
+            &mut cache,
+            &runtime,
+            CapturePolicy::AllFinals,
+        );
+
+        assert_eq!(captures.try_iter().count(), 2);
+        assert_eq!(app.transcript_error, None);
+        assert_eq!(app.turns.len(), 5);
+    }
+
     #[test]
     fn live_batch_enqueues_each_new_final() {
         let (runtime, captures) = runtime::capture_test_runtime(8);

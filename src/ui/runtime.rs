@@ -198,18 +198,24 @@ impl UiRuntime {
         self.send_action(ActionCommand::StagedImage { attachment, path })
     }
 
-    pub fn capture_final(&self, stable_id: String, canonical_text: String) -> AppResult<()> {
-        self.capture_tx
-            .try_send(CaptureCommand {
-                stable_id,
-                canonical_text,
-            })
-            .map_err(|error| match error {
-                TrySendError::Full(_) => AppError::new("ui", "final style capture queue is full"),
-                TrySendError::Disconnected(_) => {
-                    AppError::new("ui", "final style capture worker has stopped")
-                }
-            })
+    /// Queues a final answer for native style capture.
+    ///
+    /// Returns `Ok(false)` when the queue is saturated. Capture only upgrades
+    /// the colours of an answer that already renders through the markdown
+    /// fallback, so backpressure is ordinary and must not reach the user as an
+    /// error line over a perfectly good answer.
+    pub fn capture_final(&self, stable_id: String, canonical_text: String) -> AppResult<bool> {
+        match self.capture_tx.try_send(CaptureCommand {
+            stable_id,
+            canonical_text,
+        }) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => Ok(false),
+            Err(TrySendError::Disconnected(_)) => Err(AppError::new(
+                "ui",
+                "final style capture worker has stopped",
+            )),
+        }
     }
 
     fn send_action(&self, command: ActionCommand) -> AppResult<()> {
@@ -500,6 +506,10 @@ fn resolve_capture_command(
     )
 }
 
+/// Chrome that has to share the pane with the answer: the rule above it, the
+/// rule below it and the composer line.
+const CAPTURE_CHROME_LINES: usize = 3;
+
 fn resolve_capture(
     kind: AgentKind,
     canonical_text: &str,
@@ -508,12 +518,16 @@ fn resolve_capture(
     retry_delay: Duration,
 ) -> (MessagePresentation, Option<String>) {
     let fallback = style_markdown(canonical_text);
+    let expected_lines = fallback.text.split('\n').count();
     let mut last_error = None;
     for attempt in 0..attempts {
         match read() {
             Ok(ansi) => {
                 if let Some(styled) = extract_native_final(&ansi, &fallback.text, kind) {
                     return (MessagePresentation::NativeAnsi(styled), None);
+                }
+                if !answer_can_fit(&ansi, expected_lines) {
+                    break;
                 }
             }
             Err(error) => last_error = Some(error.to_string()),
@@ -523,6 +537,17 @@ fn resolve_capture(
         }
     }
     (MessagePresentation::MarkdownFallback, last_error)
+}
+
+/// Whether the pane could hold the answer at all.
+///
+/// The captured window is the visible screen — the multiplexer exposes no
+/// source that reaches further — so an answer taller than the pane can never
+/// match, and re-reading it eight times only spends a socket round trip per
+/// attempt to learn that again.
+fn answer_can_fit(ansi: &str, expected_lines: usize) -> bool {
+    let pane_lines = sanitize_ansi(ansi).text.split('\n').count();
+    expected_lines.saturating_add(CAPTURE_CHROME_LINES) <= pane_lines
 }
 
 #[cfg(test)]
@@ -800,17 +825,22 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
         };
-        runtime
-            .capture_final("answer-1".into(), "first".into())
-            .unwrap();
+        assert!(
+            runtime
+                .capture_final("answer-1".into(), "first".into())
+                .unwrap()
+        );
 
         let started = Instant::now();
-        let error = runtime
+        let queued = runtime
             .capture_final("answer-2".into(), "second".into())
-            .unwrap_err();
+            .unwrap();
 
         assert!(started.elapsed() < Duration::from_millis(20));
-        assert!(error.to_string().contains("capture queue is full"));
+        assert!(
+            !queued,
+            "a saturated queue drops the request, it does not fail"
+        );
         assert_eq!(
             capture_rx.try_recv().unwrap(),
             CaptureCommand {
@@ -841,6 +871,53 @@ mod tests {
         };
         assert_eq!(styled.text, "answer");
         assert_eq!(styled.runs[0].foreground, Some(AnsiColor::Green));
+    }
+
+    /// The captured window is the visible screen, so an answer taller than the
+    /// pane can never match — retrying only spends a round trip per attempt.
+    #[test]
+    fn capture_resolution_stops_when_the_answer_cannot_fit_the_pane() {
+        let canonical = (0..40)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut reads = 0;
+        let (presentation, diagnostic) = resolve_capture(
+            AgentKind::Codex,
+            &canonical,
+            || {
+                reads += 1;
+                Ok("────────\n• something else\n────────\n› Write a prompt".into())
+            },
+            8,
+            Duration::ZERO,
+        );
+
+        assert_eq!(reads, 1, "an impossible match must not be retried");
+        assert!(diagnostic.is_none());
+        assert_eq!(presentation, MessagePresentation::MarkdownFallback);
+    }
+
+    #[test]
+    fn capture_resolution_keeps_retrying_while_the_answer_still_fits() {
+        let mut reads = 0;
+        let (presentation, _) = resolve_capture(
+            AgentKind::Codex,
+            "answer",
+            || {
+                reads += 1;
+                if reads < 3 {
+                    Ok("────────\n• still streaming\n────────\n› Write a prompt".into())
+                } else {
+                    Ok("────────\n\u{1b}[32m• answer\u{1b}[0m\n────────\n› Write a prompt".into())
+                }
+            },
+            8,
+            Duration::ZERO,
+        );
+
+        assert_eq!(reads, 3, "a possible match must still be retried");
+        assert!(matches!(presentation, MessagePresentation::NativeAnsi(_)));
     }
 
     #[test]
