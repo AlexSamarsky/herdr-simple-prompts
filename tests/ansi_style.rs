@@ -264,17 +264,8 @@ fn markdown_projection_removes_supported_delimiters_and_rebases_styles() {
         (
             "inline code",
             "inline",
-            Some(AnsiColor::Cyan),
+            Some(AnsiColor::Rgb(177, 185, 249)),
             None,
-            false,
-            false,
-            false,
-        ),
-        (
-            "fenced code",
-            "let x",
-            Some(AnsiColor::White),
-            Some(AnsiColor::BrightBlack),
             false,
             false,
             false,
@@ -289,6 +280,10 @@ fn markdown_projection_removes_supported_delimiters_and_rebases_styles() {
             true,
         ),
     ];
+    assert!(
+        style_at(&styled, styled.text.find("let x").unwrap()).is_none(),
+        "fenced code must render as ordinary text",
+    );
     for (name, needle, foreground, background, bold, italic, underline) in cases {
         let byte = styled.text.find(needle).unwrap();
         let style = style_at(&styled, byte).unwrap_or_else(|| panic!("missing {name} style"));
@@ -451,7 +446,7 @@ fn markdown_inline_constructs_never_cross_newlines_and_precedence_is_determinist
     assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
     let code_bold_words = styled.text.find("not bold").unwrap();
     let code_style = style_at(&styled, code_bold_words).unwrap();
-    assert_eq!(code_style.foreground, Some(AnsiColor::Cyan));
+    assert_eq!(code_style.foreground, Some(AnsiColor::Rgb(177, 185, 249)));
     assert_eq!(code_style.background, None);
     assert!(!code_style.modifiers.bold);
     assert!(!code_style.modifiers.italic);
@@ -471,9 +466,10 @@ fn markdown_inline_constructs_never_cross_newlines_and_precedence_is_determinist
     }
 
     let fenced_inline = styled.text.rfind("still code").unwrap();
-    let fenced_style = style_at(&styled, fenced_inline).unwrap();
-    assert_eq!(fenced_style.background, Some(AnsiColor::BrightBlack));
-    assert!(!fenced_style.modifiers.bold);
+    assert!(
+        style_at(&styled, fenced_inline).is_none(),
+        "fenced code carries no styling of its own"
+    );
 }
 
 #[test]
@@ -543,7 +539,7 @@ fn markdown_inline_code_outranks_a_valid_link_label() {
     }
 
     let code_style = style_at(&styled, styled.text.find("code").unwrap()).unwrap();
-    assert_eq!(code_style.foreground, Some(AnsiColor::Cyan));
+    assert_eq!(code_style.foreground, Some(AnsiColor::Rgb(177, 185, 249)));
     assert_eq!(code_style.background, None);
     assert!(!code_style.modifiers.underline);
 }
@@ -914,6 +910,38 @@ fn native_final_capture_accepts_a_non_breaking_composer_separator() {
         assert!(
             extract_native_final(&ansi, "answer", AgentKind::Claude).is_some(),
             "composer {composer:?} was not recognised",
+        );
+    }
+}
+
+/// The overlay must never paint a background the agent does not paint.
+///
+/// A plate behind fenced code was the one thing that gave away which answers
+/// had fallen back from native capture, and it appeared only on answers too
+/// long to fit the captured window — so the same conversation rendered two
+/// different ways. Measured against a live pane, the only background an agent
+/// paints is the band behind the echoed prompt.
+#[test]
+fn markdown_projection_never_paints_a_background() {
+    let text = concat!(
+        "# Heading\n",
+        "Prose with `inline code`, **strong**, _emphasis_ and [a link](https://example.test).\n",
+        "- a list item\n",
+        "```rust\n",
+        "fn main() { let x = 1; }\n",
+        "```\n",
+        "Trailing prose.\n",
+    );
+
+    let styled = style_markdown(text);
+
+    assert!(validate_style_runs(&styled.text, &styled.runs).is_ok());
+    for run in &styled.runs {
+        assert_eq!(
+            run.background,
+            None,
+            "run over {:?} paints a background",
+            &styled.text[run.start_byte..run.end_byte],
         );
     }
 }
