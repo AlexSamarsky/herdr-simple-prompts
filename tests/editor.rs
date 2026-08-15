@@ -593,7 +593,9 @@ fn the_image_under_the_cursor_is_reported_whole() {
         "the cursor is in the text"
     );
 
+    // Back past "after", then onto the marker itself.
     editor.move_word_left();
+    editor.move_left();
     let (start, end) = editor
         .attachment_span_at_cursor()
         .expect("the cursor stands on the image");
@@ -607,6 +609,37 @@ fn the_image_under_the_cursor_is_reported_whole() {
     assert_eq!(
         editor.attachment_span_at_cursor(),
         None,
-        "and past it again"
+        "and before it again"
+    );
+}
+
+/// An image just added sits behind the cursor and stays plain; it lights up
+/// only when the cursor steps back onto it.
+#[test]
+fn a_fresh_image_is_not_marked_until_the_cursor_reaches_it() {
+    let mut editor = Editor::default();
+    editor.insert_attachment(Attachment {
+        id: "image-1".into(),
+        display: "Image #16".into(),
+        native_path: None,
+    });
+
+    assert_eq!(
+        editor.attachment_span_at_cursor(),
+        None,
+        "the image was just added, the cursor is past it"
+    );
+
+    editor.move_left();
+    assert!(
+        editor.attachment_span_at_cursor().is_some(),
+        "stepping onto it marks it"
+    );
+
+    editor.move_right();
+    assert_eq!(
+        editor.attachment_span_at_cursor(),
+        None,
+        "stepping off it again clears the mark"
     );
 }

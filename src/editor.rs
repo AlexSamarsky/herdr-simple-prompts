@@ -225,11 +225,13 @@ impl Editor {
 
     /// Where the image under the cursor sits in the shown text.
     ///
-    /// The native composer highlights a marker whole when the cursor reaches
-    /// it, which is how it says the thing is one piece rather than a run of
-    /// characters. The overlay says the same.
+    /// The cursor stands *on* an image, not after it: an image just added is
+    /// behind the cursor and stays plain, and stepping left onto it lights it
+    /// up. Marking the one behind instead lit it the moment it appeared and
+    /// again whenever the cursor moved past it, which reads as the wrong image
+    /// being pointed at.
     pub fn attachment_span_at_cursor(&self) -> Option<(usize, usize)> {
-        let index = self.cursor.checked_sub(1)?;
+        let index = self.cursor;
         if !matches!(self.atoms.get(index), Some(EditorAtom::Attachment(_))) {
             return None;
         }
