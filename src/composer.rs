@@ -163,6 +163,23 @@ pub fn native_attachment_count(kind: AgentKind, surface: &StyledText) -> Option<
     }
 }
 
+/// The raw text a native composer is showing, markers and all.
+///
+/// Unlike [`native_composer_parts`] this makes no sense of the content — it is
+/// for looking at a composer mid-edit, when the markers and the text are not
+/// yet in any tidy order.
+pub fn native_composer_content(kind: AgentKind, surface: &StyledText) -> Option<String> {
+    if validate_styled_text(surface).is_err() {
+        return None;
+    }
+    let lines = line_ranges(&surface.text);
+    let chunks = match kind {
+        AgentKind::Codex => codex_content(&surface.text, &lines),
+        AgentKind::Claude => claude_content(&surface.text, &lines),
+    }?;
+    Some(chunk_text(surface, &chunks))
+}
+
 pub fn native_composer_parts(kind: AgentKind, surface: &StyledText) -> Option<ComposerParts> {
     // An image on its own counts too: it has no text to lift, but the overlay
     // still has to learn about it, or it treats the pane as holding something

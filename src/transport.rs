@@ -1,6 +1,8 @@
-use crate::agent::{AgentIdentity, AgentStatus, agent_identity};
+use crate::agent::{AgentIdentity, AgentKind, AgentStatus, agent_identity};
 use crate::ansi::sanitize_ansi;
-use crate::composer::{ComposerAccess, classify_native_composer};
+use crate::composer::{
+    ComposerAccess, classify_native_composer, native_composer_content, native_composer_parts,
+};
 use crate::herdr::HerdrClient;
 use crate::{AppError, AppResult};
 use std::path::Path;
@@ -102,6 +104,33 @@ impl AgentTransport {
         self.verify_new_image_marker(before)
     }
 
+    pub fn remove_attachment(&self, marker: usize) -> AppResult<()> {
+        self.validate_source()?;
+        let removed = remove_native_attachment(
+            self.original.kind,
+            marker,
+            || {
+                self.client
+                    .pane_read_visible_ansi(&self.original.pane_id, 200)
+                    .map_err(|error| AppError::new("remove image", error.to_string()))
+            },
+            |keys, text| {
+                self.client
+                    .pane_send_input(&self.original.pane_id, text, keys)
+                    .map(|_| ())
+                    .map_err(|error| AppError::new("remove image", error.to_string()))
+            },
+        )?;
+        if removed {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "remove image",
+                "could not reach the image in the native composer; prefix+m to return",
+            ))
+        }
+    }
+
     pub fn visible_source(&self, lines: u16) -> AppResult<String> {
         self.validate_source()?;
         self.client
@@ -169,5 +198,217 @@ impl AgentTransport {
             "image paste",
             "native agent did not confirm the image attachment",
         ))
+    }
+}
+
+/// A character typed into the composer only to see where the cursor is, and
+/// deleted again immediately.
+const CURSOR_PROBE: &str = "~";
+
+/// Removes one image from the native composer, without ever guessing.
+///
+/// Measured on a live pane: one backspace removes a whole marker, and the
+/// cursor steps over a marker as a single unit. What is not certain is how many
+/// steps separate the end of the composer from a given marker — the trailing
+/// space makes the arithmetic ambiguous, and a step too far would delete the
+/// wrong picture.
+///
+/// So no arithmetic is trusted. The cursor walks back one step at a time and
+/// each position is confirmed by typing a character and reading where it landed;
+/// only when it sits directly behind the wanted marker is anything deleted, and
+/// the result is read back before the removal is reported. The only thing ever
+/// written into the composer is that probe, which is erased again at once.
+pub fn remove_native_attachment(
+    kind: AgentKind,
+    marker: usize,
+    mut read: impl FnMut() -> AppResult<String>,
+    mut press: impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
+) -> AppResult<bool> {
+    let markers = composer_markers(kind, &read()?);
+    let Some(position) = markers.iter().position(|held| *held == marker) else {
+        // Already gone: nothing to remove and nothing to report.
+        return Ok(true);
+    };
+    let trailing = markers.len() - position - 1;
+    let needle = format!("[Image #{marker}]{CURSOR_PROBE}");
+
+    press(&["ctrl+e"], None)?;
+    for _ in 0..=(2 * trailing + 2) {
+        press(&[], Some(CURSOR_PROBE))?;
+        let placed = native_composer_content(kind, &sanitize_ansi(&read()?))
+            .is_some_and(|content| content.contains(&needle));
+        press(&["backspace"], None)?;
+        if placed {
+            press(&["backspace"], None)?;
+            let left = composer_markers(kind, &read()?);
+            return Ok(!left.contains(&marker) && left.len() + 1 == markers.len());
+        }
+        press(&["left"], None)?;
+    }
+    Ok(false)
+}
+
+fn composer_markers(kind: AgentKind, ansi: &str) -> Vec<usize> {
+    native_composer_parts(kind, &sanitize_ansi(ansi))
+        .map(|parts| parts.markers)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CURSOR_PROBE, remove_native_attachment};
+    use crate::agent::AgentKind;
+    use crate::{AppError, AppResult};
+    use std::cell::RefCell;
+
+    /// A native composer as the measurements described one: a marker is a
+    /// single unit both to step over and to delete, and a trailing space sits
+    /// after the last one.
+    struct Composer {
+        units: Vec<String>,
+        cursor: usize,
+        ignores_left: bool,
+    }
+
+    impl Composer {
+        fn new(units: &[&str]) -> Self {
+            Self {
+                units: units.iter().map(|unit| (*unit).to_owned()).collect(),
+                cursor: units.len(),
+                ignores_left: false,
+            }
+        }
+
+        fn surface(&self) -> String {
+            format!(
+                "• answer\n────────\n› {}\ngpt-5.6-sol xhigh · /repo · weekly 75% left",
+                self.units.concat()
+            )
+        }
+
+        fn markers(&self) -> Vec<String> {
+            self.units
+                .iter()
+                .filter(|unit| unit.starts_with("[Image #"))
+                .cloned()
+                .collect()
+        }
+
+        fn press(&mut self, keys: &[&str], text: Option<&str>) {
+            for key in keys {
+                match *key {
+                    "ctrl+e" => self.cursor = self.units.len(),
+                    "left" => {
+                        if !self.ignores_left {
+                            self.cursor = self.cursor.saturating_sub(1);
+                        }
+                    }
+                    "backspace" => {
+                        if self.cursor > 0 {
+                            self.cursor -= 1;
+                            self.units.remove(self.cursor);
+                        }
+                    }
+                    other => panic!("unmodelled key {other}"),
+                }
+            }
+            for character in text.unwrap_or_default().chars() {
+                self.units.insert(self.cursor, character.to_string());
+                self.cursor += 1;
+            }
+        }
+    }
+
+    fn three_images() -> Composer {
+        Composer::new(&["[Image #5]", " ", "[Image #6]", " ", "[Image #7]", " "])
+    }
+
+    fn remove(composer: &RefCell<Composer>, marker: usize) -> AppResult<bool> {
+        remove_native_attachment(
+            AgentKind::Codex,
+            marker,
+            || Ok(composer.borrow().surface()),
+            |keys, text| {
+                composer.borrow_mut().press(keys, text);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn the_last_image_is_removed_and_the_others_are_left_alone() {
+        let composer = RefCell::new(three_images());
+
+        assert!(remove(&composer, 7).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #5]", "[Image #6]"]);
+    }
+
+    #[test]
+    fn an_image_in_the_middle_of_the_line_is_reached_and_removed() {
+        let composer = RefCell::new(three_images());
+
+        assert!(remove(&composer, 6).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #5]", "[Image #7]"]);
+    }
+
+    #[test]
+    fn the_first_image_is_reached_and_removed() {
+        let composer = RefCell::new(three_images());
+
+        assert!(remove(&composer, 5).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #6]", "[Image #7]"]);
+    }
+
+    /// Nothing is deleted from a position that could not be confirmed. A
+    /// composer that will not move its cursor must cost the caller a refusal,
+    /// never someone else's picture.
+    #[test]
+    fn a_cursor_that_will_not_move_costs_a_refusal_not_a_picture() {
+        let composer = RefCell::new(three_images());
+        composer.borrow_mut().ignores_left = true;
+
+        assert!(!remove(&composer, 5).unwrap());
+        assert_eq!(
+            composer.borrow().markers(),
+            ["[Image #5]", "[Image #6]", "[Image #7]"],
+            "every image survives a walk that never found its place"
+        );
+    }
+
+    #[test]
+    fn an_image_that_is_already_gone_is_reported_as_removed() {
+        let composer = RefCell::new(three_images());
+
+        assert!(remove(&composer, 99).unwrap());
+        assert_eq!(
+            composer.borrow().markers(),
+            ["[Image #5]", "[Image #6]", "[Image #7]"],
+        );
+    }
+
+    #[test]
+    fn the_probe_never_survives_the_walk() {
+        let composer = RefCell::new(three_images());
+
+        remove(&composer, 5).unwrap();
+
+        assert!(
+            !composer.borrow().units.concat().contains(CURSOR_PROBE),
+            "the character used to find the cursor is always erased again"
+        );
+    }
+
+    #[test]
+    fn a_read_failure_stops_the_walk_before_anything_is_pressed() {
+        let composer = RefCell::new(three_images());
+        let result = remove_native_attachment(
+            AgentKind::Codex,
+            5,
+            || Err(AppError::new("test", "pane unavailable")),
+            |_, _| panic!("nothing may be pressed without reading the pane first"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(composer.borrow().markers().len(), 3);
     }
 }
