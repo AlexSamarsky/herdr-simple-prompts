@@ -289,9 +289,21 @@ pub fn remove_native_attachment(
     // character has been seen to take the neighbouring picture instead. An
     // image nobody asked to lose is not a price worth paying for a convenience.
     press(&["ctrl+e"], None)?;
-    press(&["backspace"], None)?;
     let gone = format!("[Image #{marker}]");
-    if settle(kind, &mut read, |content| !content.contains(&gone))?.is_none() {
+    // What sits at the end is not always the marker: an image removed before
+    // this one leaves the space that separated them behind, and the first press
+    // takes that instead. So the presses are counted out one at a time and the
+    // composer is asked after each — and there are only ever two of them, which
+    // is a space and a marker and nothing further.
+    let mut removed = false;
+    for _ in 0..2 {
+        press(&["backspace"], None)?;
+        if settle(kind, &mut read, |content| !content.contains(&gone))?.is_some() {
+            removed = true;
+            break;
+        }
+    }
+    if !removed {
         return Err(walk_failure("the image did not go", kind, &mut read));
     }
     let left = composer_markers(kind, &read()?);
@@ -425,6 +437,12 @@ mod tests {
         Composer::new(&["[Image #5]", " ", "[Image #6]", " ", "[Image #7]"])
     }
 
+    /// What an earlier removal leaves behind: the space that separated the
+    /// image from the one before it still sits at the end.
+    fn two_images_and_a_space() -> Composer {
+        Composer::new(&["[Image #5]", " ", "[Image #6]", " "])
+    }
+
     fn remove(composer: &RefCell<Composer>, marker: usize) -> AppResult<bool> {
         remove_native_attachment(
             AgentKind::Codex,
@@ -450,6 +468,17 @@ mod tests {
     /// seen to leave the cursor elsewhere, and the backspace meant for it took
     /// the neighbouring picture instead. So earlier images are refused rather
     /// than reached for.
+    /// A space left at the end by an earlier removal must not be mistaken for
+    /// the image: the first press takes the space, and the image needs the
+    /// second.
+    #[test]
+    fn a_space_left_at_the_end_does_not_stop_the_removal() {
+        let composer = RefCell::new(two_images_and_a_space());
+
+        assert!(remove(&composer, 6).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #5]"]);
+    }
+
     #[test]
     fn an_earlier_image_is_refused_rather_than_reached_for() {
         for marker in [5, 6] {
