@@ -1,4 +1,7 @@
 use crate::agent::AgentKind;
+use crate::native_chrome::{
+    LineRange, composer_content_start, is_known_footer, is_pure_separator, line_ranges, line_text,
+};
 use crate::style::{AnsiColor, StyleRun, StyledText, validate_styled_text};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,38 +47,10 @@ pub fn classify_native_composer(kind: AgentKind, surface: &StyledText) -> Native
     classify_content(surface, &chunks)
 }
 
-#[derive(Clone, Copy)]
-struct LineRange {
-    start: usize,
-    end: usize,
-}
-
-fn line_ranges(text: &str) -> Vec<LineRange> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            lines.push(LineRange { start, end: index });
-            start = index + 1;
-        }
-    }
-    if start < text.len() || text.ends_with('\n') {
-        lines.push(LineRange {
-            start,
-            end: text.len(),
-        });
-    }
-    lines
-}
-
-fn line_text(text: &str, range: LineRange) -> &str {
-    &text[range.start..range.end]
-}
-
 fn codex_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     let footer = lines
         .iter()
-        .rposition(|line| is_known_footer(line_text(text, *line), AgentKind::Codex))?;
+        .rposition(|line| is_known_footer(line_text(text, *line)))?;
     if lines[footer + 1..]
         .iter()
         .any(|line| !line_text(text, *line).trim().is_empty())
@@ -83,13 +58,14 @@ fn codex_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
         return None;
     }
 
+    // Nothing is required above the composer. Codex prints notices there —
+    // a weekly-limit warning, for one — and demanding a rule or an elapsed
+    // label made every pane carrying one unverifiable, so the overlay refused
+    // all input. The composer is already pinned by the footer below it and by
+    // the continuation shape between the two.
     let prompt = (0..footer)
         .rev()
         .find(|index| composer_content_start(line_text(text, lines[*index]), '›').is_some())?;
-    let boundary = previous_nonempty_line(text, lines, prompt)?;
-    if !is_codex_boundary(line_text(text, lines[boundary])) {
-        return None;
-    }
 
     let first = lines[prompt];
     let prefix_len = composer_content_start(line_text(text, first), '›')?;
@@ -153,105 +129,6 @@ fn claude_content(text: &str, lines: &[LineRange]) -> Option<Vec<LineRange>> {
     }];
     chunks.extend(lines[prompt + 1..close].iter().copied());
     Some(chunks)
-}
-
-/// Byte offset of the composer content on a prompt line, if the line is one.
-///
-/// The separator after the marker is any whitespace, not just an ASCII space:
-/// Claude renders an *empty* composer as `❯` followed by U+00A0, so requiring
-/// `"❯ "` failed to recognise the composer in the one state where typing into
-/// it is safe, and the overlay refused all input.
-pub(crate) fn composer_content_start(line: &str, marker: char) -> Option<usize> {
-    let rest = line.strip_prefix(marker)?;
-    match rest.chars().next() {
-        None => Some(marker.len_utf8()),
-        Some(character) if character.is_whitespace() => {
-            Some(marker.len_utf8() + character.len_utf8())
-        }
-        Some(_) => None,
-    }
-}
-
-fn previous_nonempty_line(text: &str, lines: &[LineRange], before: usize) -> Option<usize> {
-    (0..before)
-        .rev()
-        .find(|index| !line_text(text, lines[*index]).trim().is_empty())
-}
-
-fn is_codex_boundary(line: &str) -> bool {
-    is_pure_separator(line, 8) || is_worked_boundary(line) || is_working_boundary(line)
-}
-
-fn is_working_boundary(line: &str) -> bool {
-    const PREFIX: &str = "• Working (";
-    const SUFFIX: &str = " • esc to interrupt)";
-    line.strip_prefix(PREFIX)
-        .and_then(|value| value.strip_suffix(SUFFIX))
-        .is_some_and(valid_elapsed_label)
-}
-
-fn is_worked_boundary(line: &str) -> bool {
-    const PREFIX: &str = "─ Worked for ";
-    if line.chars().count() < 8 || !line.starts_with(PREFIX) {
-        return false;
-    }
-    let Some((elapsed, suffix)) = line[PREFIX.len()..].rsplit_once(' ') else {
-        return false;
-    };
-    valid_elapsed_label(elapsed)
-        && !suffix.is_empty()
-        && suffix.chars().all(|character| character == '─')
-}
-
-fn valid_elapsed_label(label: &str) -> bool {
-    let mut parts = label.split_ascii_whitespace().peekable();
-    if parts.peek().is_none() {
-        return false;
-    }
-    parts.all(|part| {
-        let Some(unit) = part.chars().last() else {
-            return false;
-        };
-        matches!(unit, 'h' | 'm' | 's')
-            && part.len() > unit.len_utf8()
-            && part[..part.len() - unit.len_utf8()]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
-    })
-}
-
-fn is_pure_separator(line: &str, minimum_width: usize) -> bool {
-    line.chars().count() >= minimum_width && line.chars().all(|character| character == '─')
-}
-
-fn is_known_footer(line: &str, kind: AgentKind) -> bool {
-    let fields = line
-        .split('·')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .collect::<Vec<_>>();
-    let [model, cwd, ..] = fields.as_slice() else {
-        return false;
-    };
-    let model_is_known = match kind {
-        AgentKind::Codex => model.starts_with("gpt-") && valid_model_label(model),
-        AgentKind::Claude => {
-            model
-                .split_ascii_whitespace()
-                .any(|word| matches!(word, "Claude" | "Opus"))
-                && valid_model_label(model)
-        }
-    };
-    model_is_known && (*cwd == "~" || cwd.starts_with("~/") || cwd.starts_with('/'))
-}
-
-fn valid_model_label(model: &str) -> bool {
-    !model.is_empty()
-        && model.chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || character.is_ascii_whitespace()
-                || matches!(character, '-' | '_' | '.')
-        })
 }
 
 fn classify_content(surface: &StyledText, chunks: &[LineRange]) -> NativeComposerState {

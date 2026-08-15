@@ -204,29 +204,29 @@ fn arbitrary_rgb_text_is_not_treated_as_a_placeholder() {
     );
 }
 
+/// Nothing above the composer gates classification.
+///
+/// Codex prints notices there — a weekly-limit warning, taken here from a live
+/// pane — and demanding a rule or an elapsed label above the composer made
+/// every pane carrying one unverifiable, so the overlay refused all input.
 #[test]
-fn codex_decorated_boundary_requires_a_numeric_elapsed_label() {
-    let malformed = plain(concat!(
-        "• answer\n",
-        "─ Worked for eventually ────────\n",
-        "› \n",
-        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
-    ));
-    assert_eq!(
-        classify_native_composer(AgentKind::Codex, &malformed),
-        NativeComposerState::Unknown
-    );
-
-    let valid = plain(concat!(
-        "• answer\n",
-        "─ Worked for 2m 3s ────────\n",
-        "› \n",
-        "gpt-5.6-sol xhigh · /repo · weekly 75% left",
-    ));
-    assert_eq!(
-        classify_native_composer(AgentKind::Codex, &valid),
-        NativeComposerState::Clear
-    );
+fn codex_ignores_whatever_sits_above_the_composer() {
+    for above in [
+        "─ Worked for 2m 3s ────────",
+        "─ Worked for eventually ────────",
+        "⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.",
+        "╰──────────────────────────────",
+        "• Working (2s • esc to interrupt)",
+    ] {
+        let surface = plain(&format!(
+            "• answer\n{above}\n› \ngpt-5.6-sol xhigh · /repo · weekly 75% left"
+        ));
+        assert_eq!(
+            classify_native_composer(AgentKind::Codex, &surface),
+            NativeComposerState::Clear,
+            "line above the composer must not gate: {above:?}"
+        );
+    }
 }
 
 #[test]
@@ -268,13 +268,18 @@ fn codex_working_boundary_still_detects_unsent_text() {
     );
 }
 
+/// Without a footer there is nothing to pin the composer to, so classification
+/// still fails closed rather than guessing.
 #[test]
-fn codex_working_boundary_requires_the_exact_native_shape() {
+fn codex_without_a_footer_fails_closed() {
     for surface in [
-        codex_working_surface("Write a prompt", "eventually", '•', "esc to interrupt"),
-        codex_working_surface("Write a prompt", "2m 3s", '·', "esc to interrupt"),
-        codex_working_surface("Write a prompt", "2m 3s", '•', "press esc"),
         "• Working (2s • esc to interrupt)\n› Write a prompt".to_owned(),
+        "• answer\n────────\n› Write a prompt".to_owned(),
+        "• answer\n────────\n› Write a prompt\nnot a footer at all".to_owned(),
+        codex_working_surface("Write a prompt", "2m 3s", '•', "esc to interrupt").replace(
+            "gpt-5.6-sol xhigh · /repo · weekly 47% left",
+            "trailing prose",
+        ),
     ] {
         assert_eq!(
             classify_native_composer(AgentKind::Codex, &plain(&surface)),

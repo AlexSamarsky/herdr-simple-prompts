@@ -1,5 +1,8 @@
 use crate::agent::AgentKind;
-use crate::composer::composer_content_start;
+use crate::native_chrome::{
+    LineRange, composer_content_start, is_known_footer, is_pure_separator, line_ranges, line_text,
+    valid_elapsed_label,
+};
 use crate::style::{AnsiColor, StyleRun, StyleRunBuilder, StyleState, StyledText};
 use unicode_width::UnicodeWidthChar;
 
@@ -155,7 +158,7 @@ pub fn extract_native_final(
         _ => None,
     }?;
     let (runs, composer) = candidate;
-    if !trailing_is_chrome(&sanitized.text, &lines[composer + 1..], chrome, kind) {
+    if !trailing_is_chrome(&sanitized.text, &lines[composer + 1..], chrome) {
         return None;
     }
     Some(StyledText {
@@ -242,12 +245,6 @@ fn strict_final_candidates(
     candidates
 }
 
-#[derive(Clone, Copy)]
-struct LineRange {
-    start: usize,
-    end: usize,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ScalarRange {
     character: char,
@@ -316,33 +313,6 @@ fn reflow_candidate_runs(
     Some(slice_mapped_runs(&sanitized.runs, &mappings))
 }
 
-fn line_ranges(text: &str) -> Vec<LineRange> {
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            ranges.push(LineRange { start, end: index });
-            start = index + 1;
-        }
-    }
-    if start < text.len() || text.ends_with('\n') {
-        ranges.push(LineRange {
-            start,
-            end: text.len(),
-        });
-    }
-    ranges
-}
-
-fn line_text(text: &str, range: LineRange) -> &str {
-    &text[range.start..range.end]
-}
-
-fn is_pure_separator(line: &str, minimum_width: usize) -> bool {
-    let width = line.chars().count();
-    width >= minimum_width && line.chars().all(|character| character == '─')
-}
-
 fn is_trailing_boundary(line: &str, chrome: &NativeChrome) -> bool {
     is_pure_separator(line, chrome.separator_min_width)
         || chrome
@@ -364,23 +334,6 @@ fn matches_decorated_boundary(line: &str, prefix: &str, minimum_width: usize) ->
         && suffix.chars().all(|character| character == '─')
 }
 
-fn valid_elapsed_label(label: &str) -> bool {
-    let mut parts = label.split_ascii_whitespace().peekable();
-    if parts.peek().is_none() {
-        return false;
-    }
-    parts.all(|part| {
-        let Some(unit) = part.chars().last() else {
-            return false;
-        };
-        matches!(unit, 'h' | 'm' | 's')
-            && part.len() > unit.len_utf8()
-            && part[..part.len() - unit.len_utf8()]
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
-    })
-}
-
 fn starts_with_any(line: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| line.starts_with(prefix))
 }
@@ -391,19 +344,14 @@ fn is_composer_line(line: &str, chrome: &NativeChrome) -> bool {
 
 /// Everything below the composer has to be the agent's own chrome, so that a
 /// matched region is really the tail of the pane and not an older answer.
-fn trailing_is_chrome(
-    text: &str,
-    ranges: &[LineRange],
-    chrome: &NativeChrome,
-    kind: AgentKind,
-) -> bool {
+fn trailing_is_chrome(text: &str, ranges: &[LineRange], chrome: &NativeChrome) -> bool {
     let trailing = ranges
         .iter()
         .map(|range| line_text(text, *range))
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
     match chrome.trailing {
-        TrailingRule::KnownFooter => trailing.iter().all(|line| is_known_footer(line, kind)),
+        TrailingRule::KnownFooter => trailing.iter().all(|line| is_known_footer(line)),
         TrailingRule::ChromeLines(limit) => {
             trailing.len() <= limit
                 && !trailing
@@ -411,36 +359,6 @@ fn trailing_is_chrome(
                     .any(|line| starts_with_any(line, chrome.role_prefixes))
         }
     }
-}
-
-fn is_known_footer(line: &str, kind: AgentKind) -> bool {
-    let fields = line
-        .split('·')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .collect::<Vec<_>>();
-    let [model, cwd, ..] = fields.as_slice() else {
-        return false;
-    };
-    let model_is_known = match kind {
-        AgentKind::Codex => model.starts_with("gpt-") && valid_model_label(model),
-        AgentKind::Claude => {
-            model
-                .split_ascii_whitespace()
-                .any(|word| matches!(word, "Claude" | "Opus"))
-                && valid_model_label(model)
-        }
-    };
-    model_is_known && (*cwd == "~" || cwd.starts_with("~/") || cwd.starts_with('/'))
-}
-
-fn valid_model_label(model: &str) -> bool {
-    !model.is_empty()
-        && model.chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || character.is_ascii_whitespace()
-                || matches!(character, '-' | '_' | '.')
-        })
 }
 
 fn slice_mapped_runs(runs: &[StyleRun], mappings: &[(usize, usize, usize)]) -> Vec<StyleRun> {
