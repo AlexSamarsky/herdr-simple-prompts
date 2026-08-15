@@ -116,3 +116,26 @@ fn reads_supported_agent_identity_from_herdr() {
     assert_eq!(identity.cwd, Path::new("/tmp/project"));
     assert!(identity.status.is_working());
 }
+
+/// The walk never follows symbolic links and never recurses without bound.
+///
+/// Both are what keeps it inside the configured root; the previous shape paid a
+/// `canonicalize` syscall per file in the entire session history instead.
+#[test]
+fn transcript_walk_skips_symlinks_and_stops_at_the_depth_limit() {
+    let tree = TestTree::new();
+    let outside = tree.file("outside/planted-session.jsonl");
+    let projects = tree.path("claude/projects");
+    std::fs::create_dir_all(projects.join("demo")).unwrap();
+    std::os::unix::fs::symlink(&outside, projects.join("demo/planted-session.jsonl")).unwrap();
+
+    let paths = AgentPaths::new(tree.path("home"), None, Some(tree.path("claude")));
+    assert!(resolve_transcript(AgentKind::Claude, "planted-session", &paths).is_err());
+
+    let deep = (0..12).map(|_| "nested").collect::<Vec<_>>().join("/");
+    tree.file(&format!("claude/projects/{deep}/deep-session.jsonl"));
+    assert!(resolve_transcript(AgentKind::Claude, "deep-session", &paths).is_err());
+
+    tree.file("claude/projects/demo/reachable-session.jsonl");
+    assert!(resolve_transcript(AgentKind::Claude, "reachable-session", &paths).is_ok());
+}

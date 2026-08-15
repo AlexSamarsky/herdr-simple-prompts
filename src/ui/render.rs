@@ -4,7 +4,7 @@ use crate::composer::ComposerAccess;
 use crate::editor::Editor;
 use crate::markdown::is_safe_hyperlink_url;
 use crate::style::AnsiColor;
-use crate::ui::visual_rows::{CellStyle, HistoryDocument, VisualRow, wrap_styled};
+use crate::ui::visual_rows::{CellStyle, HistoryDocument, TurnRenderCache, VisualRow, wrap_styled};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
@@ -52,6 +52,7 @@ pub(crate) struct HistoryRenderCache {
     cached_generation: Option<u64>,
     width: Option<u16>,
     document: HistoryDocument,
+    turns: TurnRenderCache,
     scroll_from_bottom: usize,
     maximum_offset: usize,
     viewport_height: Option<usize>,
@@ -68,7 +69,7 @@ impl HistoryRenderCache {
 
     fn document_for(&mut self, app: &AppState, width: u16) -> &HistoryDocument {
         if self.cached_generation != Some(self.generation) || self.width != Some(width) {
-            self.document = HistoryDocument::from_app(app, width);
+            self.document = HistoryDocument::from_app_cached(app, width, &mut self.turns);
             self.cached_generation = Some(self.generation);
             self.width = Some(width);
             #[cfg(test)]

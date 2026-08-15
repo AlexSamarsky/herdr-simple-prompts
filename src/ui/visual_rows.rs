@@ -3,12 +3,14 @@ use crate::local_time::{format_local_timestamp, format_timestamp_at_offset};
 use crate::markdown::{
     HyperlinkRange, MarkdownProjection, NonClickableLinkRange, style_markdown_with_links,
 };
-use crate::model::{Delivery, Message};
+use crate::model::{Delivery, Message, Turn};
 use crate::style::{
     AnsiColor, MessagePresentation, StyleModifiers, StyleRun, StyleRunBuilder, StyleState,
     StyledText,
 };
 use chrono::FixedOffset;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -104,9 +106,163 @@ pub struct StickyRows {
     pub count: usize,
 }
 
+struct CachedTurn {
+    signature: u64,
+    rows: Vec<VisualRow>,
+    prompt_rows: usize,
+}
+
+/// Rendered rows per turn, reused across rebuilds.
+///
+/// The document is rebuilt on every transcript event and every resize. Without
+/// this, each rebuild re-projected the markdown and re-wrapped every turn in the
+/// session, so the cost of one new answer grew with the whole history.
+#[derive(Default)]
+pub struct TurnRenderCache {
+    width: Option<u16>,
+    entries: HashMap<String, CachedTurn>,
+    #[cfg(test)]
+    rendered_turns: usize,
+}
+
+#[cfg(test)]
+impl TurnRenderCache {
+    pub fn rendered_turns(&self) -> usize {
+        self.rendered_turns
+    }
+}
+
+fn hash_message(message: &Message, hasher: &mut DefaultHasher) {
+    message.stable_id.hash(hasher);
+    message.text.hash(hasher);
+    message.timestamp_ms.hash(hasher);
+    for attachment in &message.attachments {
+        attachment.id.hash(hasher);
+        attachment.display.hash(hasher);
+    }
+    match &message.presentation {
+        MessagePresentation::Plain => 0_u8.hash(hasher),
+        MessagePresentation::MarkdownFallback => 1_u8.hash(hasher),
+        MessagePresentation::NativeAnsi(styled) => {
+            2_u8.hash(hasher);
+            styled.text.hash(hasher);
+            styled.runs.hash(hasher);
+        }
+    }
+}
+
+fn turn_signature(turn: &Turn) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_message(&turn.prompt, &mut hasher);
+    match &turn.delivery {
+        Delivery::Native => 0_u8.hash(&mut hasher),
+        Delivery::Optimistic { .. } => 1_u8.hash(&mut hasher),
+        Delivery::Failed { reason } => {
+            2_u8.hash(&mut hasher);
+            reason.hash(&mut hasher);
+        }
+    }
+    match &turn.final_answer {
+        None => 0_u8.hash(&mut hasher),
+        Some(answer) => {
+            1_u8.hash(&mut hasher);
+            hash_message(answer, &mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn turn_block(
+    turn: &Turn,
+    width: usize,
+    format_timestamp: &mut impl FnMut(Option<u64>) -> Option<String>,
+) -> (Vec<VisualRow>, usize) {
+    let mut rows = Vec::new();
+    rows.push(filled_timestamp_row(
+        format_timestamp(turn.prompt.timestamp_ms).as_deref(),
+        prompt_fill(),
+        width,
+        false,
+        2,
+    ));
+    let content_start_row = rows.len();
+    let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
+    if prompt_lines.is_empty() {
+        prompt_lines.push(StyledText::default());
+    }
+    for line in &prompt_lines {
+        push_styled_rows(&mut rows, line, prompt_fill(), width);
+    }
+    let prompt_rows = rows.len() - content_start_row;
+    rows.push(filled_empty_row(prompt_fill()));
+
+    if let Some(answer) = &turn.final_answer {
+        if let Some(timestamp) = format_timestamp(answer.timestamp_ms) {
+            rows.push(filled_timestamp_row(
+                Some(timestamp.as_str()),
+                None,
+                width,
+                false,
+                2,
+            ));
+        }
+        for line in &answer_lines(answer) {
+            push_answer_rows(&mut rows, line, width);
+        }
+    }
+    rows.push(empty_row());
+    (rows, prompt_rows)
+}
+
 impl HistoryDocument {
     pub fn from_app(app: &AppState, width: u16) -> Self {
         Self::from_app_with_timestamp_formatter(app, width, format_local_timestamp)
+    }
+
+    pub fn from_app_cached(app: &AppState, width: u16, cache: &mut TurnRenderCache) -> Self {
+        if cache.width != Some(width) {
+            cache.entries.clear();
+            cache.width = Some(width);
+        }
+        let cells = usize::from(width.max(1));
+        let mut format_timestamp = format_local_timestamp;
+        let mut document = Self::default();
+        let mut live = HashSet::with_capacity(app.turns.len());
+        for turn in &app.turns {
+            let signature = turn_signature(turn);
+            let key = turn.prompt.stable_id.as_str();
+            if cache
+                .entries
+                .get(key)
+                .is_none_or(|cached| cached.signature != signature)
+            {
+                let (rows, prompt_rows) = turn_block(turn, cells, &mut format_timestamp);
+                cache.entries.insert(
+                    key.to_owned(),
+                    CachedTurn {
+                        signature,
+                        rows,
+                        prompt_rows,
+                    },
+                );
+                #[cfg(test)]
+                {
+                    cache.rendered_turns += 1;
+                }
+            }
+            let cached = &cache.entries[key];
+            let start_row = document.rows.len();
+            document.rows.extend(cached.rows.iter().cloned());
+            document.prompts.push(PromptSection {
+                start_row,
+                content_start_row: start_row + 1,
+                prompt_rows: cached.prompt_rows,
+                end_row: document.rows.len(),
+            });
+            live.insert(key.to_owned());
+        }
+        cache.entries.retain(|key, _| live.contains(key));
+        document
     }
 
     pub fn from_app_at_offset(app: &AppState, width: u16, offset: FixedOffset) -> Self {
@@ -124,42 +280,11 @@ impl HistoryDocument {
         let width = usize::from(width.max(1));
         for turn in &app.turns {
             let start_row = document.rows.len();
-            document.rows.push(filled_timestamp_row(
-                format_timestamp(turn.prompt.timestamp_ms).as_deref(),
-                prompt_fill(),
-                width,
-                false,
-                2,
-            ));
-            let content_start_row = document.rows.len();
-            let mut prompt_lines = prompt_lines(&turn.prompt, &turn.delivery);
-            if prompt_lines.is_empty() {
-                prompt_lines.push(StyledText::default());
-            }
-            for line in &prompt_lines {
-                push_styled_rows(&mut document.rows, line, prompt_fill(), width);
-            }
-            let prompt_rows = document.rows.len() - content_start_row;
-            document.rows.push(filled_empty_row(prompt_fill()));
-
-            if let Some(answer) = &turn.final_answer {
-                if let Some(timestamp) = format_timestamp(answer.timestamp_ms) {
-                    document.rows.push(filled_timestamp_row(
-                        Some(timestamp.as_str()),
-                        None,
-                        width,
-                        false,
-                        2,
-                    ));
-                }
-                for line in &answer_lines(answer) {
-                    push_answer_rows(&mut document.rows, line, width);
-                }
-            }
-            document.rows.push(empty_row());
+            let (rows, prompt_rows) = turn_block(turn, width, &mut format_timestamp);
+            document.rows.extend(rows);
             document.prompts.push(PromptSection {
                 start_row,
-                content_start_row,
+                content_start_row: start_row + 1,
                 prompt_rows,
                 end_row: document.rows.len(),
             });
@@ -637,4 +762,138 @@ fn clip_to_width(text: &str, width: usize) -> String {
         used += character_width;
     }
     clipped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HistoryDocument, StyledText, TurnRenderCache, VisualRow};
+    use crate::app::{AppEvent, AppState};
+    use crate::model::Message;
+
+    fn conversation(turns: u64) -> AppState {
+        let mut app = AppState::default();
+        for index in 0..turns {
+            app.apply(AppEvent::NativeUser(Message::text(
+                format!("u{index}"),
+                format!("prompt {index} with a_snake_case_identifier"),
+                Some(index),
+            )));
+            app.apply(AppEvent::NativeFinal(Message::final_text(
+                format!("a{index}"),
+                format!("answer {index} with **bold** text"),
+                Some(index),
+            )));
+        }
+        app
+    }
+
+    /// Wrapping may relocate characters but must never invent or lose them, and
+    /// no row may overflow the viewport it was wrapped for.
+    #[test]
+    fn wrapping_preserves_every_character_and_never_overflows() {
+        let corpus = [
+            "short",
+            "a much longer line that will certainly need wrapping at small widths",
+            "line one\nline two\n\nline four",
+            "supercalifragilisticexpialidocious_and_then_some_more_characters",
+            "界面 with 宽 glyphs mixed into ascii text",
+            "trailing spaces   \n   leading spaces",
+            "",
+        ];
+
+        for text in corpus {
+            let source = StyledText {
+                text: text.to_owned(),
+                runs: Vec::new(),
+            };
+            for width in 2..=40_usize {
+                let rows = super::wrap_styled(&source, width);
+
+                let joined = rows
+                    .iter()
+                    .map(VisualRow::plain_text)
+                    .collect::<Vec<_>>()
+                    .join("");
+                assert_eq!(
+                    joined,
+                    text.replace('\n', ""),
+                    "characters changed at width {width} for {text:?}",
+                );
+                for row in &rows {
+                    assert!(
+                        row.cell_width() <= width,
+                        "row {:?} overflows width {width}",
+                        row.plain_text(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_rendering_matches_the_uncached_document() {
+        let app = conversation(5);
+        let mut cache = TurnRenderCache::default();
+
+        for width in [20, 40, 80] {
+            assert_eq!(
+                HistoryDocument::from_app_cached(&app, width, &mut cache),
+                HistoryDocument::from_app(&app, width),
+                "width {width}",
+            );
+        }
+    }
+
+    #[test]
+    fn appending_a_turn_only_renders_that_turn() {
+        let mut app = conversation(5);
+        let mut cache = TurnRenderCache::default();
+
+        HistoryDocument::from_app_cached(&app, 40, &mut cache);
+        assert_eq!(cache.rendered_turns(), 5);
+
+        HistoryDocument::from_app_cached(&app, 40, &mut cache);
+        assert_eq!(cache.rendered_turns(), 5, "unchanged turns must be reused");
+
+        app.apply(AppEvent::NativeUser(Message::text(
+            "u5",
+            "prompt 5",
+            Some(5),
+        )));
+        app.apply(AppEvent::NativeFinal(Message::final_text(
+            "a5",
+            "answer 5",
+            Some(5),
+        )));
+        let grown = HistoryDocument::from_app_cached(&app, 40, &mut cache);
+
+        assert_eq!(cache.rendered_turns(), 6, "only the new turn is rendered");
+        assert_eq!(grown, HistoryDocument::from_app(&app, 40));
+    }
+
+    #[test]
+    fn an_answer_arriving_re_renders_only_its_own_turn() {
+        let mut app = conversation(4);
+        let mut cache = TurnRenderCache::default();
+        HistoryDocument::from_app_cached(&app, 40, &mut cache);
+        assert_eq!(cache.rendered_turns(), 4);
+
+        app.turns[1].final_answer = Some(Message::final_text("a1", "revised answer", Some(9)));
+        let updated = HistoryDocument::from_app_cached(&app, 40, &mut cache);
+
+        assert_eq!(cache.rendered_turns(), 5);
+        assert_eq!(updated, HistoryDocument::from_app(&app, 40));
+    }
+
+    #[test]
+    fn dropped_turns_do_not_accumulate_in_the_cache() {
+        let mut app = conversation(6);
+        let mut cache = TurnRenderCache::default();
+        HistoryDocument::from_app_cached(&app, 40, &mut cache);
+
+        app.turns.truncate(2);
+        HistoryDocument::from_app_cached(&app, 40, &mut cache);
+
+        assert_eq!(cache.entries.len(), 2);
+    }
 }
