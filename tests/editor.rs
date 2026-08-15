@@ -496,19 +496,23 @@ fn markers_can_be_brought_back_in_line_with_the_pane() {
     }
     editor.insert_paste("describe it");
 
-    editor.retain_attachments(1);
-    assert_eq!(editor.display_text(), "[Image #1] describe it");
+    editor.sync_attachments(&[3]);
+    assert_eq!(editor.display_text(), "[Image #3] describe it");
     assert_eq!(editor.attachments().len(), 1);
-    assert_eq!(editor.attachments()[0].id, "first");
+    assert_eq!(editor.attachments()[0].id, "native-image-3");
     assert_eq!(editor.submission_text(), "describe it");
 
-    editor.retain_attachments(0);
+    editor.sync_attachments(&[]);
     assert_eq!(editor.display_text(), "describe it");
     assert!(editor.attachments().is_empty());
     assert_eq!(editor.submission_text(), "describe it");
 
-    editor.retain_attachments(5);
-    assert_eq!(editor.display_text(), "describe it", "nothing is invented");
+    editor.sync_attachments(&[9]);
+    assert_eq!(
+        editor.display_text(),
+        "describe it[Image #9] ",
+        "an image the pane holds is taken on"
+    );
 }
 
 /// The marker stands for a picture the agent is holding, and removing it here

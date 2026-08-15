@@ -152,12 +152,11 @@ pub fn native_composer_text(kind: AgentKind, surface: &StyledText) -> Option<Str
 ///
 /// `None` means the pane could not be read well enough to say, and nothing
 /// should be concluded from it.
-pub fn native_attachment_count(kind: AgentKind, surface: &StyledText) -> Option<usize> {
+pub fn native_attachment_markers(kind: AgentKind, surface: &StyledText) -> Option<Vec<usize>> {
     match classify_native_composer(kind, surface) {
-        NativeComposerState::Clear => Some(0),
-        NativeComposerState::OwnedAttachments(count) => Some(count),
-        NativeComposerState::Occupied => {
-            native_composer_parts(kind, surface).map(|parts| parts.attachments())
+        NativeComposerState::Clear => Some(Vec::new()),
+        NativeComposerState::OwnedAttachments(_) | NativeComposerState::Occupied => {
+            native_composer_parts(kind, surface).map(|parts| parts.markers)
         }
         NativeComposerState::Unknown => None,
     }

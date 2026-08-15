@@ -193,22 +193,37 @@ impl Editor {
         self.rebuild_projections();
     }
 
-    /// Brings the marker count in line with what the pane is actually holding.
+    /// Brings the markers in line with what the pane is actually holding.
     ///
     /// A marker is a claim about the native composer, and the composer can move
     /// on without us: an image that was submitted or cleared leaves a marker
     /// behind that stands for nothing. Left alone, the overlay keeps insisting
     /// the pane holds an image it does not, and guards its own input for as
     /// long as the draft survives.
-    pub fn retain_attachments(&mut self, keep: usize) {
+    pub fn sync_attachments(&mut self, markers: &[usize]) {
         let mut seen = 0;
-        self.atoms.retain(|atom| match atom {
-            EditorAtom::Attachment(_) => {
+        self.atoms.retain_mut(|atom| match atom {
+            EditorAtom::Attachment(attachment) => {
+                let Some(marker) = markers.get(seen) else {
+                    return false;
+                };
                 seen += 1;
-                seen <= keep
+                // The pane owns the name as well as the count: a marker whose
+                // label went stale would later name the wrong picture, or none
+                // at all, and the overlay would drop a chip the pane still holds.
+                attachment.id = format!("native-image-{marker}");
+                attachment.display = format!("Image #{marker}");
+                true
             }
             EditorAtom::Character(_) | EditorAtom::LargePaste { .. } => true,
         });
+        for marker in markers.iter().skip(seen) {
+            self.atoms.push(EditorAtom::Attachment(Attachment {
+                id: format!("native-image-{marker}"),
+                display: format!("Image #{marker}"),
+                native_path: None,
+            }));
+        }
         self.cursor = self.cursor.min(self.atoms.len());
         self.preferred_column = None;
         self.rebuild_projections();

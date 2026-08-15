@@ -11,7 +11,7 @@ use crate::agent::{
 use crate::ansi::sanitize_ansi;
 use crate::app::{AppEvent, AppState};
 use crate::composer::{
-    ComposerAccess, NativeComposerState, classify_native_composer, native_attachment_count,
+    ComposerAccess, NativeComposerState, classify_native_composer, native_attachment_markers,
     native_composer_parts,
 };
 use crate::editor::{Editor, staged_image_path};
@@ -113,8 +113,8 @@ pub fn run_from_env() -> AppResult<()> {
         Ok(view) => {
             // A saved draft can outlive the images its markers point at, so the
             // markers are measured against the pane before anything is drawn.
-            if let Some(held) = view.attachments {
-                editor.retain_attachments(held);
+            if let Some(held) = view.attachments.as_deref() {
+                editor.sync_attachments(held);
             }
             view.adopted.and_then(|adopted| {
                 editor.replace(adopted.text);
@@ -590,7 +590,7 @@ struct AdoptedDraft {
 /// answers by guarding its own input.
 #[derive(Debug)]
 struct NativeComposerView {
-    attachments: Option<usize>,
+    attachments: Option<Vec<usize>>,
     adopted: Option<AdoptedDraft>,
 }
 
@@ -603,7 +603,7 @@ fn inspect_native_composer(
     retry_delay: Duration,
 ) -> AppResult<NativeComposerView> {
     let surface = sanitize_ansi(&read()?);
-    let attachments = native_attachment_count(kind, &surface);
+    let attachments = native_attachment_markers(kind, &surface);
     let parts = may_adopt
         .then(|| native_composer_parts(kind, &surface))
         .flatten();
@@ -1543,7 +1543,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(view.attachments, Some(1));
+        assert_eq!(view.attachments.as_deref(), Some([1].as_slice()));
         assert_eq!(view.adopted.expect("a bare image is adopted").markers, [1]);
         assert_eq!(reads.get(), 1);
     }
@@ -1562,7 +1562,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(view.attachments, Some(1));
+        assert_eq!(view.attachments.as_deref(), Some([1].as_slice()));
         assert!(view.adopted.is_none());
     }
 
