@@ -505,7 +505,7 @@ fn handle_key(
         (KeyCode::Backspace, _) => {
             // An image is not ours to drop: the picture lives in the native
             // composer, so the pane has to lose it first and say so.
-            if let Some(marker) = editor.attachment_before_cursor().and_then(|attachment| {
+            if let Some(marker) = editor.attachment_at_cursor().and_then(|attachment| {
                 marker_number(attachment).map(|number| (attachment.id.clone(), number))
             }) {
                 match runtime.remove_attachment(marker.0, marker.1) {
@@ -1618,16 +1618,10 @@ mod tests {
         let mut sequence = 1;
         let mut cache = render::HistoryRenderCache::default();
 
-        // The gap after the marker goes first, as it does in the pane.
-        handle_key(
-            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &mut app,
-            &mut editor,
-            &runtime,
-            &mut sequence,
-            &mut cache,
-        )
-        .unwrap();
+        // Step back onto the image: past its gap, then onto the marker, which
+        // is where it shows as marked and so where backspace means it.
+        editor.move_left();
+        editor.move_left();
         let change = handle_key(
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
             &mut app,
@@ -1682,6 +1676,45 @@ mod tests {
         assert_eq!(editor.display_text(), "[Image #7] ");
         assert_eq!(app.draft_attachments.len(), 1);
         assert_eq!(app.draft_attachments[0].display, "Image #7");
+    }
+
+    /// What is marked is what backspace means. With the cursor merely past an
+    /// image the key does ordinary work — and stops at the marker rather than
+    /// taking a picture nobody pointed at.
+    #[test]
+    fn backspace_past_an_image_does_not_ask_for_it() {
+        let (runtime, actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            native_composer: NativeComposerState::OwnedAttachments(1),
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_attachment(Attachment {
+            id: "native-image-5".into(),
+            display: "Image #5".into(),
+            native_path: None,
+        });
+        app.draft_attachments = editor.attachments();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        // The cursor sits after the gap, so nothing is marked.
+        let change = handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(change, super::DraftChange::Debounced, "the gap goes");
+        assert_eq!(editor.attachments().len(), 1, "the image stays");
+        assert!(
+            actions.try_recv().is_err(),
+            "and the pane is not asked for anything"
+        );
     }
 
     #[test]
