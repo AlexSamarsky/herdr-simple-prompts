@@ -512,6 +512,14 @@ fn handle_key(
                     marker_number(attachment).map(|number| (attachment.id.clone(), number))
                 })
             {
+                // One at a time. The pane works through these in order, so a
+                // second request made while the first is still running names a
+                // picture that is already on its way out — and comes back as a
+                // failure over a removal that in fact worked. The wait is named
+                // on screen, so the presses that land in it are let go of.
+                if app.pending_action.is_some() {
+                    return Ok(DraftChange::None);
+                }
                 match runtime.remove_attachment(marker.0, marker.1) {
                     Ok(()) => app.pending_action = Some(PendingAction::new("Removing image")),
                     Err(error) => app.background_error = Some(error.to_string()),
@@ -1719,6 +1727,54 @@ mod tests {
             actions.try_recv().unwrap(),
             runtime::ActionCommand::RemoveAttachment { marker: 5, .. }
         ));
+    }
+
+    /// Backspace held down while the pane is still taking the picture away
+    /// used to send the same removal again. The pane answers these in order, so
+    /// the second one named an image that had just gone and came back as an
+    /// error over a removal that had worked.
+    #[test]
+    fn a_second_removal_is_not_asked_for_while_the_first_is_running() {
+        let (runtime, actions) = runtime::interaction_test_runtime(4);
+        let mut app = AppState {
+            native_composer: NativeComposerState::OwnedAttachments(1),
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_attachment(Attachment {
+            id: "native-image-5".into(),
+            display: "Image #5".into(),
+            native_path: None,
+        });
+        app.draft_attachments = editor.attachments();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        for _ in 0..3 {
+            handle_key(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                &mut app,
+                &mut editor,
+                &runtime,
+                &mut sequence,
+                &mut cache,
+            )
+            .unwrap();
+        }
+
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::RemoveAttachment { marker: 5, .. }
+        ));
+        assert!(
+            actions.try_recv().is_err(),
+            "the presses that land in the wait are let go of"
+        );
+        assert_eq!(editor.attachments().len(), 1, "and nothing is dropped yet");
+        assert!(
+            app.background_error.is_none(),
+            "so no failure is reported over a removal that is still running"
+        );
     }
 
     #[test]
