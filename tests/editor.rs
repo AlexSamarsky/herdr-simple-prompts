@@ -481,6 +481,29 @@ fn an_attachment_counts_as_one_word_and_survives_a_snapshot() {
     assert_eq!(restored.submission_text(), "describe it");
 }
 
+/// The last picture leaves the caret at the end, and the first leaves it at the
+/// start: there is no gap in front of the first one to stand in.
+#[test]
+fn the_caret_after_a_removal_stops_where_the_line_does() {
+    let mut editor = Editor::default();
+    for id in ["first", "second"] {
+        editor.insert_attachment(Attachment {
+            id: id.into(),
+            display: id.into(),
+            native_path: None,
+        });
+    }
+
+    editor.remove_attachment("second");
+    assert_eq!(editor.display_text(), "[Image #1] ");
+    assert_eq!(editor.display_cursor_byte(), editor.display_text().len());
+    assert!(editor.attachment_span_at_cursor().is_none());
+
+    editor.remove_attachment("first");
+    assert_eq!(editor.display_text(), "");
+    assert_eq!(editor.display_cursor_byte(), 0);
+}
+
 /// A marker is a claim about the native composer, and the composer can move on
 /// without us. A draft that outlived its image used to insist the pane still
 /// held one, which guarded the overlay's own input for as long as it survived.
@@ -680,10 +703,12 @@ fn the_gap_beside_an_image_is_a_place_but_not_text() {
     );
 }
 
-/// Removing a marked image leaves the cursor on the next one, marked in its
-/// turn — so a second press takes that one too, as the native composer does.
+/// Removing a marked image leaves the caret standing in the gap its neighbours
+/// keep between them, not on the picture that moves up into the place. A marked
+/// picture says backspace is about to take that one, and taking this one was
+/// the whole of what was asked for.
 #[test]
-fn removing_an_image_marks_the_next_one() {
+fn removing_an_image_leaves_the_caret_between_the_neighbours() {
     let mut editor = Editor::default();
     for marker in ["Image #1", "Image #2", "Image #3"] {
         editor.insert_attachment(Attachment {
@@ -706,8 +731,12 @@ fn removing_an_image_marks_the_next_one() {
 
     assert_eq!(editor.display_text(), "[Image #1] [Image #3] ");
     assert_eq!(
-        editor.attachment_at_cursor().map(|image| image.id.clone()),
-        Some("Image #3".to_owned()),
-        "the next image is now the one marked"
+        editor.display_cursor_byte(),
+        "[Image #1]".len(),
+        "the caret stands in the gap between the two that are left"
+    );
+    assert!(
+        editor.attachment_span_at_cursor().is_none(),
+        "so neither of them is marked"
     );
 }

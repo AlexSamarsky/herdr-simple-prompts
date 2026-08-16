@@ -304,13 +304,25 @@ impl Editor {
             return;
         };
         self.atoms.remove(index);
-        // The gap belonged to that image and goes with it, which leaves the
-        // cursor standing on whatever came next — the following image, marked,
-        // as the native composer leaves it.
+        // The gap belonged to that image and goes with it.
         if matches!(self.atoms.get(index), Some(EditorAtom::Gap)) {
             self.atoms.remove(index);
         }
         self.cursor = self.cursor.min(index).min(self.atoms.len());
+        // The caret is left standing in the gap the neighbours keep between
+        // them, not on the picture that moved up into the place. A marked
+        // picture says backspace is about to take that one, and taking this one
+        // was the whole of what was asked for.
+        if matches!(self.atoms.get(self.cursor), Some(EditorAtom::Attachment(_)))
+            && matches!(
+                self.cursor
+                    .checked_sub(1)
+                    .and_then(|gap| self.atoms.get(gap)),
+                Some(EditorAtom::Gap)
+            )
+        {
+            self.cursor -= 1;
+        }
         self.preferred_column = None;
         self.rebuild_projections();
     }
