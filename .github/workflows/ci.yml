@@ -14,9 +14,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            rust: "1.85.0"
+            rust: "1.88.0"
           - os: macos-latest
-            rust: "1.85.0"
+            rust: "1.88.0"
           - os: ubuntu-latest
             rust: stable
           - os: macos-latest
@@ -31,5 +31,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
+      # The session helper shells out to ripgrep the same way it does on a real
+      # machine, so the runner needs it before the helper can be tested at all.
+      - name: Install ripgrep
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ripgrep
+          else
+            brew install ripgrep
+          fi
       - run: bash tests/register-existing-sessions.sh
       - run: cargo build --locked --release

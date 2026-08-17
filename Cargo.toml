@@ -2,7 +2,7 @@
 name = "herdr-simple-prompts"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 publish = false
 description = "A prompt and final-answer overlay for Codex and Claude in Herdr"
