@@ -292,9 +292,31 @@ impl Editor {
         }
     }
 
-    /// Whether there is anything left between the cursor and the line start.
-    pub fn at_line_start(&self) -> bool {
-        self.cursor == self.line_start_index()
+    pub fn cursor_atom(&self) -> usize {
+        self.cursor
+    }
+
+    /// The place in the atoms that a place in the drawn text stands for.
+    pub fn atom_at_display(&self, display_byte: usize) -> usize {
+        self.closest_display_boundary(display_byte)
+    }
+
+    /// Deletes back to a given place, stopping at a picture in the way.
+    ///
+    /// A picture cannot be dropped here — it lives in the native composer and
+    /// has to be asked for — so the delete stops in front of it and leaves the
+    /// asking to the caller.
+    pub fn delete_back_to(&mut self, target: usize) {
+        let start = target
+            .min(self.cursor)
+            .max(self.attachment_floor(self.cursor));
+        if start == self.cursor {
+            return;
+        }
+        self.atoms.drain(start..self.cursor);
+        self.cursor = start;
+        self.preferred_column = None;
+        self.rebuild_projections();
     }
 
     /// Drops an image once the pane has confirmed it is gone there too.

@@ -743,9 +743,41 @@ fn clear_to_line_start(
     editor: &mut Editor,
     runtime: &UiRuntime,
 ) -> DraftChange {
-    editor.delete_to_line_start();
-    app.clearing_line = ask_for_the_next_image_in_the_way(app, editor, runtime);
+    let target = clear_target(app, editor);
+    editor.delete_back_to(target);
+    app.clearing_line_to =
+        ask_for_the_next_image_in_the_way(app, editor, runtime, target).then_some(target);
     DraftChange::Debounced
+}
+
+/// Where a clear should stop: the start of the line as it is drawn.
+///
+/// A paragraph that has wrapped is several lines on the screen, and the one
+/// being cleared is the one the cursor is on rather than the whole paragraph
+/// above it. Standing at the start of a line already, the press means the break
+/// itself — which closes the line up and leaves the cursor at the end of the
+/// one before; where the break is only a wrap, it means the row above.
+fn clear_target(app: &AppState, editor: &Editor) -> usize {
+    let cursor = editor.cursor_atom();
+    // Before the first draw there is no width to speak of, and a line that has
+    // not been wrapped anywhere is the whole paragraph.
+    let width = match app.composer_width {
+        0 => usize::MAX,
+        width => width,
+    };
+    let rows = visual_rows::wrap_plain(editor.display_text(), width);
+    let (row, _) = rows.cell_of(editor.display_cursor_byte());
+    let start = editor.atom_at_display(rows.row_start(row));
+    if start < cursor {
+        return start;
+    }
+    if editor.display_text()[..editor.display_cursor_byte()].ends_with('\n') {
+        return cursor.saturating_sub(1);
+    }
+    match row.checked_sub(1) {
+        Some(above) => editor.atom_at_display(rows.row_start(above)),
+        None => 0,
+    }
 }
 
 /// Asks the pane for the picture the clear has run into, if it has run into
@@ -754,8 +786,9 @@ fn ask_for_the_next_image_in_the_way(
     app: &mut AppState,
     editor: &Editor,
     runtime: &UiRuntime,
+    target: usize,
 ) -> bool {
-    if editor.at_line_start() || app.pending_action.is_some() {
+    if editor.cursor_atom() <= target || app.pending_action.is_some() {
         return false;
     }
     let Some((id, marker)) = editor.attachment_behind_cursor().and_then(|attachment| {
@@ -881,18 +914,20 @@ fn apply_runtime_event(
                 Ok(()) => {
                     editor.remove_attachment(&id);
                     app.draft_attachments = editor.attachments();
-                    if app.clearing_line {
+                    if let Some(target) = app.clearing_line_to {
                         // The picture is gone; the clear carries on from where
                         // it stopped for it.
-                        editor.delete_to_line_start();
-                        app.clearing_line = ask_for_the_next_image_in_the_way(app, editor, runtime);
+                        editor.delete_back_to(target);
+                        app.clearing_line_to =
+                            ask_for_the_next_image_in_the_way(app, editor, runtime, target)
+                                .then_some(target);
                     }
                     DraftChange::Immediate
                 }
                 Err(error) => {
                     // A picture that would not go stops the clear: what is left
                     // on the line is what the pane still holds.
-                    app.clearing_line = false;
+                    app.clearing_line_to = None;
                     app.background_error = Some(error);
                     DraftChange::None
                 }
@@ -1806,6 +1841,7 @@ mod tests {
         let (runtime, actions) = runtime::interaction_test_runtime(4);
         let mut app = AppState {
             native_composer: NativeComposerState::OwnedAttachments(2),
+            composer_width: 80,
             ..AppState::default()
         };
         let mut editor = Editor::default();
@@ -1836,7 +1872,10 @@ mod tests {
             "[Image #5] [Image #6]",
             "the text goes at once, the pictures wait on the pane"
         );
-        assert!(app.clearing_line, "and the clear is still going");
+        assert!(
+            app.clearing_line_to.is_some(),
+            "and the clear is still going"
+        );
         assert!(matches!(
             actions.try_recv().unwrap(),
             runtime::ActionCommand::RemoveAttachment { marker: 6, .. }
@@ -1844,6 +1883,38 @@ mod tests {
         assert!(
             actions.try_recv().is_err(),
             "one at a time, as the pane answers them"
+        );
+    }
+
+    /// A paragraph that has wrapped is several lines on the screen, and the one
+    /// a clear takes is the one the cursor is on. Taking the whole paragraph
+    /// would throw away lines the person can see they are not standing in.
+    #[test]
+    fn clearing_a_wrapped_paragraph_takes_only_the_line_the_cursor_is_on() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            composer_width: 12,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("one two three four");
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(
+            editor.display_text(),
+            "one two ",
+            "the row the cursor was on goes, the one above it stays"
         );
     }
 

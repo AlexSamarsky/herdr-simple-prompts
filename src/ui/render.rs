@@ -37,6 +37,9 @@ struct HyperlinkPatch {
 struct RenderEffects {
     hyperlinks: Vec<HyperlinkPatch>,
     cursor: Option<Position>,
+    /// The width the draft was wrapped to. Clearing back to the start of a line
+    /// means the line as drawn, so the keys need to know where the rows broke.
+    composer_width: usize,
 }
 
 fn horizontal_content_area(area: Rect) -> Rect {
@@ -197,6 +200,7 @@ fn render(
     let mut effects = RenderEffects {
         hyperlinks: hyperlink_patches(&history_rows, areas[0]),
         cursor: None,
+        composer_width: cells,
     };
     let history = Text::from(
         history_rows
@@ -408,12 +412,13 @@ fn hyperlink_patches(rows: &[VisualRow], area: Rect) -> Vec<HyperlinkPatch> {
     patches
 }
 
+/// Draws the overlay and reports the width the draft was wrapped to.
 pub(crate) fn draw_terminal<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &AppState,
     editor: &Editor,
     history_cache: &mut HistoryRenderCache,
-) -> io::Result<()> {
+) -> io::Result<usize> {
     let mut effects = RenderEffects::default();
     let cells = {
         let completed = terminal.draw(|frame| {
@@ -430,7 +435,7 @@ pub(crate) fn draw_terminal<B: Backend>(
         .map(|patch| patch.area.clone())
         .collect();
     if cells.is_empty() {
-        return Ok(());
+        return Ok(effects.composer_width);
     }
     terminal
         .backend_mut()
@@ -438,7 +443,8 @@ pub(crate) fn draw_terminal<B: Backend>(
     if let Some(cursor) = effects.cursor {
         terminal.set_cursor_position(cursor)?;
     }
-    terminal.backend_mut().flush()
+    terminal.backend_mut().flush()?;
+    Ok(effects.composer_width)
 }
 
 fn plain_cells(buffer: &Buffer, areas: &[HyperlinkArea]) -> Vec<(u16, u16, Cell)> {
