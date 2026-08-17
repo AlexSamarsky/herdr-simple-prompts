@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AlexSamarsky/herdr_simple_prompts/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexSamarsky/herdr_simple_prompts/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)
 ![Herdr 0.7.5+](https://img.shields.io/badge/herdr-0.7.5%2B-6f42c1.svg)
 ![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 
@@ -33,7 +33,7 @@ history:
 ### Requirements
 
 - Herdr 0.7.5 or newer
-- Rust 1.85 or newer with Cargo
+- Rust 1.88 or newer with Cargo
 - Codex CLI or Claude Code
 - the corresponding Herdr native integration
 

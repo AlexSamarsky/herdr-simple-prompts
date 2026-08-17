@@ -33,12 +33,17 @@ fn strings(value: &toml::Value) -> Vec<&str> {
         .collect()
 }
 
+/// The declared version is the one the code actually needs, not the one the
+/// edition alone would allow. `let` chains are stable from 1.88 and this
+/// codebase leans on them throughout — in the style runs, in the ANSI slicing,
+/// in the drawing — so a build pinned lower does not compile at all, which is
+/// what the pinned CI job kept saying.
 #[test]
 fn dependencies_honor_the_declared_rust_version() {
     let cargo = std::fs::read_to_string("Cargo.toml").unwrap();
     let parsed: toml::Value = toml::from_str(&cargo).unwrap();
 
-    assert_eq!(parsed["package"]["rust-version"].as_str(), Some("1.85"));
+    assert_eq!(parsed["package"]["rust-version"].as_str(), Some("1.88"));
     assert_eq!(
         parsed["dependencies"]["ratatui"]["version"].as_str(),
         Some("0.29.0")
