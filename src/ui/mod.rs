@@ -453,12 +453,10 @@ fn handle_key(
         // is what actually arrives; the super arms cover terminals configured
         // to forward the modifier itself.
         (KeyCode::Backspace, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
-            editor.delete_to_line_start();
-            DraftChange::Debounced
+            clear_to_line_start(app, editor, runtime)
         }
         (KeyCode::Char('u'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            editor.delete_to_line_start();
-            DraftChange::Debounced
+            clear_to_line_start(app, editor, runtime)
         }
         (KeyCode::Delete, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
             editor.delete_to_line_end();
@@ -734,6 +732,82 @@ fn scrolls_history(app: &AppState, editor: &Editor) -> bool {
     !ordinary_input_allowed(app) || editor.display_text().is_empty()
 }
 
+/// Clears back to the start of the line, pictures and all.
+///
+/// A picture is not ours to drop: it lives in the native composer, so it has to
+/// be asked for and waited on. The clear therefore goes in steps — the text
+/// back to the nearest picture, then that picture, then whatever is behind it —
+/// and carries on as each answer comes back.
+fn clear_to_line_start(
+    app: &mut AppState,
+    editor: &mut Editor,
+    runtime: &UiRuntime,
+) -> DraftChange {
+    let target = clear_target(app, editor);
+    editor.delete_back_to(target);
+    app.clearing_line_to =
+        ask_for_the_next_image_in_the_way(app, editor, runtime, target).then_some(target);
+    DraftChange::Debounced
+}
+
+/// Where a clear should stop: the start of the line as it is drawn.
+///
+/// A paragraph that has wrapped is several lines on the screen, and the one
+/// being cleared is the one the cursor is on rather than the whole paragraph
+/// above it. Standing at the start of a line already, the press means the break
+/// itself — which closes the line up and leaves the cursor at the end of the
+/// one before; where the break is only a wrap, it means the row above.
+fn clear_target(app: &AppState, editor: &Editor) -> usize {
+    let cursor = editor.cursor_atom();
+    // Before the first draw there is no width to speak of, and a line that has
+    // not been wrapped anywhere is the whole paragraph.
+    let width = match app.composer_width {
+        0 => usize::MAX,
+        width => width,
+    };
+    let rows = visual_rows::wrap_plain(editor.display_text(), width);
+    let (row, _) = rows.cell_of(editor.display_cursor_byte());
+    let start = editor.atom_at_display(rows.row_start(row));
+    if start < cursor {
+        return start;
+    }
+    if editor.display_text()[..editor.display_cursor_byte()].ends_with('\n') {
+        return cursor.saturating_sub(1);
+    }
+    match row.checked_sub(1) {
+        Some(above) => editor.atom_at_display(rows.row_start(above)),
+        None => 0,
+    }
+}
+
+/// Asks the pane for the picture the clear has run into, if it has run into
+/// one. Returns whether the clear is still going.
+fn ask_for_the_next_image_in_the_way(
+    app: &mut AppState,
+    editor: &Editor,
+    runtime: &UiRuntime,
+    target: usize,
+) -> bool {
+    if editor.cursor_atom() <= target || app.pending_action.is_some() {
+        return false;
+    }
+    let Some((id, marker)) = editor.attachment_behind_cursor().and_then(|attachment| {
+        marker_number(attachment).map(|number| (attachment.id.clone(), number))
+    }) else {
+        return false;
+    };
+    match runtime.remove_attachment(id, marker) {
+        Ok(()) => {
+            app.pending_action = Some(PendingAction::new("Removing image"));
+            true
+        }
+        Err(error) => {
+            app.background_error = Some(error.to_string());
+            false
+        }
+    }
+}
+
 fn apply_runtime_event(
     event: RuntimeEvent,
     original: &crate::agent::AgentIdentity,
@@ -840,9 +914,20 @@ fn apply_runtime_event(
                 Ok(()) => {
                     editor.remove_attachment(&id);
                     app.draft_attachments = editor.attachments();
+                    if let Some(target) = app.clearing_line_to {
+                        // The picture is gone; the clear carries on from where
+                        // it stopped for it.
+                        editor.delete_back_to(target);
+                        app.clearing_line_to =
+                            ask_for_the_next_image_in_the_way(app, editor, runtime, target)
+                                .then_some(target);
+                    }
                     DraftChange::Immediate
                 }
                 Err(error) => {
+                    // A picture that would not go stops the clear: what is left
+                    // on the line is what the pane still holds.
+                    app.clearing_line_to = None;
                     app.background_error = Some(error);
                     DraftChange::None
                 }
@@ -1691,12 +1776,13 @@ mod tests {
         assert_eq!(app.draft_attachments[0].display, "Image #7");
     }
 
-    /// Standing just past an image — at the end of the line, say — a person
-    /// pressing backspace means the image they can see, not the space beside
-    /// it. Eating the gap and then meeting the wall made the key look broken.
+    /// Standing just past an image there is a space on the screen between the
+    /// cursor and the picture, and that space is what backspace takes first.
+    /// The picture goes on the press after — as it does in the native composer,
+    /// and as anyone looking at the space would expect.
     #[test]
-    fn backspace_just_past_an_image_asks_for_it() {
-        let (runtime, actions) = runtime::interaction_test_runtime(1);
+    fn backspace_takes_the_space_beside_an_image_before_the_image() {
+        let (runtime, actions) = runtime::interaction_test_runtime(2);
         let mut app = AppState {
             native_composer: NativeComposerState::OwnedAttachments(1),
             ..AppState::default()
@@ -1711,7 +1797,24 @@ mod tests {
         let mut sequence = 1;
         let mut cache = render::HistoryRenderCache::default();
 
-        // The cursor sits after the gap, so nothing is marked.
+        // The cursor sits past the gap that follows the image.
+        let change = handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(change, super::DraftChange::Debounced, "the space is ours");
+        assert_eq!(editor.display_text(), "[Image #5]", "so it simply goes");
+        assert!(
+            actions.try_recv().is_err(),
+            "and the pane is not troubled for it"
+        );
+
         let change = handle_key(
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
             &mut app,
@@ -1728,6 +1831,91 @@ mod tests {
             actions.try_recv().unwrap(),
             runtime::ActionCommand::RemoveAttachment { marker: 5, .. }
         ));
+    }
+
+    /// Clearing back to the start of the line takes the pictures in the way
+    /// too. They are not ours to drop, so each is asked for and waited on, and
+    /// the clear carries on as the answers come back.
+    #[test]
+    fn clearing_a_line_asks_for_the_pictures_in_the_way() {
+        let (runtime, actions) = runtime::interaction_test_runtime(4);
+        let mut app = AppState {
+            native_composer: NativeComposerState::OwnedAttachments(2),
+            composer_width: 80,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        for marker in ["Image #5", "Image #6"] {
+            editor.insert_attachment(Attachment {
+                id: format!("native-image-{}", &marker["Image #".len()..]),
+                display: marker.into(),
+                native_path: None,
+            });
+        }
+        editor.insert_paste("describe these");
+        app.draft_attachments = editor.attachments();
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(
+            editor.display_text(),
+            "[Image #5] [Image #6]",
+            "the text goes at once, the pictures wait on the pane"
+        );
+        assert!(
+            app.clearing_line_to.is_some(),
+            "and the clear is still going"
+        );
+        assert!(matches!(
+            actions.try_recv().unwrap(),
+            runtime::ActionCommand::RemoveAttachment { marker: 6, .. }
+        ));
+        assert!(
+            actions.try_recv().is_err(),
+            "one at a time, as the pane answers them"
+        );
+    }
+
+    /// A paragraph that has wrapped is several lines on the screen, and the one
+    /// a clear takes is the one the cursor is on. Taking the whole paragraph
+    /// would throw away lines the person can see they are not standing in.
+    #[test]
+    fn clearing_a_wrapped_paragraph_takes_only_the_line_the_cursor_is_on() {
+        let (runtime, _actions) = runtime::interaction_test_runtime(1);
+        let mut app = AppState {
+            composer_width: 12,
+            ..AppState::default()
+        };
+        let mut editor = Editor::default();
+        editor.insert_paste("one two three four");
+        let mut sequence = 1;
+        let mut cache = render::HistoryRenderCache::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER),
+            &mut app,
+            &mut editor,
+            &runtime,
+            &mut sequence,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(
+            editor.display_text(),
+            "one two ",
+            "the row the cursor was on goes, the one above it stays"
+        );
     }
 
     /// Backspace held down while the pane is still taking the picture away
