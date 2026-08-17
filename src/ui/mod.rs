@@ -228,6 +228,7 @@ pub fn run_from_env() -> AppResult<()> {
             app.background_error = Some(format!("history: {error}"));
         }
 
+        app.expire_notice();
         render::draw_terminal(&mut terminal, &app, &editor, &mut history_cache)?;
         if !event::poll(Duration::from_millis(50))? {
             continue;
