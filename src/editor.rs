@@ -278,22 +278,23 @@ impl Editor {
         (start < end).then_some((start, end))
     }
 
-    /// The image the cursor has just passed, gap and all.
+    /// The image the cursor stands directly behind.
     ///
-    /// Standing at the end of the line, a person pressing backspace means the
-    /// image they can see, not the space beside it — the native composer takes
-    /// the image there too. Without this the key ate the gap and then met the
-    /// wall, and looked broken.
+    /// The space beside a picture is a thing on the screen like any other, so
+    /// backspace takes it first and the picture on the press after — which is
+    /// what the native composer does, and what a person expects from a space
+    /// they can see sitting there. Reaching through it took the picture while
+    /// the space was still on screen.
     pub fn attachment_behind_cursor(&self) -> Option<&Attachment> {
-        let previous = self.cursor.checked_sub(1)?;
-        match self.atoms.get(previous) {
+        match self.atoms.get(self.cursor.checked_sub(1)?) {
             Some(EditorAtom::Attachment(attachment)) => Some(attachment),
-            Some(EditorAtom::Gap) => match self.atoms.get(previous.checked_sub(1)?) {
-                Some(EditorAtom::Attachment(attachment)) => Some(attachment),
-                _ => None,
-            },
             _ => None,
         }
+    }
+
+    /// Whether there is anything left between the cursor and the line start.
+    pub fn at_line_start(&self) -> bool {
+        self.cursor == self.line_start_index()
     }
 
     /// Drops an image once the pane has confirmed it is gone there too.

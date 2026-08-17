@@ -89,6 +89,10 @@ pub struct AppState {
     /// Draft and history writer failures. They are not send failures and must
     /// not masquerade as one, or the user retries a prompt that was delivered.
     pub background_error: Option<String>,
+    /// Whether a clear back to the line start is still working its way through
+    /// the pictures in its way. Each has to be asked for and waited on, so the
+    /// clear runs in steps rather than in one stroke.
+    pub clearing_line: bool,
     /// What the error line is showing and since when, so a notice about
     /// something that happened can leave the screen again.
     pub notice_shown: Option<(String, Instant)>,
@@ -125,6 +129,7 @@ impl Default for AppState {
             transcript_error: None,
             send_error: None,
             background_error: None,
+            clearing_line: false,
             notice_shown: None,
             blocked_surface: None,
             interaction_error: None,
