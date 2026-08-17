@@ -284,47 +284,26 @@ pub fn remove_native_attachment(
         Ok(())
     };
     let markers = composer_markers(kind, &read()?);
-    let Some(position) = markers.iter().position(|held| *held == marker) else {
+    if !markers.contains(&marker) {
         // The pane holds no such image. Only when it holds none at all is that
         // the picture already being gone; otherwise the overlay is naming an
         // image by a number that has gone stale, and reporting success would
         // drop a chip while the picture stays.
         return Ok(markers.is_empty());
-    };
-    if position + 1 == markers.len() {
-        return remove_last_attachment(kind, marker, &markers, &mut read, &mut press);
     }
-    remove_earlier_attachment(kind, marker, &markers, &mut read, &mut press)
+    remove_by_walking(kind, marker, &markers, &mut read, &mut press)
 }
 
-/// The last image needs no walking: one keystroke reaches the end of the
-/// composer, and the marker is what sits there.
-fn remove_last_attachment(
-    kind: AgentKind,
-    marker: usize,
-    before: &[usize],
-    read: &mut impl FnMut() -> AppResult<String>,
-    press: &mut impl FnMut(&[&str], Option<&str>) -> AppResult<()>,
-) -> AppResult<bool> {
-    press(&["ctrl+e"], None)?;
-    let gone = format!("[Image #{marker}]");
-    // What sits at the end is not always the marker: an image removed before
-    // this one leaves the space that separated them behind, and the first press
-    // takes that instead. So the presses are counted out one at a time and the
-    // composer is asked after each — and there are only ever two of them, which
-    // is a space and a marker and nothing further.
-    for _ in 0..2 {
-        press(&["backspace"], None)?;
-        if settle(kind, read, |content| !content.contains(&gone))?.is_some() {
-            return confirm_removal(kind, marker, before, read);
-        }
-    }
-    Err(walk_failure("the image did not go", kind, read))
-}
-
-/// An earlier image: the caret has to be brought to it, and brought there
-/// provably.
-fn remove_earlier_attachment(
+/// Brings the caret to the image and takes it, whichever image it is.
+///
+/// The last one used to be a case of its own: the end of the composer is one
+/// keystroke away, so the presses were simply counted out — one for the space
+/// beside the picture and one for the picture. But every removal leaves that
+/// space behind, so a composer that has lost a few images ends in several of
+/// them, and the counted presses ate spaces and then reported that the image
+/// had not gone while it was still sitting there. Counting is what this walk
+/// exists to avoid, so the last image is no longer an exception to it.
+fn remove_by_walking(
     kind: AgentKind,
     marker: usize,
     before: &[usize],
@@ -730,11 +709,30 @@ mod tests {
     }
 
     /// A space left at the end by an earlier removal must not be mistaken for
-    /// the image: the first press takes the space, and the image needs the
-    /// second.
+    /// the image.
     #[test]
     fn a_space_left_at_the_end_does_not_stop_the_removal() {
         let composer = RefCell::new(two_images_and_a_space());
+
+        assert!(remove(&composer, 6).unwrap());
+        assert_eq!(composer.borrow().markers(), ["[Image #5]"]);
+    }
+
+    /// Every removal leaves behind the space that sat beside the picture, so
+    /// the end of a composer that has lost a few images is several spaces the
+    /// pane cannot show. Counting presses instead of asking took those spaces
+    /// for the picture and then said the picture had not gone — while it was
+    /// still there for anyone to see.
+    #[test]
+    fn spaces_left_by_earlier_removals_do_not_stop_the_last_one() {
+        let composer = RefCell::new(Composer::new(&[
+            "[Image #5]",
+            " ",
+            "[Image #6]",
+            " ",
+            " ",
+            " ",
+        ]));
 
         assert!(remove(&composer, 6).unwrap());
         assert_eq!(composer.borrow().markers(), ["[Image #5]"]);
