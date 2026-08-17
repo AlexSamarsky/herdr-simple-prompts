@@ -1,6 +1,6 @@
 # Herdr Simple Prompts
 
-[![CI](https://github.com/AlexSamarsky/herdr_simple_prompts/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexSamarsky/herdr_simple_prompts/actions/workflows/ci.yml)
+[![CI](https://github.com/AlexSamarsky/herdr-simple-prompts/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexSamarsky/herdr-simple-prompts/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)
 ![Herdr 0.7.5+](https://img.shields.io/badge/herdr-0.7.5%2B-6f42c1.svg)
@@ -40,7 +40,7 @@ history:
 Install the plugin directly from its public source repository:
 
 ```bash
-herdr plugin install AlexSamarsky/herdr_simple_prompts
+herdr plugin install AlexSamarsky/herdr-simple-prompts
 ```
 
 Install the integration for the agent you use:
@@ -80,8 +80,8 @@ panes. It requires `jq` and `rg` in addition to Herdr.
 Clone the exact source, inspect the helper, then run it:
 
 ```bash
-git clone https://github.com/AlexSamarsky/herdr_simple_prompts.git
-cd herdr_simple_prompts
+git clone https://github.com/AlexSamarsky/herdr-simple-prompts.git
+cd herdr-simple-prompts
 sed -n '1,240p' scripts/register-existing-sessions.sh
 bash scripts/register-existing-sessions.sh
 ```
@@ -316,8 +316,8 @@ created.
 ## Local development
 
 ```bash
-git clone https://github.com/AlexSamarsky/herdr_simple_prompts.git
-cd herdr_simple_prompts
+git clone https://github.com/AlexSamarsky/herdr-simple-prompts.git
+cd herdr-simple-prompts
 cargo test --all-targets --all-features
 cargo build --locked --release
 herdr plugin link .
