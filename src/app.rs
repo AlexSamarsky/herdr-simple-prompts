@@ -8,7 +8,7 @@ use crate::paste::{CompactPromptOverride, canonicalize_compact_markers, marker_c
 use crate::status::StatusLine;
 use crate::style::{MessagePresentation, StyledText, validate_styled_text};
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const RECONCILE_WINDOW_MS: u64 = 30_000;
 
@@ -57,6 +57,20 @@ impl PendingAction {
     }
 }
 
+/// How long a notice about something that happened stays on screen: long
+/// enough to read the line, short enough that it does not outlive what it is
+/// about.
+pub const NOTICE_LINGER: Duration = Duration::from_secs(12);
+
+/// Which of the error lines is the one being shown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Notice {
+    Send,
+    Connection,
+    Transcript,
+    Background,
+}
+
 pub struct AppState {
     pub session_id: String,
     pub turns: Vec<Turn>,
@@ -75,6 +89,9 @@ pub struct AppState {
     /// Draft and history writer failures. They are not send failures and must
     /// not masquerade as one, or the user retries a prompt that was delivered.
     pub background_error: Option<String>,
+    /// What the error line is showing and since when, so a notice about
+    /// something that happened can leave the screen again.
+    pub notice_shown: Option<(String, Instant)>,
     pub blocked_surface: Option<Result<StyledText, String>>,
     pub interaction_error: Option<String>,
     pub source_pane_closed: bool,
@@ -108,6 +125,7 @@ impl Default for AppState {
             transcript_error: None,
             send_error: None,
             background_error: None,
+            notice_shown: None,
             blocked_surface: None,
             interaction_error: None,
             source_pane_closed: false,
@@ -333,11 +351,62 @@ impl AppState {
     }
 
     pub fn visible_error(&self) -> Option<&str> {
-        self.send_error
-            .as_deref()
-            .or(self.connection_error.as_deref())
-            .or(self.transcript_error.as_deref())
-            .or(self.background_error.as_deref())
+        match self.visible_notice()? {
+            Notice::Send => self.send_error.as_deref(),
+            Notice::Connection => self.connection_error.as_deref(),
+            Notice::Transcript => self.transcript_error.as_deref(),
+            Notice::Background => self.background_error.as_deref(),
+        }
+    }
+
+    fn visible_notice(&self) -> Option<Notice> {
+        if self.send_error.is_some() {
+            Some(Notice::Send)
+        } else if self.connection_error.is_some() {
+            Some(Notice::Connection)
+        } else if self.transcript_error.is_some() {
+            Some(Notice::Transcript)
+        } else if self.background_error.is_some() {
+            Some(Notice::Background)
+        } else {
+            None
+        }
+    }
+
+    /// Lets a notice leave the screen once it has had its time there.
+    ///
+    /// These lines are about a moment that has passed: an image that would not
+    /// go, a draft that could not be written. Left standing, they say the
+    /// overlay is still in trouble long after it is not — and the next thing
+    /// the user does is work around a problem that was over minutes ago.
+    ///
+    /// A lost connection is not a moment but a state, so it is left alone: it
+    /// goes when it is mended, not when it has been read.
+    pub fn expire_notice(&mut self) {
+        let Some(notice) = self.visible_notice() else {
+            self.notice_shown = None;
+            return;
+        };
+        if matches!(notice, Notice::Connection) {
+            self.notice_shown = None;
+            return;
+        }
+        let showing = self.visible_error().unwrap_or_default().to_owned();
+        match &self.notice_shown {
+            Some((shown, since)) if *shown == showing => {
+                if since.elapsed() < NOTICE_LINGER {
+                    return;
+                }
+                match notice {
+                    Notice::Send => self.send_error = None,
+                    Notice::Transcript => self.transcript_error = None,
+                    Notice::Background => self.background_error = None,
+                    Notice::Connection => {}
+                }
+                self.notice_shown = None;
+            }
+            _ => self.notice_shown = Some((showing, Instant::now())),
+        }
     }
 
     fn reconcile_user(&mut self, mut message: Message) -> usize {

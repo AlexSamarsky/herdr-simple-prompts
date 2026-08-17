@@ -1,4 +1,4 @@
-use herdr_simple_prompts::app::{AppEvent, AppState};
+use herdr_simple_prompts::app::{AppEvent, AppState, NOTICE_LINGER};
 use herdr_simple_prompts::composer::{ComposerAccess, NativeComposerState};
 use herdr_simple_prompts::editor::{Editor, EditorSnapshot, EditorSubmission};
 use herdr_simple_prompts::history::{PersistedPresentation, VisibleHistoryRecord, VisibleRole};
@@ -964,6 +964,73 @@ fn occupied_unknown_and_source_close_are_never_ready() {
     app.source_pane_closed();
     assert_eq!(app.native_composer, NativeComposerState::Unknown);
     assert_eq!(app.composer_access(), ComposerAccess::Unknown);
+}
+
+/// A notice is about a moment that has passed. Left standing it says the
+/// overlay is still in trouble long after it is not — one was seen holding the
+/// error line for three minutes after the removal it complained about.
+#[test]
+fn a_notice_leaves_the_screen_once_it_has_had_its_time() {
+    let mut app = AppState {
+        background_error: Some("remove image: the image did not go".into()),
+        ..AppState::default()
+    };
+
+    app.expire_notice();
+    assert_eq!(
+        app.visible_error(),
+        Some("remove image: the image did not go"),
+        "it is there to be read first"
+    );
+
+    app.notice_shown = app
+        .notice_shown
+        .map(|(shown, since)| (shown, since - NOTICE_LINGER));
+    app.expire_notice();
+
+    assert_eq!(app.visible_error(), None, "and then it goes on its own");
+}
+
+/// A lost connection is not a moment but a state: it goes when it is mended,
+/// not when it has been read.
+#[test]
+fn a_lost_connection_stays_on_screen() {
+    let mut app = AppState {
+        connection_error: Some("source agent session changed".into()),
+        ..AppState::default()
+    };
+
+    for _ in 0..2 {
+        app.expire_notice();
+        app.notice_shown = app
+            .notice_shown
+            .map(|(shown, since)| (shown, since - NOTICE_LINGER));
+    }
+
+    assert_eq!(app.visible_error(), Some("source agent session changed"));
+}
+
+/// A second thing going wrong is a second notice, and it gets its own time
+/// rather than inheriting what is left of the first one's.
+#[test]
+fn a_new_notice_starts_its_own_clock() {
+    let mut app = AppState {
+        background_error: Some("history: no space left on device".into()),
+        ..AppState::default()
+    };
+    app.expire_notice();
+    app.notice_shown = app
+        .notice_shown
+        .map(|(shown, since)| (shown, since - NOTICE_LINGER));
+
+    app.background_error = Some("draft: no space left on device".into());
+    app.expire_notice();
+
+    assert_eq!(
+        app.visible_error(),
+        Some("draft: no space left on device"),
+        "the newer line is not swept away by the older one's clock"
+    );
 }
 
 /// A draft or journal write failure must not be shown as a send failure: the
