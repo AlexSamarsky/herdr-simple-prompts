@@ -92,3 +92,29 @@ fn preserves_native_compact_paste_marker_exactly() {
         [ConversationEvent::User(message)] if message.text == text
     ));
 }
+
+#[test]
+fn keeps_prompts_queued_while_the_agent_works() {
+    let mut adapter = ClaudeAdapter::default();
+    let events = ingest_fixture(&mut adapter, "tests/fixtures/claude/queued.jsonl");
+
+    let ConversationEvent::User(first) = &events[0] else {
+        panic!("expected the native prompt first");
+    };
+    assert_eq!(first.text, "start the audit");
+    assert!(matches!(&events[1], ConversationEvent::Final(message)
+            if message.text == "Reading the files now."));
+    let ConversationEvent::User(queued) = &events[2] else {
+        panic!("expected the queued prompt");
+    };
+    assert_eq!(queued.text, "[Image #3] look at this too");
+    assert_eq!(queued.attachments.len(), 1);
+    assert_eq!(queued.timestamp_ms, Some(1_786_528_860_000));
+    assert!(matches!(&events[3], ConversationEvent::User(message)
+            if message.text == "and stop after that" && message.attachments.is_empty()));
+    assert_eq!(events.len(), 4, "task notifications must stay hidden");
+    assert!(matches!(
+        adapter.finalize_pending(),
+        Some(ConversationEvent::Final(message)) if message.text == "Both handled."
+    ));
+}
