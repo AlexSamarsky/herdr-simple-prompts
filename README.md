@@ -140,6 +140,11 @@ terminal widget.
   row shows the prompt's local `DD.MM.YYYY HH:MM` timestamp in undimmed gray,
   and one blank gray row remains below the text. There is no `YOU` label. Legacy
   records without a valid timestamp keep the top row blank.
+- A prompt typed while Claude Code is still working is queued rather than sent,
+  and Claude Code stores it as a queued command instead of a user record. Such a
+  prompt appears in its queued position with its images, exactly like any other
+  prompt. Queued commands nobody typed, background task notifications among
+  them, stay hidden.
 - Each final answer begins with its local `DD.MM.YYYY HH:MM` timestamp on one
   undimmed gray, unboxed row on the normal terminal surface, followed
   immediately by the styled answer text. There is no `ANSWER` label or answer

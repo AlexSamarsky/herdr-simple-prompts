@@ -25,13 +25,7 @@ impl ClaudeAdapter {
     }
 
     pub fn ingest_value(&mut self, line_number: u64, record: &Value) -> Vec<ConversationEvent> {
-        if truthy(record, "isSidechain")
-            || truthy(record, "isMeta")
-            || !matches!(
-                record.get("type").and_then(Value::as_str),
-                Some("user" | "assistant")
-            )
-        {
+        if truthy(record, "isSidechain") || truthy(record, "isMeta") {
             return Vec::new();
         }
         match record.get("type").and_then(Value::as_str) {
@@ -40,6 +34,7 @@ impl ClaudeAdapter {
                 self.parse_assistant(line_number, record);
                 Vec::new()
             }
+            Some("attachment") => self.parse_queued_prompt(line_number, record),
             _ => Vec::new(),
         }
     }
@@ -55,6 +50,39 @@ impl ClaudeAdapter {
         if contains_block(content, "tool_result") {
             return Vec::new();
         }
+        self.emit_user(line_number, record, content)
+    }
+
+    // A prompt typed while the agent is working never reaches the transcript as
+    // a `user` record. Claude Code stores it once, as a `queued_command`
+    // attachment holding the same blocks the model was given, so this is the
+    // only place those prompts can be read from. Queued commands the person did
+    // not type - a background task notification, for one - stay hidden.
+    fn parse_queued_prompt(&mut self, line_number: u64, record: &Value) -> Vec<ConversationEvent> {
+        let Some(attachment) = record.get("attachment") else {
+            return Vec::new();
+        };
+        if attachment.get("type").and_then(Value::as_str) != Some("queued_command")
+            || attachment.get("commandMode").and_then(Value::as_str) != Some("prompt")
+            || !matches!(
+                attachment.pointer("/origin/kind").and_then(Value::as_str),
+                None | Some("human")
+            )
+        {
+            return Vec::new();
+        }
+        let Some(prompt) = attachment.get("prompt") else {
+            return Vec::new();
+        };
+        self.emit_user(line_number, record, prompt)
+    }
+
+    fn emit_user(
+        &mut self,
+        line_number: u64,
+        record: &Value,
+        content: &Value,
+    ) -> Vec<ConversationEvent> {
         let text = visible_text(content);
         let attachments = image_attachments(content, line_number);
         if text.trim().is_empty() && attachments.is_empty() {
