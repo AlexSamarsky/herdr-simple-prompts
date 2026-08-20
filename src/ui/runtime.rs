@@ -284,7 +284,7 @@ fn spawn_lifecycle_worker(
 fn source_pane_is_gone(client: &HerdrClient, source_pane: &str) -> bool {
     matches!(
         client.agent_get(source_pane),
-        Err(error) if error.is_pane_not_found()
+        Err(error) if error.is_pane_not_found() || error.is_agent_not_found()
     )
 }
 
@@ -791,6 +791,44 @@ mod tests {
                 "message": "timed out waiting for event match"
             })),
             Err(serde_json::json!({"code": "pane_not_found", "message": "pane missing"})),
+        ]);
+        let client = HerdrClient::connect(&socket).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = sync_channel(1);
+        let worker = spawn_lifecycle_worker(Arc::clone(&stop), event_tx, client, "w1:p1".into());
+
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            RuntimeEvent::SourcePaneClosed
+        ));
+        worker.join().unwrap();
+        let methods = [
+            request_rx.recv().unwrap()["method"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            request_rx.recv().unwrap()["method"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ];
+        assert_eq!(methods, ["events.wait", "agent.get"]);
+
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_worker_detects_agent_not_found_after_wait_timeout() {
+        let (directory, socket, request_rx, server) = lifecycle_sequence_server(vec![
+            Err(serde_json::json!({
+                "code": "timeout",
+                "message": "timed out waiting for event match"
+            })),
+            Err(serde_json::json!({
+                "code": "agent_not_found",
+                "message": "agent missing"
+            })),
         ]);
         let client = HerdrClient::connect(&socket).unwrap();
         let stop = Arc::new(AtomicBool::new(false));

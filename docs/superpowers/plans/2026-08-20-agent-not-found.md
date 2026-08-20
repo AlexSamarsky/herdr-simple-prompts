@@ -16,7 +16,7 @@
 - Modify: `tests/herdr_client.rs`
 - Modify: `src/herdr/client.rs`
 
-- [ ] Add a regression test proving `agent_not_found` is recognized and is not confused with `pane_not_found`:
+- [x] Add a regression test proving `agent_not_found` is recognized and is not confused with `pane_not_found`:
 
 ```rust
 #[test]
@@ -33,13 +33,13 @@ fn agent_not_found_is_classified_from_the_exact_herdr_api_code() {
 }
 ```
 
-- [ ] Run the focused test and confirm RED because `is_agent_not_found` does not exist:
+- [x] Run the focused test and confirm RED because `is_agent_not_found` does not exist:
 
 ```bash
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo test --locked --test herdr_client agent_not_found_is_classified_from_the_exact_herdr_api_code
 ```
 
-- [ ] Add the exact classifier next to `is_pane_not_found`:
+- [x] Add the exact classifier next to `is_pane_not_found`:
 
 ```rust
 pub fn is_agent_not_found(&self) -> bool {
@@ -47,7 +47,7 @@ pub fn is_agent_not_found(&self) -> bool {
 }
 ```
 
-- [ ] Re-run the focused test and confirm GREEN.
+- [x] Re-run the focused test and confirm GREEN.
 
 ## Task 2: Treat `agent_not_found` as a terminal missing source
 
@@ -57,21 +57,21 @@ pub fn is_agent_not_found(&self) -> bool {
 - Modify: `src/state.rs`
 - Modify: `src/toggle.rs`
 
-- [ ] Add integration regressions proving that `agent_not_found`:
+- [x] Add integration regressions proving that `agent_not_found`:
   - removes a saved namespace and its scoped state during startup validation;
   - removes only the exact stale overlay mapping during recovery;
   - is not generalized to unrelated/transient error codes.
 
-- [ ] Add a runtime unit regression proving that the lifecycle worker emits `SourcePaneClosed` when its post-timeout `agent.get` probe returns `agent_not_found`.
+- [x] Add a runtime unit regression proving that the lifecycle worker emits `SourcePaneClosed` when its post-timeout `agent.get` probe returns `agent_not_found`.
 
-- [ ] Run the new focused tests and confirm RED because the stale source is retained or the close event is not emitted:
+- [x] Run the new focused tests and confirm RED because the stale source is retained or the close event is not emitted:
 
 ```bash
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo test --locked --test toggle_state agent_not_found
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo test --locked --lib lifecycle_worker_detects_agent_not_found
 ```
 
-- [ ] Extend only the existing `agent.get` missing-source guards:
+- [x] Extend only the existing `agent.get` missing-source guards:
 
 ```rust
 Err(error) if error.is_pane_not_found() || error.is_agent_not_found() => { /* existing cleanup */ }
@@ -83,9 +83,9 @@ Apply that guard in:
 - stale-overlay source recovery in `toggle`
 - `source_pane_is_gone`
 
-- [ ] Re-run the focused tests and confirm GREEN.
+- [x] Re-run the focused tests and confirm GREEN.
 
-- [ ] Run the affected integration and library test targets:
+- [x] Run the affected integration and library test targets:
 
 ```bash
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo test --locked --test herdr_client
@@ -103,26 +103,26 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 - Review: `tests/herdr_client.rs`
 - Review: `tests/toggle_state.rs`
 
-- [ ] Review the diff against `docs/superpowers/specs/2026-08-20-agent-not-found-design.md`, checking that no `pane.get` behavior or ordinary identity lookup changed.
+- [x] Review the diff against `docs/superpowers/specs/2026-08-20-agent-not-found-design.md`, checking that no `pane.get` behavior or ordinary identity lookup changed.
 
-- [ ] Run formatting and lint gates:
+- [x] Run formatting and lint gates:
 
 ```bash
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-- [ ] Run the complete test and release-build gates:
+- [x] Run the complete test and release-build gates:
 
 ```bash
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo test --locked --all-targets --all-features
 CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true cargo build --locked --release
 ```
 
-- [ ] Build the linked repository target so the installed local Herdr plugin starts the fixed binary:
+- [x] Build the linked repository target so the installed local Herdr plugin starts the fixed binary:
 
 ```bash
-CARGO_NET_OFFLINE=true cargo build --locked --release
+CARGO_TARGET_DIR=/Users/samarskiy_a_s/projects/own_projects/herdr_simple_prompts/target CARGO_NET_OFFLINE=true cargo build --locked --release
 ```
 
-- [ ] Confirm the working tree contains only the intended source, test, spec, and plan changes, then commit the implementation with a plain-prose message.
+- [x] Confirm the working tree contains only the intended source, test, spec, and plan changes, then commit the implementation with a plain-prose message.

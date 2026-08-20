@@ -29,6 +29,10 @@ impl HerdrError {
     pub fn is_pane_not_found(&self) -> bool {
         self.api_code() == Some("pane_not_found")
     }
+
+    pub fn is_agent_not_found(&self) -> bool {
+        self.api_code() == Some("agent_not_found")
+    }
 }
 
 impl fmt::Display for HerdrError {

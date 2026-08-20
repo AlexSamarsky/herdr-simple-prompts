@@ -66,6 +66,19 @@ fn pane_not_found_is_classified_from_the_exact_herdr_api_code() {
 }
 
 #[test]
+fn agent_not_found_is_classified_from_the_exact_herdr_api_code() {
+    let fake = support::FakeHerdr::error("agent_not_found", "agent not found");
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    let error = client
+        .call("agent.get", serde_json::json!({"target":"missing"}))
+        .unwrap_err();
+
+    assert!(error.is_agent_not_found());
+    assert!(!error.is_pane_not_found());
+}
+
+#[test]
 fn zoomed_open_targets_the_exact_source_pane_without_workspace_context() {
     let fake = support::FakeHerdr::start(|request| {
         assert_eq!(request["method"], "plugin.pane.open");
