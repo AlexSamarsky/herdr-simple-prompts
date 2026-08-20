@@ -43,11 +43,18 @@ Confirm the binding exists, then reload the configuration:
 herdr server reload-config
 ```
 
+An already registered Codex pane needs no hardcoded session identifier. Simple
+Prompts uses the id-based native session metadata reported by Herdr, resolves
+the one matching local transcript, and supports both legacy `event_msg` and
+current `response_item/message` conversation records.
+
 If the plugin action log reports `pane_not_found` for a removed Simple Prompts
 pane, press `prefix+m` again: the mapped source is validated, only the stale
 source/plugin pair is removed, and a replacement view is targeted at that source
 in the same invocation. Temporary permission, transport, or timeout errors keep
-the mapping for a later retry.
+the mapping for a later retry. A temporary `agent_not_found` also keeps the
+mapping when the source pane still exists, so `prefix+m` can close the existing
+view and return focus to that source.
 
 ## An image is not attached
 

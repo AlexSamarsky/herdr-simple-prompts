@@ -1,0 +1,8 @@
+{"timestamp":"2026-08-20T17:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"}],"id":"current-user-1"}}
+{"timestamp":"2026-08-20T17:00:01Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"hidden developer context"}],"id":"current-developer-1"}}
+{"timestamp":"2026-08-20T17:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"hidden progress"}],"id":"current-commentary-1"}}
+{"timestamp":"2026-08-20T17:00:03Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"hidden reasoning"}]}}
+{"timestamp":"2026-08-20T17:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","name":"hidden_tool","call_id":"hidden-call","input":"{}"}}
+{"timestamp":"2026-08-20T17:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first answer"}],"id":"current-final-1"}}
+{"timestamp":"2026-08-20T17:00:06Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second"},{"type":"input_image","image_url":"file:///unverified.png"},{"type":"input_text","text":"prompt"}],"id":"current-user-2"}}
+{"timestamp":"2026-08-20T17:00:07Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"second"},{"type":"output_text","text":"answer"}],"id":"current-final-2"}}

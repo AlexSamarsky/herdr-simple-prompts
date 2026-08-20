@@ -395,8 +395,17 @@ impl StateStore {
                     }
                     Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
                 },
-                Err(error) if error.is_pane_not_found() || error.is_agent_not_found() => {
+                Err(error) if error.is_pane_not_found() => {
                     self.remove_pane_state(&namespace.source_pane)?;
+                }
+                Err(error) if error.is_agent_not_found() => {
+                    match client.pane_get(&namespace.source_pane) {
+                        Ok(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
+                        Err(error) if error.is_pane_not_found() => {
+                            self.remove_pane_state(&namespace.source_pane)?;
+                        }
+                        Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
+                    }
                 }
                 Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
             }

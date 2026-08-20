@@ -60,3 +60,34 @@ fn preserves_native_compact_paste_marker_exactly() {
         ConversationEvent::User(message) if message.text == text
     ));
 }
+
+#[test]
+fn parses_current_response_items_and_filters_internal_content() {
+    let events = parse_fixture("tests/fixtures/codex/response_items.jsonl");
+
+    assert_eq!(events.len(), 4);
+    assert!(matches!(
+        &events[0],
+        ConversationEvent::User(message)
+            if message.stable_id == "current-user-1"
+                && message.text == "first prompt"
+                && message.timestamp_ms == Some(1_787_245_200_000)
+    ));
+    assert!(matches!(
+        &events[1],
+        ConversationEvent::Final(message)
+            if message.stable_id == "current-final-1" && message.text == "first answer"
+    ));
+    assert!(matches!(
+        &events[2],
+        ConversationEvent::User(message)
+            if message.stable_id == "current-user-2"
+                && message.text == "second\nprompt"
+                && message.attachments.is_empty()
+    ));
+    assert!(matches!(
+        &events[3],
+        ConversationEvent::Final(message)
+            if message.stable_id == "current-final-2" && message.text == "second\nanswer"
+    ));
+}

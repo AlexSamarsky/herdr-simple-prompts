@@ -626,32 +626,61 @@ fn source_disappearing_during_agent_probe_removes_only_the_stale_mapping() {
 }
 
 #[test]
-fn agent_not_found_during_agent_probe_removes_only_the_stale_mapping() {
-    let directory = test_state_directory("toggle-agent-not-found");
+fn agent_not_found_for_a_live_source_preserves_the_stale_mapping() {
+    let directory = test_state_directory("toggle-agent-not-found-live-pane");
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
     store.save_overlay("w1:p1", "w1:stale").unwrap();
-    store.save_overlay("w1:p2", "w1:other").unwrap();
     let fake = support::ScriptedHerdr::start_responses(vec![
         Err(json!({"code":"pane_not_found","message":"overlay missing"})),
         Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1","workspace_id":"w1"}})),
-        Err(json!({"code":"agent_not_found","message":"source agent missing"})),
+        Err(json!({"code":"agent_not_found","message":"agent unavailable"})),
     ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
-    let error = toggle(&client, &store, "w1:stale").unwrap_err();
+    assert!(toggle(&client, &store, "w1:stale").is_err());
 
-    assert!(
-        error
-            .to_string()
-            .contains("source pane w1:p1 no longer exists")
-    );
-    assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
     assert_eq!(
-        store.overlay_for_source("w1:p2").unwrap().as_deref(),
-        Some("w1:other")
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:stale")
     );
     assert_eq!(fake.requests().len(), 3);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn validation_keeps_a_live_sources_overlay_closable_after_agent_not_found() {
+    let directory = test_state_directory("toggle-live-source-agent-gap");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    store.save_overlay("w1:p1", "w1:p9").unwrap();
+    write_namespace(&directory, "w1:p1", "session-1", 1_000, None);
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({"code":"agent_not_found","message":"agent unavailable"})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p1"}})),
+        Ok(json!({"type":"pane_info","pane":{"pane_id":"w1:p9"}})),
+        Ok(json!({"type":"plugin_pane_closed"})),
+        Ok(json!({"type":"pane_focused"})),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    store.validate_saved_namespaces(&client, 5_000).unwrap();
+    toggle(&client, &store, "w1:p9").unwrap();
+
+    assert!(store.overlay_for_source("w1:p1").unwrap().is_none());
+    assert_eq!(
+        fake.requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "agent.get",
+            "pane.get",
+            "pane.get",
+            "plugin.pane.close",
+            "pane.focus"
+        ]
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -876,15 +905,55 @@ fn namespace_validation_removes_state_only_for_proven_not_found() {
 }
 
 #[test]
-fn namespace_validation_removes_state_for_agent_not_found() {
-    let directory = test_state_directory("namespace-agent-not-found");
+fn namespace_validation_preserves_state_for_agent_not_found_in_a_live_pane() {
+    let directory = test_state_directory("namespace-agent-not-found-live-pane");
     let _ = std::fs::remove_dir_all(&directory);
     let store = StateStore::at(&directory);
     let journal = create_scoped_state(&store, &directory, "w1:p1", "session-1");
-    let fake = support::ScriptedHerdr::start_responses(vec![Err(json!({
-        "code": "agent_not_found",
-        "message": "agent missing"
-    }))]);
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({
+            "code": "agent_not_found",
+            "message": "agent unavailable"
+        })),
+        Ok(json!({"type": "pane_info", "pane": {"pane_id": "w1:p1"}})),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    store.validate_saved_namespaces(&client, 5_000).unwrap();
+
+    let namespace: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(namespace_path(&directory, "w1:p1")).unwrap())
+            .unwrap();
+    assert_eq!(namespace["orphaned_since_ms"], 5_000);
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:p9")
+    );
+    assert!(directory.join("draft-w1_p1.json").exists());
+    assert!(journal.exists());
+    assert_eq!(
+        fake.requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["agent.get", "pane.get"]
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn namespace_validation_removes_state_when_agent_and_pane_are_missing() {
+    let directory = test_state_directory("namespace-agent-and-pane-missing");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    let journal = create_scoped_state(&store, &directory, "w1:p1", "session-1");
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({
+            "code": "agent_not_found",
+            "message": "agent unavailable"
+        })),
+        Err(json!({"code": "pane_not_found", "message": "pane missing"})),
+    ]);
     let client = HerdrClient::connect(fake.socket_path()).unwrap();
 
     store.validate_saved_namespaces(&client, 5_000).unwrap();
@@ -893,6 +962,53 @@ fn namespace_validation_removes_state_for_agent_not_found() {
     assert!(!directory.join("draft-w1_p1.json").exists());
     assert!(!journal.exists());
     assert!(!namespace_path(&directory, "w1:p1").exists());
+    assert_eq!(
+        fake.requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["agent.get", "pane.get"]
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn namespace_validation_preserves_state_when_the_pane_probe_is_transiently_unavailable() {
+    let directory = test_state_directory("namespace-agent-and-pane-transient");
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = StateStore::at(&directory);
+    let journal = create_scoped_state(&store, &directory, "w1:p1", "session-1");
+    let fake = support::ScriptedHerdr::start_responses(vec![
+        Err(json!({
+            "code": "agent_not_found",
+            "message": "agent unavailable"
+        })),
+        Err(json!({
+            "code": "temporarily_unavailable",
+            "message": "pane retry later"
+        })),
+    ]);
+    let client = HerdrClient::connect(fake.socket_path()).unwrap();
+
+    store.validate_saved_namespaces(&client, 5_000).unwrap();
+
+    let namespace: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(namespace_path(&directory, "w1:p1")).unwrap())
+            .unwrap();
+    assert_eq!(namespace["orphaned_since_ms"], 5_000);
+    assert_eq!(
+        store.overlay_for_source("w1:p1").unwrap().as_deref(),
+        Some("w1:p9")
+    );
+    assert!(directory.join("draft-w1_p1.json").exists());
+    assert!(journal.exists());
+    assert_eq!(
+        fake.requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["agent.get", "pane.get"]
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 

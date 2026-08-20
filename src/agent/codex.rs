@@ -23,28 +23,73 @@ impl CodexAdapter {
     }
 
     pub fn ingest_value(&mut self, line_number: u64, record: &Value) -> Option<ConversationEvent> {
-        if record.get("type").and_then(Value::as_str) != Some("event_msg")
-            || truthy(record, "is_subagent")
-            || record.get("subagent_id").is_some()
-        {
+        if truthy(record, "is_subagent") || record.get("subagent_id").is_some() {
             return None;
         }
         let payload = record.get("payload")?;
         if truthy(payload, "is_subagent") || payload.get("subagent_id").is_some() {
             return None;
         }
-        match payload.get("type").and_then(Value::as_str) {
-            Some("user_message") => {
+        match (
+            record.get("type").and_then(Value::as_str),
+            payload.get("type").and_then(Value::as_str),
+        ) {
+            (Some("event_msg"), Some("user_message")) => {
                 parse_user(line_number, record, payload).map(ConversationEvent::User)
             }
-            Some("agent_message")
+            (Some("event_msg"), Some("agent_message"))
                 if payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
             {
                 parse_final(line_number, record, payload).map(ConversationEvent::Final)
             }
+            (Some("response_item"), Some("message")) => {
+                parse_response_message(line_number, record, payload)
+            }
             _ => None,
         }
     }
+}
+
+fn parse_response_message(
+    line_number: u64,
+    record: &Value,
+    payload: &Value,
+) -> Option<ConversationEvent> {
+    match payload.get("role").and_then(Value::as_str) {
+        Some("user") => response_text(payload, "input_text").map(|text| {
+            ConversationEvent::User(Message {
+                stable_id: stable_id(line_number, payload),
+                text,
+                presentation: crate::style::MessagePresentation::Plain,
+                attachments: Vec::new(),
+                timestamp_ms: record_timestamp_ms(record),
+            })
+        }),
+        Some("assistant")
+            if payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
+        {
+            response_text(payload, "output_text").map(|text| {
+                ConversationEvent::Final(Message::text(
+                    stable_id(line_number, payload),
+                    text,
+                    record_timestamp_ms(record),
+                ))
+            })
+        }
+        _ => None,
+    }
+}
+
+fn response_text(payload: &Value, expected_type: &str) -> Option<String> {
+    let parts = payload
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some(expected_type))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 fn parse_user(line_number: u64, record: &Value, payload: &Value) -> Option<Message> {

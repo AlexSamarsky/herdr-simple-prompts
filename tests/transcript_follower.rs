@@ -184,3 +184,43 @@ fn blank_transcript_lines_still_advance_the_line_counter() {
         .expect("the malformed record should be reported");
     assert_eq!(line, 4, "line number must match the transcript file");
 }
+
+#[test]
+fn current_codex_history_is_backfilled_then_new_messages_are_tailed() {
+    let file = support::GrowingFile::new();
+    file.append(&std::fs::read_to_string("tests/fixtures/codex/response_items.jsonl").unwrap());
+    let mut follower = TranscriptFollower::new(file.path(), Box::new(CodexAdapter)).unwrap();
+
+    let initial = follower.poll_initial(AgentStatus::Done).unwrap();
+
+    assert_eq!(
+        initial
+            .iter()
+            .filter(|event| matches!(event, FollowerEvent::Conversation(_)))
+            .count(),
+        4
+    );
+
+    file.append(
+        &serde_json::json!({
+            "timestamp": "2026-08-20T17:01:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "appended prompt"}],
+                "id": "current-user-3"
+            }
+        })
+        .to_string(),
+    );
+    file.append("\n");
+
+    let appended = follower.poll().unwrap();
+    assert!(matches!(
+        appended.as_slice(),
+        [FollowerEvent::Conversation(
+            herdr_simple_prompts::model::ConversationEvent::User(message)
+        )] if message.text == "appended prompt"
+    ));
+}

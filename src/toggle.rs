@@ -160,7 +160,7 @@ fn recover_stale_overlay_context(
     }
     let identity_response = match client.agent_get(source) {
         Ok(response) => response,
-        Err(error) if error.is_pane_not_found() || error.is_agent_not_found() => {
+        Err(error) if error.is_pane_not_found() => {
             return remove_missing_source_mapping(state, source);
         }
         Err(error) => return Err(AppError::new("agent", error.to_string())),

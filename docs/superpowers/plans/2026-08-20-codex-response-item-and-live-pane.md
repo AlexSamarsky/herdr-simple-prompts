@@ -35,7 +35,7 @@
 - Invoke `superpowers:requesting-code-review` after the parser batch is green.
 - Reserve `superpowers:verification-before-completion` for the final repository gates.
 
-- [ ] **Step 1: Add a privacy-safe current-format fixture**
+- [x] **Step 1: Add a privacy-safe current-format fixture**
 
 Create `tests/fixtures/codex/response_items.jsonl` with these complete records:
 
@@ -50,7 +50,7 @@ Create `tests/fixtures/codex/response_items.jsonl` with these complete records:
 {"timestamp":"2026-08-20T17:00:07Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"second"},{"type":"output_text","text":"answer"}],"id":"current-final-2"}}
 ```
 
-- [ ] **Step 2: Add the failing adapter regression**
+- [x] **Step 2: Add the failing adapter regression**
 
 Append this test to `tests/codex_parser.rs`:
 
@@ -87,7 +87,7 @@ fn parses_current_response_items_and_filters_internal_content() {
 }
 ```
 
-- [ ] **Step 3: Run the focused test and confirm RED**
+- [x] **Step 3: Run the focused test and confirm RED**
 
 Run:
 
@@ -97,7 +97,7 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 
 Expected: FAIL because the adapter returns zero events for `response_item/message` records.
 
-- [ ] **Step 4: Implement the minimal dual-layout parser**
+- [x] **Step 4: Implement the minimal dual-layout parser**
 
 Refactor `CodexAdapter::ingest_value` and add the response-item helpers in `src/agent/codex.rs`:
 
@@ -172,7 +172,7 @@ fn response_text(payload: &Value, expected_type: &str) -> Option<String> {
 }
 ```
 
-- [ ] **Step 5: Run all Codex parser tests and confirm GREEN**
+- [x] **Step 5: Run all Codex parser tests and confirm GREEN**
 
 Run:
 
@@ -182,7 +182,7 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 
 Expected: all legacy and current-format parser tests pass.
 
-- [ ] **Step 6: Review and commit the parser batch**
+- [x] **Step 6: Review and commit the parser batch**
 
 Invoke `superpowers:requesting-code-review`, address any concrete findings, then run `cargo fmt --check` and commit:
 
@@ -201,7 +201,7 @@ git commit -m "parse current Codex transcript messages"
 - Invoke `superpowers:requesting-code-review` after the follower regression is green.
 - Reserve `superpowers:verification-before-completion` for the final repository gates.
 
-- [ ] **Step 1: Add the initial-backfill and append regression**
+- [x] **Step 1: Add the initial-backfill and append regression**
 
 Append this test to `tests/transcript_follower.rs`:
 
@@ -247,7 +247,7 @@ fn current_codex_history_is_backfilled_then_new_messages_are_tailed() {
 }
 ```
 
-- [ ] **Step 2: Run the focused follower test**
+- [x] **Step 2: Run the focused follower test**
 
 Run:
 
@@ -257,7 +257,7 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 
 Expected: PASS with the Task 1 parser in place. This is a regression test for the existing follower contract, so no new production code is expected.
 
-- [ ] **Step 3: Review and commit the follower regression**
+- [x] **Step 3: Review and commit the follower regression**
 
 Invoke `superpowers:requesting-code-review`, address any concrete findings, then commit:
 
@@ -279,7 +279,7 @@ git commit -m "cover current Codex history following"
 - Invoke `superpowers:requesting-code-review` after the lifecycle batch is green.
 - Reserve `superpowers:verification-before-completion` for the final repository gates.
 
-- [ ] **Step 1: Replace the stale agent-not-found expectations with live-pane regressions**
+- [x] **Step 1: Replace the stale agent-not-found expectations with live-pane regressions**
 
 In `tests/toggle_state.rs`, replace `namespace_validation_removes_state_for_agent_not_found` with a test that scripts `agent.get -> agent_not_found` followed by `pane.get -> pane_info`, then asserts that the overlay, draft, journal, and namespace remain and `orphaned_since_ms` is set to `5_000`.
 
@@ -396,7 +396,7 @@ fn validation_keeps_a_live_sources_overlay_closable_after_agent_not_found() {
 }
 ```
 
-- [ ] **Step 2: Replace the lifecycle worker's agent-oriented test**
+- [x] **Step 2: Replace the lifecycle worker's agent-oriented test**
 
 In `src/ui/runtime.rs`, replace `lifecycle_worker_detects_agent_not_found_after_wait_timeout` with `lifecycle_worker_keeps_running_when_the_source_pane_still_exists`. Script `events.wait -> timeout` and `pane.get -> pane_info`, wait until both requests arrive, set the stop flag, join the worker, and assert no `SourcePaneClosed` event was emitted. Update the missed-close test's expected methods to `["events.wait", "pane.get"]`.
 
@@ -440,7 +440,7 @@ fn lifecycle_worker_keeps_running_when_the_source_pane_still_exists() {
 }
 ```
 
-- [ ] **Step 3: Run the new lifecycle regressions and confirm RED**
+- [x] **Step 3: Run the new lifecycle regressions and confirm RED**
 
 Run:
 
@@ -452,7 +452,7 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 
 Expected: at least the namespace, overlay-closing, and lifecycle tests fail against the current cleanup behavior.
 
-- [ ] **Step 4: Preserve namespaces when the agent is absent but the pane is live**
+- [x] **Step 4: Preserve namespaces when the agent is absent but the pane is live**
 
 Replace the combined missing-source guard in `StateStore::validate_saved_namespaces` with:
 
@@ -472,7 +472,7 @@ Err(error) if error.is_agent_not_found() => {
 Err(_) => self.retain_or_expire_orphan(namespace, now_ms)?,
 ```
 
-- [ ] **Step 5: Preserve stale-overlay state on temporary agent loss**
+- [x] **Step 5: Preserve stale-overlay state on temporary agent loss**
 
 In `recover_stale_overlay_context`, narrow the cleanup guard to confirmed pane loss:
 
@@ -486,7 +486,7 @@ let identity_response = match client.agent_get(source) {
 };
 ```
 
-- [ ] **Step 6: Probe the source pane directly in the lifecycle worker**
+- [x] **Step 6: Probe the source pane directly in the lifecycle worker**
 
 Replace `source_pane_is_gone` with:
 
@@ -499,7 +499,7 @@ fn source_pane_is_gone(client: &HerdrClient, source_pane: &str) -> bool {
 }
 ```
 
-- [ ] **Step 7: Run the focused state, toggle, and runtime suites**
+- [x] **Step 7: Run the focused state, toggle, and runtime suites**
 
 Run:
 
@@ -510,7 +510,7 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 
 Expected: all tests pass, including confirmed pane cleanup and temporary-agent preservation.
 
-- [ ] **Step 8: Review and commit the lifecycle batch**
+- [x] **Step 8: Review and commit the lifecycle batch**
 
 Invoke `superpowers:requesting-code-review`, address any concrete findings, then commit:
 
@@ -531,13 +531,13 @@ git commit -m "preserve overlays for live source panes"
 - Invoke `superpowers:requesting-code-review` for the complete diff.
 - Invoke `superpowers:verification-before-completion` before any success claim.
 
-- [ ] **Step 1: Document the implemented contracts**
+- [x] **Step 1: Document the implemented contracts**
 
 In `docs/behavior.md`, state that Codex visible conversation may come from legacy `event_msg` records or current `response_item/message` records, and that only user messages and assistant `final_answer` content are shown. In the pane/session lifecycle table, state that temporary `agent_not_found` preserves state while confirmed pane loss removes it.
 
 In `docs/troubleshooting.md`, add that an already-registered current Codex pane needs no hardcoded session identifier: Simple Prompts resolves its Herdr session metadata and supports the current transcript layout. Explain that `prefix+m` can still close an existing overlay while agent detection is temporarily unavailable.
 
-- [ ] **Step 2: Run formatting, lint, tests, helper tests, and release build**
+- [x] **Step 2: Run formatting, lint, tests, helper tests, and release build**
 
 Run:
 
@@ -551,7 +551,7 @@ CARGO_TARGET_DIR=/private/tmp/herdr-simple-prompts-target CARGO_NET_OFFLINE=true
 
 Expected: every command exits zero with no warnings or failed tests.
 
-- [ ] **Step 3: Build the repository-linked release binary**
+- [x] **Step 3: Build the repository-linked release binary**
 
 Run:
 
@@ -561,7 +561,7 @@ CARGO_TARGET_DIR=/Users/samarskiy_a_s/projects/own_projects/herdr_simple_prompts
 
 Expected: `target/release/herdr-simple-prompts` is rebuilt from the verified source.
 
-- [ ] **Step 4: Reload and perform a sanitized live smoke test**
+- [x] **Step 4: Reload and perform a sanitized live smoke test**
 
 Run `herdr server reload-config`, open Simple Prompts from the current source pane, and verify without printing transcript contents or identifiers that:
 
@@ -569,7 +569,7 @@ Run `herdr server reload-config`, open Simple Prompts from the current source pa
 - `prefix+m` closes the overlay and returns focus to the source;
 - reopening restores the history from the beginning.
 
-- [ ] **Step 5: Complete final review and commit documentation**
+- [x] **Step 5: Complete final review and commit documentation**
 
 Invoke `superpowers:requesting-code-review`, address any concrete findings, invoke `superpowers:verification-before-completion`, mark only completed plan checkboxes, and commit:
 

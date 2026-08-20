@@ -24,6 +24,14 @@ drive rendering, bottom alignment, scrolling, and sticky prompt context, so a
 long answer stays reachable instead of being wrapped a second time by the
 terminal widget.
 
+Codex conversation records are accepted in both the legacy `event_msg` layout
+and the current `response_item/message` layout. In the current layout only user
+`input_text` and assistant `output_text` with `phase = "final_answer"` become
+visible messages. Developer context, assistant commentary, reasoning, tool
+traffic, subagent records, and unknown content items stay hidden. Opening the
+view reads the supported visible history from the beginning, then follows new
+records appended to the same native transcript.
+
 - Each user prompt is a full-width neutral-gray block. Its top gray row carries
   the local `DD.MM.YYYY HH:MM` timestamp in undimmed gray, and one blank gray
   row stays below the text. There is no `YOU` label. Records without a valid
@@ -182,7 +190,12 @@ Retention follows the source pane, not the view:
 | Close only Simple Prompts with `prefix+m` | Keep history and draft for reopening |
 | Close the native source pane | Delete that pane's registry, draft, compact metadata, and history namespace |
 | Reuse a pane for a different native session | Delete the replaced session's state during validation |
+| Herdr temporarily reports `agent_not_found` while the source pane still exists | Keep the namespace and overlay mapping; an open overlay remains closable with `prefix+m` |
 | Source cannot be verified temporarily | Keep its state; remove it on the next invocation after seven continuously unverifiable days |
+
+Pane existence is authoritative for destructive cleanup. An unavailable agent
+record is not treated as proof that its pane was closed; cleanup after that
+error requires a confirming pane lookup.
 
 Before every prompt, interrupt, image mutation, or blocked-input forwarding, the
 plugin verifies that the source pane still holds the original agent kind and
