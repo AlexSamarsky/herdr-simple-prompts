@@ -13,11 +13,19 @@ touches. `prefix+m` switches between the two.
 
 ![Simple Prompts showing an English Codex conversation](assets/simple-prompts.png)
 
-Version 0.1 supports Codex CLI and Claude Code on macOS and Linux.
+Version 0.1 has been tested with these agent versions on macOS and Linux:
+
+| Agent | Tested versions |
+|---|---|
+| Codex CLI | `0.146.0`–`0.148.0` |
+| Claude Code | `2.1.237` |
+
+Newer agent releases may work, but have not yet been verified.
 
 ## Install
 
-You need Herdr 0.7.5+, Rust 1.88+ with Cargo, and Codex CLI or Claude Code.
+You need Herdr 0.7.5+, Rust 1.88+ with Cargo, and either Codex CLI
+`0.146.0`–`0.148.0` or Claude Code `2.1.237`.
 
 ```bash
 herdr plugin install AlexSamarsky/herdr-simple-prompts

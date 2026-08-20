@@ -21,7 +21,7 @@
 - Invoke `superpowers:requesting-code-review` after the README batch.
 - Invoke `superpowers:verification-before-completion` before reporting or publishing the result.
 
-- [ ] **Step 1: Replace the generic support sentence with the tested matrix**
+- [x] **Step 1: Replace the generic support sentence with the tested matrix**
 
 Replace:
 
@@ -42,7 +42,7 @@ Version 0.1 has been tested with these agent versions on macOS and Linux:
 Newer agent releases may work, but have not yet been verified.
 ```
 
-- [ ] **Step 2: Align the installation prerequisite**
+- [x] **Step 2: Align the installation prerequisite**
 
 Replace:
 
@@ -57,7 +57,7 @@ You need Herdr 0.7.5+, Rust 1.88+ with Cargo, and either Codex CLI
 `0.146.0`–`0.148.0` or Claude Code `2.1.237`.
 ```
 
-- [ ] **Step 3: Review the public wording**
+- [x] **Step 3: Review the public wording**
 
 Run:
 
@@ -68,7 +68,7 @@ rg -n "0\\.146|0\\.148|2\\.1\\.237|newer agent releases" README.md
 
 Expected: no whitespace errors; the tested bounds appear only in the support matrix and aligned prerequisite, with one explicit newer-version caveat.
 
-- [ ] **Step 4: Review and commit the documentation batch**
+- [x] **Step 4: Review and commit the documentation batch**
 
 Invoke `superpowers:requesting-code-review`, address concrete findings, then commit only the approved documentation files:
 
