@@ -24,6 +24,13 @@ case "${1:-} ${2:-}" in
   "agent list")
     cat "$FAKE_AGENT_LIST"
     ;;
+  "agent get")
+    jq --arg pane "${3:-}" '
+      .result.agents[]
+      | select(.pane_id == $pane)
+      | {result: {agent: .}}
+    ' "$FAKE_AGENT_LIST"
+    ;;
   "agent read")
     cat "$FAKE_SURFACE_ROOT/${3}.txt"
     ;;
@@ -32,6 +39,42 @@ case "${1:-} ${2:-}" in
     if [ "${FAKE_REPORT_FAIL:-0}" -eq 1 ]; then
       printf 'synthetic report failure\n' >&2
       exit 1
+    fi
+    pane="${3:-}"
+    source=""
+    session_id=""
+    shift 3
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --source)
+          source="${2:-}"
+          shift 2
+          ;;
+        --agent-session-id)
+          session_id="${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ "${FAKE_REPORT_DROP:-0}" -eq 0 ] && [ "$source" = "herdr:codex" ]; then
+      jq --arg pane "$pane" --arg source "$source" --arg session_id "$session_id" '
+        .result.agents |= map(
+          if .pane_id == $pane then
+            .agent_session = {
+              kind: "id",
+              agent: "codex",
+              source: $source,
+              value: $session_id
+            }
+          else
+            .
+          end
+        )
+      ' "$FAKE_AGENT_LIST" >"$FAKE_AGENT_LIST.tmp"
+      mv "$FAKE_AGENT_LIST.tmp" "$FAKE_AGENT_LIST"
     fi
     ;;
   *)
@@ -53,6 +96,7 @@ reset_case() {
   : >"$report_log"
   : >"$output_log"
   unset FAKE_REPORT_FAIL
+  unset FAKE_REPORT_DROP
 }
 
 write_agents() {
@@ -80,6 +124,7 @@ run_helper() {
     FAKE_SURFACE_ROOT="$surface_root" \
     FAKE_REPORT_LOG="$report_log" \
     FAKE_REPORT_FAIL="${FAKE_REPORT_FAIL:-0}" \
+    FAKE_REPORT_DROP="${FAKE_REPORT_DROP:-0}" \
     CODEX_SESSIONS_ROOT="$sessions_root" \
     bash "$repo_root/scripts/register-existing-sessions.sh" \
       >"$output_log" 2>&1
@@ -116,6 +161,7 @@ run_helper
 assert_status 0
 [ "$(wc -l <"$report_log" | tr -d ' ')" -eq 1 ] || fail "expected one report"
 rg -q -- '--agent codex' "$report_log" || fail "report omitted agent kind"
+rg -q -- '--source herdr:codex' "$report_log" || fail "report omitted the native Codex source"
 rg -q -- '--session-start-source resume' "$report_log" || fail "report omitted resume source"
 rg -q -- "--agent-session-id $primary_id" "$report_log" || fail "report omitted recovered id"
 rg -q 'Registered w1:p1' "$output_log" || fail "success message omitted pane"
@@ -177,6 +223,17 @@ export FAKE_REPORT_FAIL=1
 run_helper
 assert_status 1
 rg -q 'Herdr rejected the session report' "$output_log" || fail "missing report failure reason"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents "$(unregistered_agent_json codex)"
+write_surface "w1:p1" "gpt-5.6-sol xhigh · /repo · weekly 47% left · $primary_id"
+add_transcript "one" "$primary_id.jsonl"
+export FAKE_REPORT_DROP=1
+run_helper
+assert_status 1
+rg -q 'Herdr did not retain the session report' "$output_log" || fail "missing dropped report reason"
+! rg -q 'Registered w1:p1' "$output_log" || fail "dropped report claimed success"
 assert_no_session_ids_in_output
 
 printf 'existing-session helper tests passed\n'

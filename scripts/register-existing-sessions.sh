@@ -83,16 +83,31 @@ while IFS=$'\t' read -r pane agent; do
     continue
   fi
 
-  if "$herdr_bin" pane report-agent-session "$pane" \
-    --source herdr:simple-prompts-existing-sessions \
+  if ! "$herdr_bin" pane report-agent-session "$pane" \
+    --source herdr:codex \
     --agent codex \
     --agent-session-id "$candidate" \
     --session-start-source resume >/dev/null 2>&1; then
-    printf 'Registered %s.\n' "$pane"
-  else
     printf 'Skipped %s: Herdr rejected the session report.\n' "$pane" >&2
     failed=1
+    continue
   fi
+
+  if ! reported_agent="$("$herdr_bin" agent get "$pane" 2>/dev/null)" ||
+    ! printf '%s' "$reported_agent" |
+      "$jq_bin" -e --arg candidate "$candidate" '
+        .result.agent.agent_session
+        | select(.kind == "id")
+        | select(.agent == "codex")
+        | select(.source == "herdr:codex")
+        | select(.value == $candidate)
+      ' >/dev/null 2>&1; then
+    printf 'Skipped %s: Herdr did not retain the session report.\n' "$pane" >&2
+    failed=1
+    continue
+  fi
+
+  printf 'Registered %s.\n' "$pane"
 done <<<"$unregistered"
 
 if [ "$seen" -eq 0 ]; then
