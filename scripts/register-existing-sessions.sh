@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -u
 
+target_pane=""
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != "--pane" ] || [ -z "${2:-}" ]; then
+    printf 'Usage: %s [--pane PANE_ID]\n' "$0" >&2
+    exit 2
+  fi
+  target_pane="$2"
+fi
+
 herdr_bin="${HERDR_BIN:-herdr}"
 jq_bin="${JQ_BIN:-jq}"
 rg_bin="${RG_BIN:-rg}"
@@ -22,8 +31,9 @@ fi
 
 if ! unregistered="$(
   printf '%s' "$agents_json" |
-    "$jq_bin" -r '
+    "$jq_bin" -r --arg target_pane "$target_pane" '
       .result.agents[]
+      | select($target_pane == "" or .pane_id == $target_pane)
       | select(.agent == "codex" or .agent == "claude")
       | select((.agent_session.kind? // "") != "id")
       | [.pane_id, .agent]
@@ -111,7 +121,11 @@ while IFS=$'\t' read -r pane agent; do
 done <<<"$unregistered"
 
 if [ "$seen" -eq 0 ]; then
-  printf 'No unregistered Codex or Claude panes found.\n'
+  if [ -n "$target_pane" ]; then
+    printf 'No recovery needed for %s.\n' "$target_pane"
+  else
+    printf 'No unregistered Codex or Claude panes found.\n'
+  fi
 fi
 
 exit "$failed"

@@ -126,7 +126,7 @@ run_helper() {
     FAKE_REPORT_FAIL="${FAKE_REPORT_FAIL:-0}" \
     FAKE_REPORT_DROP="${FAKE_REPORT_DROP:-0}" \
     CODEX_SESSIONS_ROOT="$sessions_root" \
-    bash "$repo_root/scripts/register-existing-sessions.sh" \
+    bash "$repo_root/scripts/register-existing-sessions.sh" "$@" \
       >"$output_log" 2>&1
   RUN_STATUS=$?
   set -e
@@ -173,6 +173,57 @@ run_helper
 assert_status 0
 [ ! -s "$report_log" ] || fail "already registered pane was reported again"
 rg -q 'No unregistered Codex or Claude panes found' "$output_log" || fail "missing no-op message"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents "{\"result\":{\"agents\":[
+  {\"pane_id\":\"w1:p1\",\"agent\":\"codex\",\"agent_session\":null},
+  {\"pane_id\":\"w1:p2\",\"agent\":\"codex\",\"agent_session\":null}
+]}}"
+write_surface "w1:p1" "gpt-5.6-sol xhigh · /repo · weekly 47% left · $primary_id"
+write_surface "w1:p2" "gpt-5.6-sol xhigh · /other · weekly 47% left · $secondary_id"
+add_transcript "one" "$primary_id.jsonl"
+add_transcript "two" "$secondary_id.jsonl"
+run_helper --pane "w1:p1"
+assert_status 0
+[ "$(wc -l <"$report_log" | tr -d ' ')" -eq 1 ] || fail "selected recovery reported more than once"
+rg -q '^pane report-agent-session w1:p1 ' "$report_log" || fail "selected pane was not reported"
+! rg -q 'w1:p2' "$report_log" || fail "unrelated pane was reported"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents "{\"result\":{\"agents\":[
+  {\"pane_id\":\"w1:p1\",\"agent\":\"codex\",\"agent_session\":{\"kind\":\"id\",\"agent\":\"codex\",\"value\":\"$primary_id\"}},
+  {\"pane_id\":\"w1:p2\",\"agent\":\"codex\",\"agent_session\":null}
+]}}"
+run_helper --pane "w1:p1"
+assert_status 0
+[ ! -s "$report_log" ] || fail "selected registered pane triggered a report"
+rg -q 'No recovery needed for w1:p1' "$output_log" || fail "missing selected registered no-op message"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents '{"result":{"agents":[]}}'
+run_helper --pane "simple-prompts-overlay"
+assert_status 0
+[ ! -s "$report_log" ] || fail "overlay-like pane triggered a report"
+rg -q 'No recovery needed for simple-prompts-overlay' "$output_log" || fail "missing overlay no-op message"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents '{"result":{"agents":[]}}'
+run_helper --pane
+assert_status 2
+[ ! -s "$report_log" ] || fail "missing pane value triggered a report"
+rg -q 'Usage:' "$output_log" || fail "missing usage for absent pane value"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents '{"result":{"agents":[]}}'
+run_helper --unknown "w1:p1"
+assert_status 2
+[ ! -s "$report_log" ] || fail "unknown option triggered a report"
+rg -q 'Usage:' "$output_log" || fail "missing usage for unknown option"
 assert_no_session_ids_in_output
 
 reset_case
