@@ -17,7 +17,7 @@ Version 0.1 has been tested with these agent versions on macOS and Linux:
 
 | Agent | Tested versions |
 |---|---|
-| Codex CLI | `0.146.0`–`0.148.0` |
+| Codex CLI | `0.146.0`–`0.149.0` |
 | Claude Code | `2.1.237` |
 
 Newer agent releases may work, but have not yet been verified.
@@ -25,7 +25,7 @@ Newer agent releases may work, but have not yet been verified.
 ## Install
 
 You need Herdr 0.7.5+, Rust 1.88+ with Cargo, `jq`, and either Codex CLI
-`0.146.0`–`0.148.0` or Claude Code `2.1.237`. The JSON tool supports automatic
+`0.146.0`–`0.149.0` or Claude Code `2.1.237`. The JSON tool supports automatic
 recovery of already-running Codex sessions.
 
 ```bash
