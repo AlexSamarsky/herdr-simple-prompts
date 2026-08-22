@@ -21,6 +21,11 @@ Keep `prefix+m` and make its action command a small wrapper script. The wrapper
 uses only `HERDR_PANE_ID` supplied by Herdr and never embeds a pane or session
 identifier.
 
+Resolve the host CLI from Herdr's authoritative `HERDR_BIN_PATH` rather than
+assuming `herdr` is available in the plugin action `PATH`. Footer matching uses
+the standard `grep` available on supported Unix platforms, so automatic
+recovery has no runtime `rg` dependency.
+
 Before executing the Rust toggle, the wrapper invokes the existing recovery
 helper in a new current-pane mode. That mode inspects only the requested pane:
 
@@ -90,7 +95,7 @@ the current pane on its own.
   overlay passthrough, and the no-toggle-on-recovery-failure boundary.
 - `tests/manifest_contract.rs`: require the action to use the wrapper while the
   pane entrypoint continues to launch the Rust UI binary directly.
-- `README.md`: move `jq` and `rg` from optional recovery-helper tools into the
+- `README.md`: move `jq` from an optional recovery-helper tool into the
   installation prerequisites because current-pane recovery now runs from the
   everyday toggle action.
 - `docs/behavior.md` and `docs/troubleshooting.md`: document automatic
@@ -111,6 +116,8 @@ Test-first coverage will prove:
   reports stop before the toggle and keep session identifiers out of output;
 - missing `HERDR_PANE_ID` stops before both recovery and toggle;
 - the helper's existing all-pane behavior remains unchanged;
+- plugin-action recovery uses `HERDR_BIN_PATH` and standard `grep`, even when
+  neither `herdr` nor `rg` is discoverable in the action `PATH`;
 - the manifest continues to expose `herdr.simple-prompts.toggle` on
   `prefix+m` through the user's existing key binding.
 

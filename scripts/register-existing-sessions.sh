@@ -12,12 +12,12 @@ fi
 
 herdr_bin="${HERDR_BIN:-${HERDR_BIN_PATH:-herdr}}"
 jq_bin="${JQ_BIN:-jq}"
-rg_bin="${RG_BIN:-rg}"
+grep_bin="${GREP_BIN:-grep}"
 sessions_root="${CODEX_SESSIONS_ROOT:-${CODEX_HOME:-$HOME/.codex}/sessions}"
 uuid_pattern='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 footer_pattern="^[[:space:]]*gpt-[A-Za-z0-9._ -]+[[:space:]]*·[[:space:]]*(~|/)[^·]*[[:space:]]*·.*[[:space:]]·[[:space:]]*${uuid_pattern}([[:space:]]*·[^·]+)*[[:space:]]*$"
 
-for required_command in "$herdr_bin" "$jq_bin" "$rg_bin"; do
+for required_command in "$herdr_bin" "$jq_bin" "$grep_bin"; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'Missing required command: %s\n' "$required_command" >&2
     exit 2
@@ -66,8 +66,8 @@ while IFS=$'\t' read -r pane agent; do
   footer_line="$(printf '%s\n' "$surface" | sed '/^[[:space:]]*$/d' | tail -n 1)"
   candidates="$(
     printf '%s\n' "$footer_line" |
-      "$rg_bin" "$footer_pattern" 2>/dev/null |
-      "$rg_bin" -o "$uuid_pattern" 2>/dev/null |
+      "$grep_bin" -E "$footer_pattern" 2>/dev/null |
+      "$grep_bin" -Eo "$uuid_pattern" 2>/dev/null |
       tr '[:upper:]' '[:lower:]' |
       sort -u
   )"

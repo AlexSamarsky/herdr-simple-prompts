@@ -14,7 +14,6 @@ output_log="$fixture_root/output.log"
 primary_id="11111111-1111-4111-8111-111111111111"
 secondary_id="22222222-2222-4222-8222-222222222222"
 host_jq="$(command -v jq)"
-host_rg="$(command -v rg)"
 
 mkdir -p "$fake_bin" "$surface_root" "$sessions_root"
 
@@ -141,7 +140,6 @@ run_helper_with_managed_bin() {
     PATH="/usr/bin:/bin" \
     HERDR_BIN_PATH="$fake_bin/herdr" \
     JQ_BIN="$host_jq" \
-    RG_BIN="$host_rg" \
     FAKE_AGENT_LIST="$agents_file" \
     FAKE_SURFACE_ROOT="$surface_root" \
     FAKE_REPORT_LOG="$report_log" \

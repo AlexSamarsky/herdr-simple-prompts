@@ -24,9 +24,9 @@ Newer agent releases may work, but have not yet been verified.
 
 ## Install
 
-You need Herdr 0.7.5+, Rust 1.88+ with Cargo, `jq`, `rg`, and either Codex CLI
-`0.146.0`–`0.148.0` or Claude Code `2.1.237`. The two command-line tools support
-automatic recovery of already-running Codex sessions.
+You need Herdr 0.7.5+, Rust 1.88+ with Cargo, `jq`, and either Codex CLI
+`0.146.0`–`0.148.0` or Claude Code `2.1.237`. The JSON tool supports automatic
+recovery of already-running Codex sessions.
 
 ```bash
 herdr plugin install AlexSamarsky/herdr-simple-prompts

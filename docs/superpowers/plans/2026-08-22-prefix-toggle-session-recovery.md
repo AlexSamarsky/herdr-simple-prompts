@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing fail-closed recovery algorithm in `scripts/register-existing-sessions.sh`, adding an optional `--pane` selector that preserves its all-pane operator mode. Route the manifest toggle action through a small wrapper that runs selected-pane recovery and executes the existing Rust toggle only after recovery succeeds or proves unnecessary.
 
-**Tech Stack:** Bash 3.2-compatible shell, Herdr 0.7.5 CLI, `jq`, `rg`, Rust manifest contract tests, Cargo verification gates.
+**Tech Stack:** Bash 3.2-compatible shell, Herdr 0.7.5 CLI, `jq`, standard Unix `grep`, Rust manifest contract tests, Cargo verification gates.
 
 ---
 
@@ -18,7 +18,7 @@
 - Create `tests/toggle-with-session-recovery.sh`: prove ordering and fail-closed boundaries with executable fakes.
 - Modify `herdr-plugin.toml`: point only the toggle action at the wrapper; keep the UI pane command unchanged.
 - Modify `tests/manifest_contract.rs`: bind the manifest contract to the wrapper action and direct Rust UI command.
-- Modify `README.md`: make `jq` and `rg` installation prerequisites and describe automatic current-pane recovery.
+- Modify `README.md`: make `jq` an installation prerequisite and describe automatic current-pane recovery.
 - Modify `docs/behavior.md`: define the hotkey recovery and privacy contract.
 - Modify `docs/troubleshooting.md`: replace manual-first guidance with automatic recovery plus bounded fallback diagnostics.
 
@@ -339,8 +339,8 @@ git commit -m "recover Codex sessions before toggle"
 
 - [ ] **Step 1: Update installation prerequisites and everyday use**
 
-Change the README prerequisite sentence to require `jq` and `rg` for automatic
-Codex recovery. Add one concise sentence after the hotkey instructions:
+Change the README prerequisite sentence to require `jq` for automatic Codex
+recovery. Add one concise sentence after the hotkey instructions:
 
 ```markdown
 If a focused Codex pane is missing native session metadata, `prefix+m`
@@ -359,7 +359,7 @@ the Rust toggle after a failed recovery.
 
 Keep the standalone all-pane helper as an inspectable operator fallback, but
 state that ordinary `prefix+m` performs current-pane recovery automatically.
-List the remaining actionable failure classes: missing `jq`/`rg`, unreadable
+List the remaining actionable failure classes: missing `jq`, unreadable
 agent surface, ambiguous footer, ambiguous transcript match, report rejection,
 and unretained metadata. Do not instruct operators to hardcode a pane or
 session ID.

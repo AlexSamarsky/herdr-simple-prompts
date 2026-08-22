@@ -18,9 +18,9 @@ resumed after installing the Claude integration.
 ## Automatic recovery for already-running Codex panes
 
 Ordinary `prefix+m` runs fail-closed recovery for only the focused Herdr pane.
-It needs `jq` and `rg` in addition to Herdr. The action opens Simple Prompts
-only after Herdr retains the recovered id-based metadata. It never reads
-transcript contents or prints a session identifier.
+It needs `jq` in addition to Herdr. The action opens Simple Prompts only after
+Herdr retains the recovered id-based metadata. It never reads transcript
+contents or prints a session identifier.
 Herdr supplies its own executable path to the action, so the host CLI does not
 need to be present in the plugin process `PATH`.
 
@@ -59,10 +59,10 @@ Prompts uses the id-based native session metadata reported by Herdr, resolves
 the one matching local transcript, and supports both legacy `event_msg` and
 current `response_item/message` conversation records.
 
-If automatic recovery fails, confirm `jq` and `rg` are installed and read the
-plugin action diagnostic for the exact fail-closed reason listed above. The
-standalone helper is a diagnostic fallback, not a required step before ordinary
-hotkey use.
+If automatic recovery fails, confirm `jq` is installed and read the plugin
+action diagnostic for the exact fail-closed reason listed above. The standalone
+helper is a diagnostic fallback, not a required step before ordinary hotkey
+use.
 
 If the plugin action log reports `pane_not_found` for a removed Simple Prompts
 pane, press `prefix+m` again: the mapped source is validated, only the stale
