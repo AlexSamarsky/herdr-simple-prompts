@@ -12,7 +12,7 @@ command = ["cargo", "build", "--locked", "--release"]
 id = "toggle"
 title = "Toggle Simple Prompts"
 contexts = ["pane"]
-command = ["./target/release/herdr-simple-prompts", "toggle"]
+command = ["./scripts/toggle-with-session-recovery.sh"]
 
 [[panes]]
 id = "simple-prompts"

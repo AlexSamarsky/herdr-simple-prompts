@@ -12,7 +12,7 @@ fn manifest_is_source_only_and_registers_targeted_zoomed_view() {
     assert_eq!(parsed["actions"][0]["id"].as_str(), Some("toggle"));
     assert_eq!(
         strings(&parsed["actions"][0]["command"]),
-        vec!["./target/release/herdr-simple-prompts", "toggle"]
+        vec!["./scripts/toggle-with-session-recovery.sh"]
     );
     assert_eq!(parsed["panes"][0]["id"].as_str(), Some("simple-prompts"));
     assert_eq!(parsed["panes"][0]["placement"].as_str(), Some("zoomed"));
