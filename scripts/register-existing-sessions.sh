@@ -10,7 +10,7 @@ if [ "$#" -gt 0 ]; then
   target_pane="$2"
 fi
 
-herdr_bin="${HERDR_BIN:-herdr}"
+herdr_bin="${HERDR_BIN:-${HERDR_BIN_PATH:-herdr}}"
 jq_bin="${JQ_BIN:-jq}"
 rg_bin="${RG_BIN:-rg}"
 sessions_root="${CODEX_SESSIONS_ROOT:-${CODEX_HOME:-$HOME/.codex}/sessions}"

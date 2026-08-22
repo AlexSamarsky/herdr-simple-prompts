@@ -15,6 +15,9 @@ The toggle action scopes session recovery to Herdr's `HERDR_PANE_ID` action
 context before it starts the Rust toggle. An already registered pane, or the
 Simple Prompts overlay pane used while closing the view, needs no recovery and
 continues directly to the toggle. A missing action pane is an error.
+The recovery helper invokes the host CLI through Herdr's authoritative
+`HERDR_BIN_PATH`; plugin actions do not depend on `herdr` being discoverable in
+their process `PATH`.
 
 For an unregistered Codex pane, recovery reads only the final visible native
 footer and requires exactly one footer session id plus exactly one matching

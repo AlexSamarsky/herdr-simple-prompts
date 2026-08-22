@@ -21,6 +21,8 @@ Ordinary `prefix+m` runs fail-closed recovery for only the focused Herdr pane.
 It needs `jq` and `rg` in addition to Herdr. The action opens Simple Prompts
 only after Herdr retains the recovered id-based metadata. It never reads
 transcript contents or prints a session identifier.
+Herdr supplies its own executable path to the action, so the host CLI does not
+need to be present in the plugin process `PATH`.
 
 Recovery stops without opening a view when a required command is missing, the
 agent surface is unreadable, the final native footer has zero or multiple

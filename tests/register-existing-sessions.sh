@@ -13,6 +13,8 @@ report_log="$fixture_root/report.log"
 output_log="$fixture_root/output.log"
 primary_id="11111111-1111-4111-8111-111111111111"
 secondary_id="22222222-2222-4222-8222-222222222222"
+host_jq="$(command -v jq)"
+host_rg="$(command -v rg)"
 
 mkdir -p "$fake_bin" "$surface_root" "$sessions_root"
 
@@ -25,7 +27,7 @@ case "${1:-} ${2:-}" in
     cat "$FAKE_AGENT_LIST"
     ;;
   "agent get")
-    jq --arg pane "${3:-}" '
+    "$FAKE_JQ_BIN" --arg pane "${3:-}" '
       .result.agents[]
       | select(.pane_id == $pane)
       | {result: {agent: .}}
@@ -60,7 +62,7 @@ case "${1:-} ${2:-}" in
       esac
     done
     if [ "${FAKE_REPORT_DROP:-0}" -eq 0 ] && [ "$source" = "herdr:codex" ]; then
-      jq --arg pane "$pane" --arg source "$source" --arg session_id "$session_id" '
+      "$FAKE_JQ_BIN" --arg pane "$pane" --arg source "$source" --arg session_id "$session_id" '
         .result.agents |= map(
           if .pane_id == $pane then
             .agent_session = {
@@ -125,8 +127,29 @@ run_helper() {
     FAKE_REPORT_LOG="$report_log" \
     FAKE_REPORT_FAIL="${FAKE_REPORT_FAIL:-0}" \
     FAKE_REPORT_DROP="${FAKE_REPORT_DROP:-0}" \
+    FAKE_JQ_BIN="$host_jq" \
     CODEX_SESSIONS_ROOT="$sessions_root" \
     bash "$repo_root/scripts/register-existing-sessions.sh" "$@" \
+      >"$output_log" 2>&1
+  RUN_STATUS=$?
+  set -e
+}
+
+run_helper_with_managed_bin() {
+  set +e
+  env -u HERDR_BIN \
+    PATH="/usr/bin:/bin" \
+    HERDR_BIN_PATH="$fake_bin/herdr" \
+    JQ_BIN="$host_jq" \
+    RG_BIN="$host_rg" \
+    FAKE_AGENT_LIST="$agents_file" \
+    FAKE_SURFACE_ROOT="$surface_root" \
+    FAKE_REPORT_LOG="$report_log" \
+    FAKE_REPORT_FAIL="${FAKE_REPORT_FAIL:-0}" \
+    FAKE_REPORT_DROP="${FAKE_REPORT_DROP:-0}" \
+    FAKE_JQ_BIN="$host_jq" \
+    CODEX_SESSIONS_ROOT="$sessions_root" \
+    /bin/bash "$repo_root/scripts/register-existing-sessions.sh" "$@" \
       >"$output_log" 2>&1
   RUN_STATUS=$?
   set -e
@@ -165,6 +188,16 @@ rg -q -- '--source herdr:codex' "$report_log" || fail "report omitted the native
 rg -q -- '--session-start-source resume' "$report_log" || fail "report omitted resume source"
 rg -q -- "--agent-session-id $primary_id" "$report_log" || fail "report omitted recovered id"
 rg -q 'Registered w1:p1' "$output_log" || fail "success message omitted pane"
+assert_no_session_ids_in_output
+
+reset_case
+write_agents "$(unregistered_agent_json codex)"
+write_surface "w1:p1" "gpt-5.6-sol xhigh · /repo · weekly 47% left · $primary_id"
+add_transcript "managed" "$primary_id.jsonl"
+run_helper_with_managed_bin --pane "w1:p1"
+assert_status 0
+[ "$(wc -l <"$report_log" | tr -d ' ')" -eq 1 ] || fail "managed Herdr binary was not used"
+rg -q 'Registered w1:p1' "$output_log" || fail "managed Herdr binary recovery did not finish"
 assert_no_session_ids_in_output
 
 reset_case
