@@ -24,8 +24,9 @@ Newer agent releases may work, but have not yet been verified.
 
 ## Install
 
-You need Herdr 0.7.5+, Rust 1.88+ with Cargo, and either Codex CLI
-`0.146.0`–`0.148.0` or Claude Code `2.1.237`.
+You need Herdr 0.7.5+, Rust 1.88+ with Cargo, `jq`, `rg`, and either Codex CLI
+`0.146.0`–`0.148.0` or Claude Code `2.1.237`. The two command-line tools support
+automatic recovery of already-running Codex sessions.
 
 ```bash
 herdr plugin install AlexSamarsky/herdr-simple-prompts
@@ -48,6 +49,9 @@ herdr server reload-config
 
 Focus a Codex or Claude pane and press the Herdr prefix (normally `ctrl+b`)
 followed by `m`. Press it again to return to the unchanged native pane.
+If the focused Codex pane is missing native session metadata, `prefix+m`
+recovers and verifies only that pane before opening Simple Prompts. Recovery is
+fail-closed and never reads transcript contents.
 
 No binary is published: Herdr clones this source and builds it locally with
 `cargo build --locked --release`. The plugin has no network access of its own.

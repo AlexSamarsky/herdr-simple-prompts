@@ -11,6 +11,20 @@ pane and immediately fills that source tab. It uses Herdr's explicit
 different pane. Closing the view removes its temporary split and restores the
 original layout.
 
+The toggle action scopes session recovery to Herdr's `HERDR_PANE_ID` action
+context before it starts the Rust toggle. An already registered pane, or the
+Simple Prompts overlay pane used while closing the view, needs no recovery and
+continues directly to the toggle. A missing action pane is an error.
+
+For an unregistered Codex pane, recovery reads only the final visible native
+footer and requires exactly one footer session id plus exactly one matching
+local transcript filename. It never reads transcript contents. After reporting
+the candidate, it reads the Herdr agent record back and requires the same
+id-based `herdr:codex` metadata. Any ambiguity, read failure, rejected report,
+or unretained metadata stops the action before the Rust toggle can open a view.
+No other pane's surface or transcript filenames are inspected, and no other
+pane is registered by that action.
+
 The `zoomed` placement is intentional: Herdr 0.7.5 overlays target the active
 pane and reject `target_pane_id`, which would reintroduce a cross-pane focus
 race. See the [plugin pane documentation](https://herdr.dev/docs/plugins/#panes).

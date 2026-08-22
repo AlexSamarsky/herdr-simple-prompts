@@ -10,16 +10,27 @@ herdr integration install codex
 herdr integration install claude
 ```
 
-For Codex panes that were already running before the integration existed, use
-the recovery helper below.
+For a Codex pane that was already running before the integration existed, focus
+it and press `prefix+m`. The plugin recovers and verifies that pane before it
+opens Simple Prompts. A Claude pane without metadata must still be restarted or
+resumed after installing the Claude integration.
 
-## Recovering already-running Codex panes
+## Automatic recovery for already-running Codex panes
 
-Sessions started before their integration was installed may have no native
-session metadata, so the hotkey cannot target them safely. This repository ships
-an optional, fail-closed helper. It needs `jq` and `rg` in addition to Herdr.
+Ordinary `prefix+m` runs fail-closed recovery for only the focused Herdr pane.
+It needs `jq` and `rg` in addition to Herdr. The action opens Simple Prompts
+only after Herdr retains the recovered id-based metadata. It never reads
+transcript contents or prints a session identifier.
 
-Clone the exact source, read the helper, then run it:
+Recovery stops without opening a view when a required command is missing, the
+agent surface is unreadable, the final native footer has zero or multiple
+session identifiers, zero or multiple transcript filenames match, Herdr rejects
+the report, or Herdr does not retain the reported metadata. Fix the reported
+condition and press `prefix+m` again; do not hardcode a pane or session id.
+
+For bounded operator diagnostics across all currently detected panes, this
+repository keeps the same recovery logic available as a standalone fallback.
+Clone the exact source, inspect the helper, then run it without arguments:
 
 ```bash
 git clone https://github.com/AlexSamarsky/herdr-simple-prompts.git
@@ -28,12 +39,10 @@ sed -n '1,240p' scripts/register-existing-sessions.sh
 bash scripts/register-existing-sessions.sh
 ```
 
-It changes only unregistered Codex panes whose final visible footer holds one
-unambiguous session identifier with exactly one matching local transcript. It
-never reads transcript contents and never prints identifiers; registered panes
-stay untouched. Claude panes without metadata are skipped, because their session
-identifier cannot be recovered with the same guarantees - restart or resume
-those panes after installing the Claude integration.
+The fallback changes only unregistered Codex panes that meet the same strict
+checks. Registered panes stay untouched. Claude panes without metadata are
+skipped because their session identifier cannot be recovered with the same
+guarantees.
 
 ## `prefix+m` does not open Simple Prompts
 
@@ -47,6 +56,11 @@ An already registered Codex pane needs no hardcoded session identifier. Simple
 Prompts uses the id-based native session metadata reported by Herdr, resolves
 the one matching local transcript, and supports both legacy `event_msg` and
 current `response_item/message` conversation records.
+
+If automatic recovery fails, confirm `jq` and `rg` are installed and read the
+plugin action diagnostic for the exact fail-closed reason listed above. The
+standalone helper is a diagnostic fallback, not a required step before ordinary
+hotkey use.
 
 If the plugin action log reports `pane_not_found` for a removed Simple Prompts
 pane, press `prefix+m` again: the mapped source is validated, only the stale
